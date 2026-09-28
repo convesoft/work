@@ -49,6 +49,10 @@ jobs:
           grep -F "## [$version]" CHANGELOG.md >/dev/null
           tag="v$version"
           if git show-ref --verify --quiet "refs/tags/$tag"; then
+            if [[ "$(git cat-file -t "refs/tags/$tag")" != tag ]]; then
+              echo "$tag exists but is not an annotated tag" >&2
+              exit 1
+            fi
             test "$(git rev-list -n 1 "$tag")" = "$RELEASE_SHA"
           fi
           if [[ "$version" == *-* ]]; then npm_tag=next; prerelease=true; else npm_tag=latest; prerelease=false; fi
@@ -174,6 +178,10 @@ jobs:
         run: |
           set -euo pipefail
           if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            if [[ "$(git cat-file -t "refs/tags/$TAG")" != tag ]]; then
+              echo "$TAG exists but is not an annotated tag" >&2
+              exit 1
+            fi
             test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
           else
             git config user.name 'github-actions[bot]'
@@ -248,6 +256,17 @@ jobs:
             fi
             temporary=$(mktemp -d)
             trap 'rm -rf -- "$temporary"' EXIT
+            gh release view "$TAG" --json name,body > "$temporary/release.json"
+            node -e '
+              const fs = require("node:fs");
+              const release = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              const notes = fs.readFileSync(process.argv[2], "utf8");
+              const normalize = value => value.replace(/\r\n/g, "\n").replace(/\n+$/, "");
+              if (release.name !== process.argv[3] || typeof release.body !== "string" || normalize(release.body) !== normalize(notes)) {
+                console.error("draft release title or notes differ from this candidate");
+                process.exit(1);
+              }
+            ' "$temporary/release.json" release-notes.md "Work $VERSION"
             gh release view "$TAG" --json assets > "$temporary/assets.json"
             existing=$(node -e '
               const fs = require("node:fs");
