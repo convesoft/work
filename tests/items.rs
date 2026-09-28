@@ -142,6 +142,22 @@ fn applies_defaults_and_optional_header_fields() {
 }
 
 #[test]
+fn accepts_plain_strings_that_are_not_yaml_core_numbers() {
+    for title in ["0xNotes", "NaN", "Infinity", "1_000", "0b101", "-0x1"] {
+        let fixture = Fixture::new();
+        let content =
+            item(ID, "", "body").replace("title: \"Example\"", &format!("title: {title}"));
+        fixture.write(&format!("{ID}.md"), content);
+        let store = fixture.load();
+        assert!(store.is_valid(), "{title}: {}", errors(&store));
+        assert_eq!(
+            store.resolve(ID).unwrap().header.as_ref().unwrap().title,
+            title
+        );
+    }
+}
+
+#[test]
 fn resolves_only_unambiguous_prefixes() {
     let fixture = Fixture::new();
     fixture.write(&format!("{ID}.md"), item(ID, "", ""));
@@ -170,6 +186,8 @@ fn reports_invalid_headers_and_retains_original_file_for_inspection() {
         ("id: 123", "id must be a string"),
         ("id: \"d66b0ba51d2c3a7aa15de40cb3c9d507\"", "UUIDv4"),
         ("title: 123", "title must be a string"),
+        ("title: 0xFF", "title must be a string"),
+        ("title: .nan", "title must be a string"),
         ("title: \" \"", "nonblank"),
         ("state: null", "state must be a string"),
         ("priority: \"2\"", "priority must be an integer"),

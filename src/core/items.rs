@@ -357,21 +357,21 @@ fn parse_node(
             {
                 return Ok(Node::OtherScalar);
             }
-            if let Ok(integer) = value.parse::<i64>() {
-                if json_integer(value) {
+            if core_decimal_integer(value) {
+                if json_integer(value)
+                    && let Ok(integer) = value.parse::<i64>()
+                {
                     return Ok(Node::Integer(integer));
                 }
                 return Ok(Node::OtherScalar);
             }
-            if value.parse::<f64>().is_ok()
-                || (value.contains('_') && value.replace('_', "").parse::<f64>().is_ok())
-                || value.starts_with("0x")
-                || value.starts_with("0o")
-                || value.starts_with("0b")
-                || matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    ".nan" | ".inf" | "-.inf" | "+.inf"
-                )
+            if core_float(value)
+                || value.strip_prefix("0x").is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                || value.strip_prefix("0o").is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|byte| matches!(byte, b'0'..=b'7'))
+                })
             {
                 return Ok(Node::OtherScalar);
             }
@@ -419,6 +419,39 @@ fn json_integer(value: &str) -> bool {
     !unsigned.is_empty()
         && (unsigned == "0"
             || (!unsigned.starts_with('0') && unsigned.bytes().all(|byte| byte.is_ascii_digit())))
+}
+
+fn core_decimal_integer(value: &str) -> bool {
+    let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
+    !unsigned.is_empty() && unsigned.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn core_float(value: &str) -> bool {
+    let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
+    if matches!(unsigned, ".inf" | ".Inf" | ".INF") {
+        return true;
+    }
+    if matches!(value, ".nan" | ".NaN" | ".NAN") {
+        return true;
+    }
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(index) => (&unsigned[..index], Some(&unsigned[index + 1..])),
+        None => (unsigned, None),
+    };
+    if let Some(exponent) = exponent {
+        let digits = exponent.strip_prefix(['-', '+']).unwrap_or(exponent);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+    }
+    let Some((whole, fractional)) = mantissa.split_once('.') else {
+        return exponent.is_some()
+            && !mantissa.is_empty()
+            && mantissa.bytes().all(|byte| byte.is_ascii_digit());
+    };
+    ((!whole.is_empty() && whole.bytes().all(|byte| byte.is_ascii_digit()))
+        || (whole.is_empty() && !fractional.is_empty()))
+        && fractional.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn decode_header(node: Node) -> Result<ItemHeader, String> {
