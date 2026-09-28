@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 description = "Local, agent-first issue tracker"
 
+[dependencies]
+yaml-rust2 = "0.10.4"
+
 [lib]
 name = "work"
 path = "src/lib.rs"
