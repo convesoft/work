@@ -18,7 +18,7 @@ The file contract is [DES-ITEM-FORMAT](../docs/item-format.mara.md); the [JSON S
 | 7 | [w-e1121992](items/e1121992e0574b4b9b163b85e17ec601.md) | Verify bootstrap adoption and document the first usable loop |
 | Release | [w-74c22e40](items/74c22e40cbc249229f86e355a663a942.md) | Prepare and verify the first alpha after the aggregate completes |
 
-The seven manual tasks form a dependency chain under the aggregate. Initially, only **w-87b8795f** is graph-ready. This is not a claim or an assertion that execution has started. This table is a navigation aid; item files own state and relationships.
+The seven manual tasks form a dependency chain under the aggregate. This table is a navigation aid; item files own state and relationships and determine which task is next in the chain.
 
 The release item is a separate manual item depending on the aggregate. It owns the release candidate and generated changelog. The first feature branch owns the initial workflow files. See [delivery conventions](../docs/delivery.mara.md).
 
@@ -37,4 +37,4 @@ During bootstrap, serialize manual ownership through the controlling session; th
 
 This batch delivers the durable-item graph loop through CLI and MCP. Later slices cover coordination, templates/runs, sessions/workspaces, handoffs, and finalization. They remain part of the product scope in Mara but are not expanded into speculative tickets here.
 
-The prepared Git baseline preceded feature work. The first implementation issue establishes the Rust foundation and initial workflows; it remains open until acceptance passes and the change merges. The generated changelog belongs to the separate release item.
+The prepared Git baseline preceded feature work. The first implementation issue established the Rust foundation and initial workflows. The generated changelog belongs to the separate release item.
