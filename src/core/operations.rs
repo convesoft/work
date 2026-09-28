@@ -3,6 +3,7 @@
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{CWD, FlockOperation, Mode, OFlags, RenameFlags, flock, openat, renameat_with};
@@ -145,14 +146,40 @@ impl DurableOperations {
             .iter()
             .find(|f| f.path == self.item_path(id))
             .ok_or_else(|| OperationError::NotFound(id.into()))?;
+        let graph_before = ItemGraph::from_store(&store);
+        if original.is_valid()
+            && !graph_before
+                .diagnostics()
+                .iter()
+                .any(|d| d.path == original.path)
+        {
+            return Err(OperationError::InvalidArgument(
+                "item has no source or graph diagnostic to repair".into(),
+            ));
+        }
         let candidate = parse_candidate(original.path.clone(), raw.clone());
         if !candidate.is_valid() {
-            return Err(OperationError::InvalidCandidate(candidate.diagnostics));
+            return Err(OperationError::InvalidArgument(
+                candidate
+                    .diagnostics
+                    .iter()
+                    .map(|d| d.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
         }
-        if ItemGraph::from_store(&store).is_valid() {
-            require_candidate(&candidate_store(&store, &original.path, raw.clone())?)?;
+        let candidate_store = candidate_store(&store, &original.path, raw.clone())?;
+        let graph_after = ItemGraph::from_store(&candidate_store);
+        let new_diagnostics: Vec<_> = graph_after
+            .diagnostics()
+            .iter()
+            .filter(|d| !graph_before.diagnostics().contains(d))
+            .cloned()
+            .collect();
+        if !new_diagnostics.is_empty() {
+            return Err(OperationError::InvalidCandidate(new_diagnostics));
         }
-        let staged = self.stage(&raw)?;
+        let staged = self.stage_with_mode(&raw, Some(source_mode(&original.path)?))?;
         if let Err(error) = self.check_snapshot(&store) {
             let _ = fs::remove_file(&staged);
             return Err(error);
@@ -393,7 +420,7 @@ impl DurableOperations {
         let raw = serialize(&header, source.body.as_deref().expect("valid store body"));
         let candidate = candidate_store(&store, &source.path, raw.clone())?;
         require_candidate(&candidate)?;
-        let staged = self.stage(&raw)?;
+        let staged = self.stage_with_mode(&raw, Some(source_mode(&source.path)?))?;
         if let Err(error) = before_publish() {
             let _ = fs::remove_file(&staged);
             return Err(error);
@@ -441,14 +468,28 @@ impl DurableOperations {
         Ok(file)
     }
     fn stage(&self, raw: &[u8]) -> Result<PathBuf, OperationError> {
+        self.stage_with_mode(raw, None)
+    }
+    fn stage_with_mode(&self, raw: &[u8], mode: Option<u32>) -> Result<PathBuf, OperationError> {
         for _ in 0..16 {
             let path = self
                 .root
                 .join(".work/items")
                 .join(format!(".operation-{}", new_id()?));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
                 Ok(mut file) => {
-                    if let Err(error) = file.write_all(raw).and_then(|_| file.sync_all()) {
+                    let result = file.write_all(raw).and_then(|_| {
+                        if let Some(mode) = mode {
+                            file.set_permissions(fs::Permissions::from_mode(mode))?;
+                        }
+                        file.sync_all()
+                    });
+                    if let Err(error) = result {
                         drop(file);
                         let _ = fs::remove_file(path);
                         return Err(OperationError::Io(error));
@@ -526,11 +567,11 @@ impl DurableOperations {
                 "publication conflict; rollback failed: {e}"
             )))
         })?;
-        let _ = fs::remove_file(staged);
         self.sync_items()?;
-        Err(OperationError::Conflict(
-            "items changed during publication".into(),
-        ))
+        Err(OperationError::Conflict(format!(
+            "items changed during publication; recovery copy retained at {}",
+            staged.display()
+        )))
     }
     fn sync_items(&self) -> Result<(), OperationError> {
         File::open(self.root.join(".work/items"))?.sync_all()?;
@@ -592,6 +633,16 @@ fn candidate_store(
 ) -> Result<ItemStore, OperationError> {
     let mut candidate = store.clone();
     let parsed = parse_candidate(path.into(), raw);
+    if !parsed.is_valid() {
+        return Err(OperationError::InvalidArgument(
+            parsed
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
     if let Some(file) = candidate.files.iter_mut().find(|f| f.path == path) {
         *file = parsed;
     } else {
@@ -734,6 +785,15 @@ fn valid_id(value: &str) -> bool {
         && b[12] == b'4'
         && matches!(b[16], b'8' | b'9' | b'a' | b'b')
 }
+fn source_mode(path: &Path) -> Result<u32, OperationError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(OperationError::Conflict(
+            "item path changed before staging".into(),
+        ));
+    }
+    Ok(metadata.permissions().mode() & 0o777)
+}
 fn new_id() -> Result<String, OperationError> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -829,7 +889,7 @@ mod tests {
             Err(OperationError::Conflict(_))
         ));
         assert_eq!(fs::read(&path).unwrap(), external);
-        assert_eq!(staged_count(&root), 0);
+        assert_eq!(staged_count(&root), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

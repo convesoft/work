@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -150,7 +151,7 @@ fn rejected_cycle_and_bad_metadata_preserve_original_files() {
                 ..Default::default()
             }
         ),
-        Err(OperationError::InvalidCandidate(_))
+        Err(OperationError::InvalidArgument(_))
     ));
     assert_eq!(fs::read(f.path(&id(1))).unwrap(), originals[0]);
     assert_eq!(fs::read(f.path(&id(2))).unwrap(), originals[1]);
@@ -188,7 +189,7 @@ fn invalid_graph_can_be_inspected_and_repaired_explicitly() {
 }
 
 #[test]
-fn repair_does_not_invalidate_a_healthy_graph() {
+fn repair_rejects_a_healthy_item() {
     let f = Fixture::new();
     f.write(1, "", b"Body");
     let ops = f.ops();
@@ -200,9 +201,71 @@ fn repair_does_not_invalidate_a_healthy_graph() {
     );
     assert!(matches!(
         ops.repair(&id(1), replacement.into_bytes()),
+        Err(OperationError::InvalidArgument(_))
+    ));
+    assert_eq!(fs::read(f.path(&id(1))).unwrap(), original);
+}
+
+#[test]
+fn repair_cannot_add_graph_errors_to_an_invalid_view() {
+    let f = Fixture::new();
+    f.write(1, &format!("depends_on: [\"{}\"]\n", id(3)), b"Body");
+    let ops = f.ops();
+    let original = fs::read(f.path(&id(1))).unwrap();
+    let replacement = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Different bad edge\nstate: open\ndepends_on: [\"{}\"]\n---\nBody",
+        id(1),
+        id(4)
+    );
+    assert!(matches!(
+        ops.repair(&id(1), replacement.into_bytes()),
         Err(OperationError::InvalidCandidate(_))
     ));
     assert_eq!(fs::read(f.path(&id(1))).unwrap(), original);
+}
+
+#[test]
+fn invalid_supplied_fields_return_invalid_argument_without_writes() {
+    let f = Fixture::new();
+    f.write(1, "", b"Body");
+    let ops = f.ops();
+    let original = fs::read(f.path(&id(1))).unwrap();
+    assert!(matches!(
+        ops.update(
+            &id(1),
+            MetadataChange {
+                priority: Some(5),
+                ..Default::default()
+            }
+        ),
+        Err(OperationError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        ops.close(&id(1), Some(" ".into())),
+        Err(OperationError::InvalidArgument(_))
+    ));
+    assert_eq!(fs::read(f.path(&id(1))).unwrap(), original);
+}
+
+#[test]
+fn replacement_preserves_restrictive_file_mode() {
+    let f = Fixture::new();
+    f.write(1, "", b"private body");
+    let path = f.path(&id(1));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    f.ops()
+        .update(
+            &id(1),
+            MetadataChange {
+                title: Some("Updated".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[test]
