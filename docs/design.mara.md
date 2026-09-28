@@ -209,3 +209,26 @@ Sharing records does not lock the underlying filesystem: item claims exclude com
 
 An ordinary cleanup item identifies the workspace to remove and follows the actual users of that workspace. Its external executor retains required results, performs the worktree removal, and supplies the outcome. Successful removal permits operational record/association cleanup; failure preserves retry context. Entering cleanup checks that no existing work still needs the workspace and records a closing flag that rejects new assignments to it. This guard is limited to cleanup, not general resource locking. Failed removal preserves the workspace record and retry context. The cleanup executor operates from a surviving control checkout; the target being removed is distinct from its execution workspace. Cleanup-target serialization and crash recovery after physical removal but before outcome recording remain engineering specifications.
 :::
+
+:::mara design DES-DURABLE-OPERATIONS
+:mid: 01M3MM0BYYWHQQ1F76144EP45D
+:title: Publish safe shared durable item operations
+:status: accepted
+:kind: interface
+:satisfies: REQ-LOCAL-STATE
+:satisfies: REQ-OPAQUE-BODIES
+:satisfies: REQ-GRAPH-INTEGRITY
+:satisfies: REQ-EXTERNAL-EXECUTION
+
+The shared durable operation layer accepts a selected checkout root and returns typed outcomes independent of CLI/MCP presentation. All item references at this layer are full canonical IDs; adapters may resolve displayed abbreviations before calling it.
+
+- `create(title, body, metadata)` returns the created item and its graph evaluation. Generate a UUIDv4 ID, publish only to `.work/items/<id>.md`, and retry an ID collision without replacing the existing entry.
+- `inspect(id)` returns the parsed header, verbatim body bytes, source path, direct relationships including derived reverse views, and effective completion/readiness when the graph is valid. `list` returns deterministic canonical-ID-ordered inspections. `inspect_raw(id)` returns the original source and diagnostics even when the item header or selected graph is invalid.
+- `update(id, metadata)` replaces only explicitly supplied mutable header fields and returns the resulting item. Identity and body are immutable in this operation.
+- `relation_add/remove(source, kind, target)` accepts `parent`, `depends_on`, `related`, or `discovered_from`; stores one full-ID assertion, returns the affected item and resulting direct relationships, and rejects duplicate/missing edges. A parent edge is authored on the child. Symmetric `related` is stored at one endpoint only.
+- `close(id, reason?)` records `done` on a manual item and an optional opaque nonblank single-line reason. `reopen(id)` records `open` and removes any reason. Neither operation writes state on an aggregate, cascades manual state to other items, acquires a claim, or performs external execution.
+
+A successful mutation publishes one durable file and yields the reloaded selected graph and item, so its result reflects the published state. Validate candidate source and the complete candidate graph before publication. Reject a structured graph mutation against an invalid selected graph. `repair(id, replacement_source)` explicitly replaces one invalid file with a valid version-1 document bearing the same ID; it may leave other graph errors for later repairs. Preserve prior file content on rejection. Use a same-directory staged file, sync it, check that the target still matches the bytes read, and use recoverable replacement; creation uses exclusive no-overwrite publication. A conflicting disk change fails rather than overwriting it. One-file publication does not imply atomicity across multiple files or with SQLite.
+
+Shared failures have stable categories: `invalid_argument` (field or relation contract), `not_found`, `already_exists` (duplicate edge or ID), `invalid_source` (malformed or invalid existing graph, with diagnostics), `invalid_candidate` (candidate graph diagnostics), `conflict` (changed-on-disk source or competing publication), and `io` (read, staging, sync, or publication failure). Errors carry a machine-readable category and human message; diagnostic failures also carry source diagnostics. Prepublication rejection leaves live files intact. An I/O failure after the atomic name exchange may have published the new file; callers must inspect the file before retrying. Adapters map these categories to their transport envelopes without changing semantics.
+:::

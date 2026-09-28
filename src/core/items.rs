@@ -113,7 +113,7 @@ impl ItemStore {
         for entry in Dir::read_from(items_fd).map_err(io::Error::from)? {
             let entry = entry.map_err(io::Error::from)?;
             let name = entry.file_name().to_bytes();
-            if name != b"." && name != b".." {
+            if name != b"." && name != b".." && !name.starts_with(b".operation-") {
                 names.push(OsString::from_vec(name.to_vec()));
             }
         }
@@ -195,24 +195,31 @@ fn open_real_subdirectory(parent: &OwnedFd, name: &str, flags: OFlags) -> io::Re
 }
 
 fn load_file(path: PathBuf, directory: &OwnedFd, name: &OsStr) -> ItemFile {
+    match read_regular_item(directory, name) {
+        Ok(raw) => parse_candidate(path, raw),
+        Err(message) => ItemFile {
+            path: path.clone(),
+            raw: Vec::new(),
+            header: None,
+            body: None,
+            diagnostics: vec![Diagnostic {
+                path,
+                line: None,
+                message,
+            }],
+        },
+    }
+}
+
+/// Parse candidate bytes with the same framing and header rules as a loaded file.
+pub(crate) fn parse_candidate(path: PathBuf, raw: Vec<u8>) -> ItemFile {
     let mut file = ItemFile {
         path: path.clone(),
-        raw: Vec::new(),
+        raw,
         header: None,
         body: None,
         diagnostics: Vec::new(),
     };
-    match read_regular_item(directory, name) {
-        Ok(raw) => file.raw = raw,
-        Err(message) => {
-            file.diagnostics.push(Diagnostic {
-                path,
-                line: None,
-                message,
-            });
-            return file;
-        }
-    }
     match parse_file(&file.raw, &path) {
         Ok((header, body)) => {
             let expected_name = format!("{}.md", header.id);
