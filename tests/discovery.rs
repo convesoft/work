@@ -152,3 +152,26 @@ fn cli_discovery_outputs_distinct_single_line_values_for_unusual_paths() {
     }
     assert_ne!(outputs[0], outputs[1]);
 }
+
+#[test]
+fn explicit_nested_selection_ignores_inherited_git_ceiling() {
+    let fixture = Fixture::new();
+    let checkout = fixture.0.join("checkout");
+    let nested = checkout.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fixture.git(&checkout, &["init", "--initial-branch=main"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_work"))
+        .arg("discover")
+        .arg(&nested)
+        .env("GIT_CEILING_DIRECTORIES", &checkout)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(&format!("worktree_root={}\n", checkout.display())));
+}

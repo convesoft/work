@@ -75,6 +75,7 @@ fn git_query(path: &Path, args: &[&str]) -> Result<Vec<u8>, DiscoveryError> {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_CEILING_DIRECTORIES")
         .arg("-C")
         .arg(path)
         .arg("rev-parse")
