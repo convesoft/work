@@ -1,0 +1,64 @@
+# Request-local checks: select roots explicitly. This file is not enabled policy.
+# Selected-revision execution is in engineering-execution.yaml.
+- id: rule:check_accepted
+  property: [{path: status, hasValue: accepted}]
+
+- id: rule:intent
+  class: requirement
+  node: rule:check_accepted
+  or:
+    - property:
+        - path: contributes_to
+          qualifiedValueShape: {class: goal, node: rule:check_accepted}
+          qualifiedMinCount: 1
+    - property:
+        - path: derives_from
+          qualifiedValueShape: {node: rule:check_accepted}
+          qualifiedMinCount: 1
+    - property:
+        - path: refines
+          qualifiedValueShape: {class: requirement, node: rule:check_accepted}
+          qualifiedMinCount: 1
+    - property: [{path: sourced_from, minCount: 1}]
+
+- id: rule:realization
+  node: rule:check_accepted
+  or: [{class: requirement}, {class: design}]
+  and:
+    - or:
+        - node: rule:direct_realization
+        - class: requirement
+          property:
+            - path: {inversePath: satisfies}
+              qualifiedValueShape:
+                class: design
+                node: rule:check_accepted
+                and: [rule:direct_realization]
+              qualifiedMinCount: 1
+
+- id: rule:direct_realization
+  or:
+    - property: [{path: {inversePath: implements}, minCount: 1}]
+    - property:
+        - path: {inversePath: realizes}
+          qualifiedValueShape: {class: artifact, node: rule:check_accepted}
+          qualifiedMinCount: 1
+
+- id: rule:verification
+  node: rule:check_accepted
+  or: [{class: requirement}, {class: design}]
+  and:
+    - or:
+        - property:
+            - path: {inversePath: verifies}
+              qualifiedValueShape: {class: verification, node: rule:check_accepted}
+              qualifiedMinCount: 1
+        - property: [{path: {inversePath: checks}, minCount: 1}]
+
+- id: rule:validation
+  node: rule:check_accepted
+  or: [{class: goal}, {class: scenario}]
+  property:
+    - path: {inversePath: validates}
+      qualifiedValueShape: {class: verification, node: rule:check_accepted}
+      qualifiedMinCount: 1

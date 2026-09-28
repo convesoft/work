@@ -1,0 +1,18 @@
+# Request-local execution check. Supply subject_revision as an exact text parameter.
+# Kept separate so the other engineering checks need no revision binding.
+- id: rule:execution
+  class: verification
+  property:
+    - path: status
+      hasValue: accepted
+    - path: {inversePath: evidences}
+      qualifiedValueShape:
+        class: evidence
+        property:
+          - path: status
+            hasValue: accepted
+          - path: result
+            hasValue: passed
+          - path: subject_revision
+            hasValue: {parameter: subject_revision}
+      qualifiedMinCount: 1

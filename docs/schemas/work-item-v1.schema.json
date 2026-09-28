@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Work item frontmatter, version 1",
+  "description": "Header shape only; DES-ITEM-FORMAT also governs file framing, source preservation, and graph semantics.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "id",
+    "title"
+  ],
+  "properties": {
+    "format_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/id"
+    },
+    "title": {
+      "$ref": "#/$defs/line"
+    },
+    "completion": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "children"
+      ],
+      "default": "manual"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "open",
+        "done"
+      ]
+    },
+    "priority": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "default": 2
+    },
+    "parent": {
+      "$ref": "#/$defs/id"
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/id"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "related": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/id"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "discovered_from": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/id"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/line"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "model": {
+      "$ref": "#/$defs/line"
+    },
+    "thinking": {
+      "$ref": "#/$defs/line"
+    },
+    "close_reason": {
+      "$ref": "#/$defs/line"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "completion"
+        ],
+        "properties": {
+          "completion": {
+            "const": "children"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "required": [
+                "close_reason"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "state"
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "close_reason"
+        ]
+      },
+      "then": {
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "done"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "line": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "not": {
+        "pattern": "[\\r\\n]"
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+# Rust build output; Cargo.lock will be committed for the executable.
+/target/
+/dist/
+
+# Mara local mutation coordination; schema and authored knowledge are tracked.
+/.mara/mutation.lock
+/.mara/transaction/
+
+# Local secrets and editor/OS scratch files.
+.env
+.env.*
+!.env.example
+*.swp
+*.swo
+.DS_Store

@@ -1,0 +1,121 @@
+# Enabled policies concern accepted knowledge. Drafts may have coverage gaps.
+- id: rule:accepted
+  property: [{path: status, hasValue: accepted}]
+
+- id: rule:scenario
+  targetClass: scenario
+  whenShape: rule:accepted
+  property:
+    - path: contributes_to
+      qualifiedValueShape: {class: goal, node: rule:accepted}
+      qualifiedMinCount: 1
+
+- id: rule:requirement
+  targetClass: requirement
+  whenShape: rule:accepted
+  property: [{path: kind, minCount: 1}]
+  and: [rule:origin, rule:verification_definition]
+
+- id: rule:origin
+  or:
+    - property:
+        - path: contributes_to
+          qualifiedValueShape: {class: goal, node: rule:accepted}
+          qualifiedMinCount: 1
+    - property:
+        - path: derives_from
+          qualifiedValueShape: {node: rule:accepted}
+          qualifiedMinCount: 1
+    - property:
+        - path: refines
+          qualifiedValueShape: {class: requirement, node: rule:accepted}
+          qualifiedMinCount: 1
+    - property: [{path: sourced_from, minCount: 1}]
+
+- id: rule:verification_definition
+  or:
+    - property:
+        - path: {inversePath: verifies}
+          qualifiedValueShape: {class: verification, node: rule:accepted}
+          qualifiedMinCount: 1
+    - property: [{path: {inversePath: checks}, minCount: 1}]
+
+- id: rule:design
+  targetClass: design
+  whenShape: rule:accepted
+  property: [{path: kind, minCount: 1}]
+  or:
+    - property:
+        - path: satisfies
+          qualifiedValueShape: {class: requirement, node: rule:accepted}
+          qualifiedMinCount: 1
+    - property:
+        - path: refines
+          qualifiedValueShape: {class: design, node: rule:accepted}
+          qualifiedMinCount: 1
+
+- id: rule:decision
+  targetClass: decision
+  whenShape: rule:accepted
+  property:
+    - path: justifies
+      qualifiedValueShape: {node: rule:accepted}
+      qualifiedMinCount: 1
+
+- id: rule:verification
+  targetClass: verification
+  whenShape: rule:accepted
+  property: [{path: method, minCount: 1}]
+  or:
+    - property:
+        - path: verifies
+          qualifiedValueShape: {node: rule:accepted}
+          qualifiedMinCount: 1
+    - property:
+        - path: validates
+          qualifiedValueShape: {node: rule:accepted}
+          qualifiedMinCount: 1
+  and:
+    - or:
+        - property: [{path: level, maxCount: 0}]
+        - property: [{path: method, hasValue: test}]
+
+- id: rule:evidence
+  targetClass: evidence
+  whenShape: rule:accepted
+  property:
+    - path: result
+      minCount: 1
+    - path: captured_at
+      minCount: 1
+      pattern: '\S'
+    - path: subject_revision
+      minCount: 1
+      pattern: '\S'
+    - path: evidences
+      qualifiedValueShape: {class: verification, node: rule:accepted}
+      qualifiedMinCount: 1
+
+- id: rule:risk
+  targetClass: risk
+  whenShape: rule:accepted
+  property:
+    - path: treatment
+      minCount: 1
+    - path: affects
+      qualifiedValueShape: {node: rule:accepted}
+      qualifiedMinCount: 1
+  or:
+    - property: [{path: treatment, hasValue: open}]
+    - property:
+        - path: treatment
+          hasValue: mitigated
+        - path: {inversePath: mitigates}
+          qualifiedValueShape: {node: rule:accepted}
+          qualifiedMinCount: 1
+    - property:
+        - path: treatment
+          hasValue: tolerated
+        - path: {inversePath: justifies}
+          qualifiedValueShape: {class: decision, node: rule:accepted}
+          qualifiedMinCount: 1
