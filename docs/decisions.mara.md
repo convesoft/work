@@ -79,3 +79,21 @@ Consequences: readiness must distinguish inherited explicit prerequisites from i
 
 Use @convesoft/work as the npm dispatcher and @convesoft/work-linux-x64-gnu, @convesoft/work-linux-arm64-gnu, and @convesoft/work-darwin-arm64 as native packages. Support x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, and aarch64-apple-darwin, matching Mara’s supported target platforms. npm trusted publishing identifies the convesoft/work GitHub repository and release.yml workflow without an npm environment-name restriction. GitHub release-environment protection is a separate required setting. Package identity and host choices are settled; the first release version, license, registry trust configuration, and GitHub environment configuration still require explicit confirmation before publication.
 :::
+
+:::mara decision ADR-PETGRAPH
+:mid: 01M3MCB75WXQ4DMMVAE4B2AJQ9
+:title: Use petgraph for internal graph algorithms
+:status: accepted
+:justifies: DES-RELATION-MODEL
+:justifies: DES-LIFECYCLE
+
+Decision: use the Rust petgraph library for Work's internal graph representation, traversal, and cycle detection, following the same library choice as Mara. Start from Mara's dependency configuration: `petgraph = { version = "0.8.3", default-features = false, features = ["std"] }`. This is the initial dependency baseline, not a permanent version or public-format constraint; Cargo.lock records the resolved version.
+
+Rationale: reuse established graph structures and algorithms rather than implementing generic traversal and cycle detection ourselves. Consistency with Mara provides a familiar implementation reference without making Work depend on Mara's product-specific graph model.
+
+Boundaries: keep canonical Work item IDs separate from petgraph node and edge indices. Those indices are internal, disposable implementation details and must not become persisted identities or CLI/MCP identifiers. Authoritative item files and their relationships remain governed by the existing storage and item-format contracts.
+
+Work retains its own evaluator for readiness, inherited prerequisites, manual-parent execution, aggregate completion, and explanations. Construct lifecycle checks from those semantics; do not treat every stored relationship as an ordinary blocking edge. Informational `related` and `discovered_from` relationships remain available for navigation but are excluded from lifecycle cycle/deadlock checks. Generic library algorithms alone do not establish correct Work scheduling.
+
+Consequences: petgraph supplies graph mechanics, while Work owns semantic-edge normalization and deterministic user-visible ordering. The exact graph type and in-memory layout remain implementation choices. Recording this decision does not add the dependency or claim that graph behavior is implemented.
+:::
