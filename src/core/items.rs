@@ -3,12 +3,14 @@
 //! Every Markdown file remains in `ItemStore::files`, including malformed ones.
 //! Consumers can inspect its original bytes and diagnostics before repairing it.
 
+use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, openat, statat};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs;
-use std::fs::OpenOptions;
+use std::fs::File;
 use std::io::{self, Read};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser, Tag};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
@@ -98,17 +100,28 @@ impl ItemStore {
 
     /// Useful for isolated copies of the authored backlog.
     pub fn load_from_root(root: &Path) -> std::io::Result<Self> {
-        let work_dir = root.join(".work");
-        require_real_directory(&work_dir)?;
-        let dir = work_dir.join("items");
-        require_real_directory(&dir)?;
-        let mut paths = Vec::new();
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            paths.push(entry.path());
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let root_fd = openat(CWD, root, directory_flags, Mode::empty()).map_err(io::Error::from)?;
+        let work_fd = open_real_subdirectory(&root_fd, ".work", directory_flags)?;
+        let items_fd = open_real_subdirectory(&work_fd, "items", directory_flags)?;
+        Self::load_from_open_items(&items_fd, &root.join(".work/items"))
+    }
+
+    fn load_from_open_items(items_fd: &OwnedFd, dir_path: &Path) -> io::Result<Self> {
+        let mut names = Vec::new();
+        for entry in Dir::read_from(items_fd).map_err(io::Error::from)? {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = entry.file_name().to_bytes();
+            if name != b"." && name != b".." {
+                names.push(OsString::from_vec(name.to_vec()));
+            }
         }
-        paths.sort();
-        let mut files: Vec<_> = paths.into_iter().map(load_file).collect();
+        names.sort();
+        let mut files: Vec<_> = names
+            .into_iter()
+            .map(|name| load_file(dir_path.join(&name), items_fd, &name))
+            .collect();
         let mut by_id: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (index, file) in files.iter().enumerate() {
             if let Some(header) = &file.header {
@@ -172,18 +185,16 @@ impl ItemStore {
     }
 }
 
-fn require_real_directory(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path)?.file_type().is_dir() {
-        Ok(())
-    } else {
-        Err(io::Error::new(
+fn open_real_subdirectory(parent: &OwnedFd, name: &str, flags: OFlags) -> io::Result<OwnedFd> {
+    openat(parent, name, flags, Mode::empty()).map_err(|error| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{} must be a real directory", path.display()),
-        ))
-    }
+            format!("{name} must be a real directory: {error}"),
+        )
+    })
 }
 
-fn load_file(path: PathBuf) -> ItemFile {
+fn load_file(path: PathBuf, directory: &OwnedFd, name: &OsStr) -> ItemFile {
     let mut file = ItemFile {
         path: path.clone(),
         raw: Vec::new(),
@@ -191,7 +202,7 @@ fn load_file(path: PathBuf) -> ItemFile {
         body: None,
         diagnostics: Vec::new(),
     };
-    match read_regular_item(&path) {
+    match read_regular_item(directory, name) {
         Ok(raw) => file.raw = raw,
         Err(message) => {
             file.diagnostics.push(Diagnostic {
@@ -227,23 +238,27 @@ fn load_file(path: PathBuf) -> ItemFile {
     file
 }
 
-fn read_regular_item(path: &Path) -> Result<Vec<u8>, String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect item: {error}"))?;
-    if metadata.file_type().is_symlink() {
+fn read_regular_item(directory: &OwnedFd, name: &OsStr) -> Result<Vec<u8>, String> {
+    let metadata = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|error| format!("cannot inspect item: {error}"))?;
+    let file_type = FileType::from_raw_mode(metadata.st_mode);
+    if file_type == FileType::Symlink {
         return Err("item path must not be a symlink".into());
     }
-    if !metadata.file_type().is_file() {
+    if file_type != FileType::RegularFile {
         return Err("item path must be a regular file".into());
     }
-    // Recheck the opened object: a directory entry can change after metadata
-    // inspection. O_NOFOLLOW rejects a replacement symlink, and O_NONBLOCK
+    // Hold the same directory through enumeration and reads. O_NOFOLLOW
+    // rejects an entry replaced with a symlink after statat; O_NONBLOCK
     // prevents a replacement FIFO from blocking the loader during open.
-    let mut source = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| format!("cannot open regular item without following links: {error}"))?;
+    let source = openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| format!("cannot open regular item without following links: {error}"))?;
+    let mut source = File::from(source);
     if !source
         .metadata()
         .map_err(|error| format!("cannot inspect opened item: {error}"))?
@@ -737,4 +752,53 @@ fn line_list(fields: &mut BTreeMap<String, Node>, key: &str) -> Result<Vec<Strin
         result.push(value);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn reads_from_held_directory_after_path_is_replaced() {
+        let root = std::env::temp_dir().join(format!(
+            "work-held-items-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let items_path = root.join(".work/items");
+        let outside_path = root.join("outside");
+        fs::create_dir_all(&items_path).unwrap();
+        fs::create_dir(&outside_path).unwrap();
+        let id = "d66b0ba51d2c4a7aa15de40cb3c9d507";
+        let document = |body: &str| {
+            format!(
+                "---\nformat_version: 1\nid: \"{id}\"\ntitle: Example\nstate: open\n---\n{body}"
+            )
+        };
+        fs::write(items_path.join(format!("{id}.md")), document("original")).unwrap();
+        fs::write(outside_path.join(format!("{id}.md")), document("outside")).unwrap();
+
+        let directory = openat(
+            CWD,
+            &items_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .unwrap();
+        fs::rename(&items_path, root.join(".work/held")).unwrap();
+        symlink(&outside_path, &items_path).unwrap();
+
+        let store = ItemStore::load_from_open_items(&directory, &items_path).unwrap();
+        assert!(store.is_valid());
+        assert_eq!(
+            store.resolve(id).unwrap().body.as_deref(),
+            Some(&b"original"[..])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
