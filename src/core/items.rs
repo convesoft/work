@@ -6,6 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::{self, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser, Tag};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
@@ -95,7 +98,10 @@ impl ItemStore {
 
     /// Useful for isolated copies of the authored backlog.
     pub fn load_from_root(root: &Path) -> std::io::Result<Self> {
-        let dir = root.join(".work/items");
+        let work_dir = root.join(".work");
+        require_real_directory(&work_dir)?;
+        let dir = work_dir.join("items");
+        require_real_directory(&dir)?;
         let mut paths = Vec::new();
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -166,6 +172,17 @@ impl ItemStore {
     }
 }
 
+fn require_real_directory(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.file_type().is_dir() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} must be a real directory", path.display()),
+        ))
+    }
+}
+
 fn load_file(path: PathBuf) -> ItemFile {
     let mut file = ItemFile {
         path: path.clone(),
@@ -174,13 +191,13 @@ fn load_file(path: PathBuf) -> ItemFile {
         body: None,
         diagnostics: Vec::new(),
     };
-    match fs::read(&path) {
+    match read_regular_item(&path) {
         Ok(raw) => file.raw = raw,
-        Err(error) => {
+        Err(message) => {
             file.diagnostics.push(Diagnostic {
                 path,
                 line: None,
-                message: format!("cannot read item: {error}"),
+                message,
             });
             return file;
         }
@@ -208,6 +225,37 @@ fn load_file(path: PathBuf) -> ItemFile {
         }
     }
     file
+}
+
+fn read_regular_item(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect item: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("item path must not be a symlink".into());
+    }
+    if !metadata.file_type().is_file() {
+        return Err("item path must be a regular file".into());
+    }
+    // Recheck the opened object: a directory entry can change after metadata
+    // inspection. O_NOFOLLOW rejects a replacement symlink, and O_NONBLOCK
+    // prevents a replacement FIFO from blocking the loader during open.
+    let mut source = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| format!("cannot open regular item without following links: {error}"))?;
+    if !source
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened item: {error}"))?
+        .is_file()
+    {
+        return Err("opened item must be a regular file".into());
+    }
+    let mut raw = Vec::new();
+    source
+        .read_to_end(&mut raw)
+        .map_err(|error| format!("cannot read item: {error}"))?;
+    Ok(raw)
 }
 
 type ParseError = (Option<usize>, String, Option<Vec<u8>>);

@@ -6,6 +6,7 @@ publish = false
 description = "Local, agent-first issue tracker"
 
 [dependencies]
+libc = "0.2"
 yaml-rust2 = "0.10.4"
 
 [lib]

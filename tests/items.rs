@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use work::core::items::{Completion, ItemStore, LookupError, ManualState};
@@ -347,6 +348,49 @@ fn keeps_unexpected_files_visible_as_diagnostics() {
     assert_eq!(store.files[0].body.as_deref(), Some(&b"body"[..]));
     assert!(errors(&store).contains("filename must be"));
     assert!(matches!(store.resolve(ID), Err(LookupError::Invalid(_))));
+}
+
+#[test]
+fn rejects_symlinks_and_nonregular_entries_without_reading_targets() {
+    let fixture = Fixture::new();
+    let target = fixture.0.join("outside-items.md");
+    let target_bytes = item(ID, "", "external content");
+    fs::write(&target, &target_bytes).unwrap();
+    symlink(
+        &target,
+        fixture.0.join(".work/items").join(format!("{ID}.md")),
+    )
+    .unwrap();
+    fs::create_dir(fixture.0.join(".work/items/other.md")).unwrap();
+
+    let store = fixture.load();
+    assert!(!store.is_valid());
+    assert_eq!(store.files.len(), 2);
+    assert!(errors(&store).contains("must not be a symlink"));
+    assert!(errors(&store).contains("must be a regular file"));
+    for file in &store.files {
+        assert!(file.raw.is_empty());
+        assert!(file.body.is_none());
+        assert!(file.header.is_none());
+    }
+    assert_eq!(fs::read(target).unwrap(), target_bytes.as_bytes());
+}
+
+#[test]
+fn rejects_symlinked_item_directory() {
+    let fixture = Fixture::new();
+    let item_dir = fixture.0.join(".work/items");
+    let external = fixture.0.join("external-items");
+    fs::create_dir(&external).unwrap();
+    fs::write(
+        external.join(format!("{ID}.md")),
+        item(ID, "", "external content"),
+    )
+    .unwrap();
+    fs::remove_dir(&item_dir).unwrap();
+    symlink(&external, &item_dir).unwrap();
+    let error = ItemStore::load_from_root(&fixture.0).unwrap_err();
+    assert!(error.to_string().contains("must be a real directory"));
 }
 
 #[test]
