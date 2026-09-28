@@ -6,6 +6,7 @@ publish = false
 description = "Local, agent-first issue tracker"
 
 [dependencies]
+petgraph = { version = "0.8.3", default-features = false, features = ["std"] }
 rustix = { version = "1.1.5", features = ["fs"] }
 yaml-rust2 = "0.10.4"
 
