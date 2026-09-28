@@ -70,3 +70,12 @@ Rationale: hierarchy must express the complete scope of a deliverable, so depend
 
 Consequences: readiness must distinguish inherited explicit prerequisites from internal child waits, and graph validation must detect combined lifecycle deadlocks. Sibling ordering remains explicit. Closure with a cancellation reason resolves an obligation. Reopening recomputes readiness and aggregate completion without automatically reopening completed manual work, as specified in [[DES-LIFECYCLE]].
 :::
+
+:::mara decision ADR-WORK-DISTRIBUTION
+:mid: 01M3M7C6321TM1WZ0JEG2N54AF
+:title: Select initial Work package identities and hosts
+:status: accepted
+:justifies: DES-INTERFACE-ADAPTERS
+
+Use @convesoft/work as the npm dispatcher and @convesoft/work-linux-x64-gnu, @convesoft/work-linux-arm64-gnu, and @convesoft/work-darwin-arm64 as native packages. Support x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, and aarch64-apple-darwin, matching Mara’s supported target platforms. npm trusted publishing identifies the convesoft/work GitHub repository and release.yml workflow without an npm environment-name restriction. GitHub release-environment protection is a separate required setting. Package identity and host choices are settled; the first release version, license, registry trust configuration, and GitHub environment configuration still require explicit confirmation before publication.
+:::

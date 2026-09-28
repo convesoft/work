@@ -37,4 +37,4 @@ During bootstrap, serialize manual ownership through the controlling session; th
 
 This batch delivers the durable-item graph loop through CLI and MCP. Later slices cover coordination, templates/runs, sessions/workspaces, handoffs, and finalization. They remain part of the product scope in Mara but are not expanded into speculative tickets here.
 
-There is no Work binary or Cargo project yet. The prepared Git baseline precedes feature work; the first implementation issue establishes the Rust foundation and initial workflows. This baseline contains no workflow files or generated changelog.
+The prepared Git baseline preceded feature work. The first implementation issue establishes the Rust foundation and initial workflows; it remains open until acceptance passes and the change merges. The generated changelog belongs to the separate release item.

@@ -1,0 +1,14 @@
+[package]
+name = "work"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Local, agent-first issue tracker"
+
+[lib]
+name = "work"
+path = "src/lib.rs"
+
+[[bin]]
+name = "work"
+path = "src/main.rs"

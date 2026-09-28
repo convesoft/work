@@ -1,0 +1,258 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [CHANGELOG.md]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.identity.outputs.sha }}
+      version: ${{ steps.identity.outputs.version }}
+      tag: ${{ steps.identity.outputs.tag }}
+      npm-tag: ${{ steps.identity.outputs.npm-tag }}
+      prerelease: ${{ steps.identity.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Resolve one release revision and candidate identity
+        id: identity
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test -f LICENSE
+          test -x scripts/smoke-packaged.sh
+          metadata=$(cargo metadata --locked --no-deps --format-version 1)
+          version=$(node -e 'const p=JSON.parse(process.argv[1]).packages.find(p=>p.name==="work");if(!p?.license)process.exit(1);process.stdout.write(p.version)' "$metadata")
+          test "$version" != 0.0.0
+          grep -F "## [$version]" CHANGELOG.md >/dev/null
+          tag="v$version"
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            test "$(git rev-list -n 1 "$tag")" = "$RELEASE_SHA"
+          fi
+          if [[ "$version" == *-* ]]; then npm_tag=next; prerelease=true; else npm_tag=latest; prerelease=false; fi
+          {
+            echo "sha=$RELEASE_SHA"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "npm-tag=$npm_tag"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets
+      - name: Validate Mara schema and corpus
+        run: |
+          set -euo pipefail
+          npx --yes @convesoft/mara@0.3.0 --project "$GITHUB_WORKSPACE" --format json schema validate > schema-validation.json
+          npx --yes @convesoft/mara@0.3.0 --project "$GITHUB_WORKSPACE" --format json project validate > project-validation.json
+          node -e '
+            for (const file of ["schema-validation.json", "project-validation.json"]) {
+              const result = require(`./${file}`);
+              if (result.valid !== true || result.evaluation_complete !== true || result.has_more !== false) {
+                console.error(file, JSON.stringify(result));
+                process.exitCode = 1;
+              }
+            }
+          '
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - run: cargo build --locked --release
+      - name: Assemble and inspect native package
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist dist/stage
+          package=$(node scripts/package-npm.mjs platform "$TARGET" target/release/work dist/stage)
+          npm pack "$package" --pack-destination dist >/dev/null
+          scripts/smoke-packaged.sh "$package" "$TARGET"
+          archive="work-$VERSION-$TARGET"
+          mkdir -p "dist/native/$archive"
+          cp target/release/work README.md LICENSE "dist/native/$archive/"
+          tar -C dist/native -czf "dist/$archive.tar.gz" "$archive"
+          rm -rf dist/native dist/stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: vars.WORK_RELEASE_READY == 'true'
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      NPM_TAG: ${{ needs.prepare.outputs.npm-tag }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Require OIDC publishing runtime
+        run: |
+          set -euo pipefail
+          test -z "${NODE_AUTH_TOKEN:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+      - run: npm install --global npm@11.19.1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Assemble dispatcher and checksums
+        run: |
+          set -euo pipefail
+          package=$(node scripts/package-npm.mjs main dist/stage)
+          npm pack "$package" --pack-destination dist >/dev/null
+          rm -rf dist/stage
+          (cd dist && sha256sum -- *.tar.gz *.tgz > SHA256SUMS)
+      - name: Create or verify annotated tag
+        run: |
+          set -euo pipefail
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag --annotate "$TAG" --message "Work $VERSION" "$RELEASE_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+      - name: Create or update draft GitHub release
+        env:
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          awk -v heading="## [$VERSION]" 'index($0,heading)==1{found=1;next} found && /^## \[/{exit} found{print}' CHANGELOG.md > release-notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS --clobber
+          else
+            arguments=("$TAG" --draft --verify-tag --title "Work $VERSION" --notes-file release-notes.md)
+            if [[ "$PRERELEASE" == true ]]; then arguments+=(--prerelease); fi
+            gh release create "${arguments[@]}" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS
+          fi
+      - name: Publish native packages before dispatcher
+        run: |
+          set -euo pipefail
+          publish_or_verify() {
+            local package_name=$1 tarball=$2 expected actual
+            expected=$(sha1sum "$tarball" | cut -d ' ' -f 1)
+            if actual=$(npm view "$package_name@$VERSION" dist.shasum --json 2>/dev/null | tr -d '"[:space:]'); then
+              test "$actual" = "$expected" || { echo "digest mismatch: $package_name@$VERSION" >&2; exit 1; }
+            else
+              npm publish "$tarball" --access public --tag "$NPM_TAG"
+            fi
+          }
+          for name in work-linux-x64-gnu work-linux-arm64-gnu work-darwin-arm64; do
+            publish_or_verify "@convesoft/$name" "$PWD/dist/convesoft-$name-$VERSION.tgz"
+          done
+      - name: Wait for native packages
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            ready=true
+            for name in work-linux-x64-gnu work-linux-arm64-gnu work-darwin-arm64; do
+              npm view "@convesoft/$name@$VERSION" version >/dev/null 2>&1 || ready=false
+            done
+            if [[ "$ready" == true ]]; then exit 0; fi
+            sleep 30
+          done
+          echo 'native packages are not visible' >&2
+          exit 1
+      - name: Publish dispatcher last
+        run: |
+          set -euo pipefail
+          tarball="$PWD/dist/convesoft-work-$VERSION.tgz"
+          expected=$(sha1sum "$tarball" | cut -d ' ' -f 1)
+          if actual=$(npm view "@convesoft/work@$VERSION" dist.shasum --json 2>/dev/null | tr -d '"[:space:]'); then
+            test "$actual" = "$expected" || { echo 'dispatcher digest mismatch' >&2; exit 1; }
+          else
+            npm publish "$tarball" --access public --tag "$NPM_TAG"
+          fi
+      - name: Check public install
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if npm view "@convesoft/work@$VERSION" version >/dev/null 2>&1; then
+              temporary=$(mktemp -d)
+              trap 'rm -rf -- "$temporary"' EXIT
+              cd "$temporary"
+              npx --yes "@convesoft/work@$VERSION" --version | grep -F "work $VERSION"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo 'dispatcher is not visible' >&2
+          exit 1
+      - name: Publish GitHub release
+        env:
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [[ "$PRERELEASE" == true ]]; then
+            gh release edit "$TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$TAG" --draft=false --prerelease=false --latest
+          fi
