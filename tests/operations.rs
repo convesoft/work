@@ -170,8 +170,14 @@ fn invalid_graph_can_be_inspected_and_repaired_explicitly() {
         Err(OperationError::InvalidSource(_))
     ));
     assert_eq!(
-        ops.inspect_raw(&id(1)).unwrap().body.as_deref(),
+        ops.inspect_raw(&id(1)).unwrap().file.body.as_deref(),
         Some(&b"Body"[..])
+    );
+    assert!(
+        !ops.inspect_raw(&id(1))
+            .unwrap()
+            .graph_diagnostics
+            .is_empty()
     );
     let repaired = format!(
         "---\nformat_version: 1\nid: \"{}\"\ntitle: Repaired\nstate: open\n---\nBody",
@@ -179,6 +185,45 @@ fn invalid_graph_can_be_inspected_and_repaired_explicitly() {
     );
     ops.repair(&id(1), repaired.into_bytes()).unwrap();
     assert!(ops.inspect(&id(1)).unwrap().graph_diagnostics.is_empty());
+}
+
+#[test]
+fn repair_does_not_invalidate_a_healthy_graph() {
+    let f = Fixture::new();
+    f.write(1, "", b"Body");
+    let ops = f.ops();
+    let original = fs::read(f.path(&id(1))).unwrap();
+    let replacement = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Invalid graph\nstate: open\ndepends_on: [\"{}\"]\n---\nBody",
+        id(1),
+        id(2)
+    );
+    assert!(matches!(
+        ops.repair(&id(1), replacement.into_bytes()),
+        Err(OperationError::InvalidCandidate(_))
+    ));
+    assert_eq!(fs::read(f.path(&id(1))).unwrap(), original);
+}
+
+#[test]
+fn unchanged_completion_policy_does_not_reopen_completed_item() {
+    let f = Fixture::new();
+    f.write(1, "", b"Body");
+    let ops = f.ops();
+    ops.close(&id(1), Some("Finished".into())).unwrap();
+    let updated = ops
+        .update(
+            &id(1),
+            MetadataChange {
+                completion: Some(Completion::Manual),
+                title: Some("Retitled".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let header = updated.file.header.unwrap();
+    assert_eq!(header.state, Some(ManualState::Done));
+    assert_eq!(header.close_reason.as_deref(), Some("Finished"));
 }
 
 #[test]

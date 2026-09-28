@@ -68,6 +68,12 @@ pub struct Inspection {
     pub graph_diagnostics: Vec<Diagnostic>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RawInspection {
+    pub file: ItemFile,
+    pub graph_diagnostics: Vec<Diagnostic>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MetadataChange {
     pub title: Option<String>,
@@ -105,17 +111,23 @@ impl DurableOperations {
     }
 
     /// Return source and diagnostics even when the header or graph is invalid.
-    pub fn inspect_raw(&self, id: &str) -> Result<ItemFile, OperationError> {
+    pub fn inspect_raw(&self, id: &str) -> Result<RawInspection, OperationError> {
         if !valid_id(id) {
             return Err(OperationError::InvalidArgument(
                 "item must be a full UUIDv4 ID".into(),
             ));
         }
-        self.load()?
+        let store = self.load()?;
+        let file = store
             .files
-            .into_iter()
+            .iter()
             .find(|f| f.path == self.item_path(id))
-            .ok_or_else(|| OperationError::NotFound(id.into()))
+            .ok_or_else(|| OperationError::NotFound(id.into()))?
+            .clone();
+        Ok(RawInspection {
+            file,
+            graph_diagnostics: ItemGraph::from_store(&store).diagnostics().to_vec(),
+        })
     }
 
     /// Explicitly replace one malformed source document. Residual graph errors may
@@ -136,6 +148,9 @@ impl DurableOperations {
         let candidate = parse_candidate(original.path.clone(), raw.clone());
         if !candidate.is_valid() {
             return Err(OperationError::InvalidCandidate(candidate.diagnostics));
+        }
+        if ItemGraph::from_store(&store).is_valid() {
+            require_candidate(&candidate_store(&store, &original.path, raw.clone())?)?;
         }
         let staged = self.stage(&raw)?;
         if let Err(error) = self.check_snapshot(&store) {
@@ -495,6 +510,17 @@ impl DurableOperations {
         if old.as_ref().is_ok_and(|raw| raw == &source.raw) && stable {
             return Ok(());
         }
+        let published_untouched = fs::symlink_metadata(&source.path)
+            .ok()
+            .filter(|meta| meta.file_type().is_file())
+            .and_then(|_| fs::read(&source.path).ok())
+            .is_some_and(|raw| raw == new_raw);
+        if !published_untouched {
+            return Err(OperationError::Conflict(format!(
+                "item changed after publication; previous source retained at {}",
+                staged.display()
+            )));
+        }
         renameat_with(CWD, staged, CWD, &source.path, RenameFlags::EXCHANGE).map_err(|e| {
             OperationError::Io(io::Error::other(format!(
                 "publication conflict; rollback failed: {e}"
@@ -595,7 +621,9 @@ fn apply_change(mut h: ItemHeader, c: MetadataChange) -> ItemHeader {
     if let Some(v) = c.title {
         h.title = v;
     }
-    if let Some(v) = c.completion {
+    if let Some(v) = c.completion
+        && h.completion != v
+    {
         h.completion = v;
         h.state = if v == Completion::Children {
             None
@@ -802,6 +830,28 @@ mod tests {
         ));
         assert_eq!(fs::read(&path).unwrap(), external);
         assert_eq!(staged_count(&root), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exchange_preserves_edit_made_to_published_target() {
+        let (root, id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let path = ops.item_path(&id);
+        let before = ops.load().unwrap();
+        let source = &before.files[0];
+        let proposed = serialize(&default_header(id, "Proposed".into()), b"Body");
+        let staged = ops.stage(&proposed).unwrap();
+        renameat_with(CWD, &staged, CWD, &path, RenameFlags::EXCHANGE).unwrap();
+        let mut external = proposed.clone();
+        external.extend_from_slice(b" external edit");
+        fs::write(&path, &external).unwrap();
+        assert!(matches!(
+            ops.verify_exchange(&before, source, &staged, &proposed),
+            Err(OperationError::Conflict(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), external);
+        assert_eq!(fs::read(&staged).unwrap(), source.raw);
         fs::remove_dir_all(root).unwrap();
     }
 
