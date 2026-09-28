@@ -1,4 +1,6 @@
+use std::ffi::OsString;
 use std::fs;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +33,7 @@ impl Fixture {
             "git {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 }
 
@@ -105,4 +107,21 @@ fn rejects_non_git_and_bare_repositories() {
         Err(DiscoveryError::UnsupportedProject(_))
     ));
     assert!(!bare.join("work").exists());
+}
+
+#[test]
+fn preserves_newlines_and_non_utf8_bytes_in_checkout_paths() {
+    let fixture = Fixture::new();
+    for name in [
+        OsString::from("line\nbreak"),
+        OsString::from("trailing-line\n"),
+        OsString::from_vec(vec![b'n', b'o', b'n', b'-', 0xff]),
+    ] {
+        let checkout = fixture.0.join(name);
+        fs::create_dir(&checkout).unwrap();
+        fixture.git(&checkout, &["init", "--initial-branch=main"]);
+        let project = discover(Some(&checkout)).unwrap();
+        assert_eq!(project.worktree_root, checkout);
+        assert_eq!(project.git_common_dir, checkout.join(".git"));
+    }
 }

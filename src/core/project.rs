@@ -1,6 +1,8 @@
 //! Read-only selection of a Git working checkout.
 
+use std::ffi::OsString;
 use std::fmt;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -48,45 +50,43 @@ pub fn discover(selected: Option<&Path>) -> Result<Project, DiscoveryError> {
         return Err(DiscoveryError::UnsupportedProject(path));
     }
 
+    if git_query(&path, &["--is-inside-work-tree"])? != b"true" {
+        return Err(DiscoveryError::UnsupportedProject(path));
+    }
+    // Query each path separately: Git terminates each answer with a newline,
+    // while a valid Unix path may itself contain newlines or non-UTF-8 bytes.
+    let root = git_query(&path, &["--path-format=absolute", "--show-toplevel"])?;
+    let common = git_query(&path, &["--path-format=absolute", "--git-common-dir"])?;
+    if root.is_empty() || common.is_empty() {
+        return Err(DiscoveryError::UnsupportedProject(path));
+    }
+    Ok(Project {
+        worktree_root: PathBuf::from(OsString::from_vec(root))
+            .canonicalize()
+            .map_err(DiscoveryError::Io)?,
+        git_common_dir: PathBuf::from(OsString::from_vec(common))
+            .canonicalize()
+            .map_err(DiscoveryError::Io)?,
+    })
+}
+
+fn git_query(path: &Path, args: &[&str]) -> Result<Vec<u8>, DiscoveryError> {
     let output = Command::new("git")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
         .arg("-C")
-        .arg(&path)
-        .args([
-            "rev-parse",
-            "--is-inside-work-tree",
-            "--show-toplevel",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ])
+        .arg(path)
+        .arg("rev-parse")
+        .args(args)
         .output()
         .map_err(DiscoveryError::GitUnavailable)?;
     if !output.status.success() {
-        return Err(DiscoveryError::UnsupportedProject(path));
+        return Err(DiscoveryError::UnsupportedProject(path.to_path_buf()));
     }
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|_| DiscoveryError::UnsupportedProject(path.clone()))?;
-    let mut lines = stdout.lines();
-    if lines.next() != Some("true") {
-        return Err(DiscoveryError::UnsupportedProject(path));
+    let mut bytes = output.stdout;
+    if bytes.pop() != Some(b'\n') {
+        return Err(DiscoveryError::UnsupportedProject(path.to_path_buf()));
     }
-    let root = lines
-        .next()
-        .ok_or_else(|| DiscoveryError::UnsupportedProject(path.clone()))?;
-    let common = lines
-        .next()
-        .ok_or_else(|| DiscoveryError::UnsupportedProject(path.clone()))?;
-    if root.is_empty() || common.is_empty() || lines.next().is_some() {
-        return Err(DiscoveryError::UnsupportedProject(path));
-    }
-    Ok(Project {
-        worktree_root: PathBuf::from(root)
-            .canonicalize()
-            .map_err(DiscoveryError::Io)?,
-        git_common_dir: PathBuf::from(common)
-            .canonicalize()
-            .map_err(DiscoveryError::Io)?,
-    })
+    Ok(bytes)
 }
