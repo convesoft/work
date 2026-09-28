@@ -315,7 +315,7 @@ fn repair_canonicalizes_a_misnamed_item_without_discarding_source() {
     fs::rename(f.path(&id(1)), &wrong).unwrap();
     let original = fs::read(&wrong).unwrap();
     let repaired = f.ops().repair(&id(1), original.clone()).unwrap();
-    assert_eq!(repaired.path, f.path(&id(1)));
+    assert_eq!(repaired.file.path, f.path(&id(1)));
     assert_eq!(fs::read(f.path(&id(1))).unwrap(), original);
     assert!(!wrong.exists());
     assert!(ItemStore::load_from_root(&f.0).unwrap().is_valid());
@@ -331,7 +331,7 @@ fn repair_canonicalizes_a_misnamed_item_without_discarding_source() {
 }
 
 #[test]
-fn repair_rechecks_duplicate_ids_in_candidate_view() {
+fn repair_rejects_identity_rewrite_with_another_claim() {
     let f = Fixture::new();
     f.write(1, "", b"Body one");
     let wrong = f.0.join(".work/items/wrong.md");
@@ -342,10 +342,68 @@ fn repair_rechecks_duplicate_ids_in_candidate_view() {
     let original_wrong = fs::read(&wrong).unwrap();
     assert!(matches!(
         f.ops().repair(&id(1), original_wrong.clone()),
-        Err(OperationError::InvalidCandidate(_))
+        Err(OperationError::InvalidArgument(_))
     ));
     assert_eq!(fs::read(f.path(&id(1))).unwrap(), original_canonical);
     assert_eq!(fs::read(wrong).unwrap(), original_wrong);
+}
+
+#[test]
+fn repair_uses_the_parsed_identity_for_a_misnamed_source() {
+    let f = Fixture::new();
+    f.write(2, "", b"Body");
+    let misplaced = f.path(&id(1));
+    fs::rename(f.path(&id(2)), &misplaced).unwrap();
+    let raw = fs::read(&misplaced).unwrap();
+    let replacement_for_one = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Wrong identity\nstate: open\n---\nBody",
+        id(1)
+    );
+    assert!(matches!(
+        f.ops().repair(&id(1), replacement_for_one.into_bytes()),
+        Err(OperationError::InvalidArgument(_))
+    ));
+    assert_eq!(fs::read(&misplaced).unwrap(), raw);
+    let repaired = f.ops().repair(&id(2), raw.clone()).unwrap();
+    assert_eq!(repaired.file.path, f.path(&id(2)));
+    assert_eq!(fs::read(f.path(&id(2))).unwrap(), raw);
+    assert!(!misplaced.exists());
+}
+
+#[test]
+fn repair_replaces_a_symlink_without_following_it() {
+    let f = Fixture::new();
+    let outside = f.0.join("outside.md");
+    fs::write(&outside, b"outside").unwrap();
+    std::os::unix::fs::symlink(&outside, f.path(&id(1))).unwrap();
+    let replacement = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Repaired\nstate: open\n---\nBody",
+        id(1)
+    );
+    let repaired = f.ops().repair(&id(1), replacement.into_bytes()).unwrap();
+    assert!(repaired.graph_diagnostics.is_empty());
+    assert!(
+        fs::symlink_metadata(f.path(&id(1)))
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+    assert_eq!(fs::read(outside).unwrap(), b"outside");
+}
+
+#[test]
+fn repair_returns_remaining_graph_diagnostics() {
+    let f = Fixture::new();
+    f.write(1, &format!("depends_on: [\"{}\"]\n", id(3)), b"One");
+    f.write(2, &format!("depends_on: [\"{}\"]\n", id(4)), b"Two");
+    let replacement = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Repaired\nstate: open\n---\nOne",
+        id(1)
+    );
+    let repaired = f.ops().repair(&id(1), replacement.into_bytes()).unwrap();
+    assert_eq!(repaired.file.header.unwrap().id, id(1));
+    assert_eq!(repaired.graph_diagnostics.len(), 1);
+    assert!(repaired.graph_diagnostics[0].message.contains(&id(4)));
 }
 
 #[test]

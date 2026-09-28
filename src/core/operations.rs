@@ -128,7 +128,7 @@ impl DurableOperations {
 
     /// Explicitly replace one malformed source document. Residual graph errors may
     /// remain while a caller repairs other documents in later steps.
-    pub fn repair(&self, id: &str, raw: Vec<u8>) -> Result<ItemFile, OperationError> {
+    pub fn repair(&self, id: &str, raw: Vec<u8>) -> Result<RawInspection, OperationError> {
         if !valid_id(id) {
             return Err(OperationError::InvalidArgument(
                 "item must be a full UUIDv4 ID".into(),
@@ -137,6 +137,14 @@ impl DurableOperations {
         let _lock = self.lock()?;
         let store = self.load()?;
         let original = self.raw_source(&store, id)?;
+        if let Some(header) = &original.header
+            && header.id != id
+        {
+            return Err(OperationError::InvalidArgument(format!(
+                "source contains item {}; repair it by that ID",
+                header.id
+            )));
+        }
         let target_path = self.item_path(id);
         let graph_before = ItemGraph::from_store(&store);
         if original.is_valid()
@@ -216,7 +224,7 @@ impl DurableOperations {
                     staged.display()
                 )));
             }
-            return Ok(candidate);
+            return self.inspect_raw(id);
         }
         if let Err(error) = renameat_with(CWD, &staged, CWD, &original.path, RenameFlags::EXCHANGE)
         {
@@ -226,11 +234,12 @@ impl DurableOperations {
         self.verify_exchange(&store, original, &staged, &raw)?;
         self.sync_items()?;
         let _ = fs::remove_file(&staged);
-        Ok(candidate)
+        self.inspect_raw(id)
     }
 
     pub fn list(&self) -> Result<Vec<Inspection>, OperationError> {
         let store = self.load()?;
+        let graph = ItemGraph::from_store(&store);
         let mut ids: Vec<_> = store
             .files
             .iter()
@@ -242,7 +251,7 @@ impl DurableOperations {
             .collect();
         ids.sort();
         ids.into_iter()
-            .map(|id| inspect_store(&store, &id))
+            .map(|id| inspect_with_graph(&store, &graph, &id))
             .collect()
     }
 
@@ -598,11 +607,15 @@ impl DurableOperations {
         new_raw: &[u8],
         before_rollback: impl FnOnce(),
     ) -> Result<(), OperationError> {
-        let old = fs::symlink_metadata(staged).and_then(|meta| {
+        let old_metadata = fs::symlink_metadata(staged);
+        let old_matches = old_metadata.as_ref().is_ok_and(|meta| {
             if meta.file_type().is_file() {
-                fs::read(staged)
+                fs::read(staged).is_ok_and(|raw| raw == source.raw)
             } else {
-                Err(io::Error::other("exchanged source is not a regular file"))
+                source.diagnostics.iter().any(|d| {
+                    d.message.contains("must not be a symlink")
+                        || d.message.contains("must be a regular file")
+                })
             }
         });
         let current = self.load();
@@ -622,7 +635,7 @@ impl DurableOperations {
                         })
                 })
         });
-        if old.as_ref().is_ok_and(|raw| raw == &source.raw) && stable {
+        if old_matches && stable {
             return Ok(());
         }
         let published_untouched = fs::symlink_metadata(&source.path)
@@ -661,6 +674,15 @@ impl DurableOperations {
 }
 
 fn inspect_store(store: &ItemStore, id: &str) -> Result<Inspection, OperationError> {
+    let graph = ItemGraph::from_store(store);
+    inspect_with_graph(store, &graph, id)
+}
+
+fn inspect_with_graph(
+    store: &ItemStore,
+    graph: &ItemGraph,
+    id: &str,
+) -> Result<Inspection, OperationError> {
     if !valid_id(id) {
         return Err(OperationError::InvalidArgument(
             "item must be a full UUIDv4 ID".into(),
@@ -672,7 +694,6 @@ fn inspect_store(store: &ItemStore, id: &str) -> Result<Inspection, OperationErr
         .find(|f| f.header.as_ref().is_some_and(|h| h.id == id))
         .ok_or_else(|| OperationError::NotFound(id.into()))?
         .clone();
-    let graph = ItemGraph::from_store(store);
     let relations = graph
         .relations(id)
         .map_err(|_| OperationError::NotFound(id.into()))?;
@@ -868,12 +889,11 @@ fn valid_id(value: &str) -> bool {
 }
 fn source_mode(path: &Path) -> Result<u32, OperationError> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Err(OperationError::Conflict(
-            "item path changed before staging".into(),
-        ));
-    }
-    Ok(metadata.permissions().mode() & 0o7777)
+    Ok(if metadata.file_type().is_file() {
+        metadata.permissions().mode() & 0o7777
+    } else {
+        0o600
+    })
 }
 fn new_id() -> Result<String, OperationError> {
     let mut bytes = [0u8; 16];
