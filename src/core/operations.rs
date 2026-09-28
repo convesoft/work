@@ -119,12 +119,24 @@ impl DurableOperations {
             ));
         }
         let store = self.load()?;
-        let file = store
-            .files
-            .iter()
-            .find(|f| f.path == self.item_path(id))
-            .ok_or_else(|| OperationError::NotFound(id.into()))?
-            .clone();
+        let file = if let Some(file) = store.files.iter().find(|f| f.path == self.item_path(id)) {
+            file.clone()
+        } else {
+            let matches: Vec<_> = store
+                .files
+                .iter()
+                .filter(|f| f.header.as_ref().is_some_and(|h| h.id == id))
+                .collect();
+            match matches.as_slice() {
+                [file] => (*file).clone(),
+                [] => return Err(OperationError::NotFound(id.into())),
+                _ => {
+                    return Err(OperationError::Conflict(format!(
+                        "multiple source files claim item {id}"
+                    )));
+                }
+            }
+        };
         Ok(RawInspection {
             file,
             graph_diagnostics: ItemGraph::from_store(&store).diagnostics().to_vec(),
@@ -200,7 +212,11 @@ impl DurableOperations {
         let mut ids: Vec<_> = store
             .files
             .iter()
-            .filter_map(|f| f.header.as_ref().map(|h| h.id.clone()))
+            .filter_map(|f| {
+                f.is_valid()
+                    .then(|| f.header.as_ref().map(|h| h.id.clone()))
+                    .flatten()
+            })
             .collect();
         ids.sort();
         ids.into_iter()
@@ -792,7 +808,7 @@ fn source_mode(path: &Path) -> Result<u32, OperationError> {
             "item path changed before staging".into(),
         ));
     }
-    Ok(metadata.permissions().mode() & 0o777)
+    Ok(metadata.permissions().mode() & 0o7777)
 }
 fn new_id() -> Result<String, OperationError> {
     let mut bytes = [0u8; 16];

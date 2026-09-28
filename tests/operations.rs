@@ -269,6 +269,44 @@ fn replacement_preserves_restrictive_file_mode() {
 }
 
 #[test]
+fn replacement_preserves_special_permission_bits() {
+    let f = Fixture::new();
+    f.write(1, "", b"Body");
+    let path = f.path(&id(1));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o2750)).unwrap();
+    f.ops()
+        .update(
+            &id(1),
+            MetadataChange {
+                title: Some("Updated".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+        0o2750
+    );
+}
+
+#[test]
+fn list_skips_malformed_files_while_raw_inspection_remains_available() {
+    let f = Fixture::new();
+    f.write(1, "", b"Valid");
+    f.write(2, "", b"Invalid filename");
+    let wrong = f.0.join(".work/items/wrong.md");
+    fs::rename(f.path(&id(2)), &wrong).unwrap();
+    let ops = f.ops();
+    let listed = ops.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].file.header.as_ref().unwrap().id, id(1));
+    let raw = ops.inspect_raw(&id(2)).unwrap();
+    assert_eq!(raw.file.path, wrong);
+    assert!(!raw.file.diagnostics.is_empty());
+    assert!(!ItemStore::load_from_root(&f.0).unwrap().is_valid());
+}
+
+#[test]
 fn unchanged_completion_policy_does_not_reopen_completed_item() {
     let f = Fixture::new();
     f.write(1, "", b"Body");
