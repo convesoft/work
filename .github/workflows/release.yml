@@ -101,6 +101,7 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
+      - run: npm install --global npm@11.19.1
       - run: cargo build --locked --release
       - name: Assemble and inspect native package
         env:
@@ -115,7 +116,7 @@ jobs:
           archive="work-$VERSION-$TARGET"
           mkdir -p "dist/native/$archive"
           cp target/release/work README.md LICENSE "dist/native/$archive/"
-          tar -C dist/native -czf "dist/$archive.tar.gz" "$archive"
+          python3 scripts/archive-release.py "dist/native/$archive" "dist/$archive.tar.gz"
           rm -rf dist/native dist/stage
       - uses: actions/upload-artifact@v4
         with:
@@ -180,38 +181,6 @@ jobs:
             git tag --annotate "$TAG" --message "Work $VERSION" "$RELEASE_SHA"
             git push origin "refs/tags/$TAG"
           fi
-      - name: Create or resume draft GitHub release
-        env:
-          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
-        run: |
-          set -euo pipefail
-          awk -v heading="## [$VERSION]" 'index($0,heading)==1{found=1;next} found && /^## \[/{exit} found{print}' CHANGELOG.md > release-notes.md
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            state=$(gh release view "$TAG" --json isDraft,isImmutable --jq '.isDraft and (.isImmutable | not)')
-            if [[ "$state" != true ]]; then
-              echo "$TAG already has a published or immutable GitHub release" >&2
-              exit 1
-            fi
-            existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-            temporary=$(mktemp -d)
-            trap 'rm -rf -- "$temporary"' EXIT
-            for asset in dist/*.tar.gz dist/*.tgz dist/SHA256SUMS; do
-              name=${asset##*/}
-              if grep -Fxq -- "$name" <<< "$existing"; then
-                gh release download "$TAG" --pattern "$name" --dir "$temporary"
-                if ! cmp -s -- "$asset" "$temporary/$name"; then
-                  echo "$TAG already has a different $name asset" >&2
-                  exit 1
-                fi
-              else
-                gh release upload "$TAG" "$asset"
-              fi
-            done
-          else
-            arguments=("$TAG" --draft --verify-tag --title "Work $VERSION" --notes-file release-notes.md)
-            if [[ "$PRERELEASE" == true ]]; then arguments+=(--prerelease); fi
-            gh release create "${arguments[@]}" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS
-          fi
       - name: Publish native packages before dispatcher
         run: |
           set -euo pipefail
@@ -265,6 +234,38 @@ jobs:
           done
           echo 'dispatcher is not visible' >&2
           exit 1
+      - name: Create or resume draft GitHub release
+        env:
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          awk -v heading="## [$VERSION]" 'index($0,heading)==1{found=1;next} found && /^## \[/{exit} found{print}' CHANGELOG.md > release-notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            state=$(gh release view "$TAG" --json isDraft,isImmutable --jq '.isDraft and (.isImmutable | not)')
+            if [[ "$state" != true ]]; then
+              echo "$TAG already has a published or immutable GitHub release" >&2
+              exit 1
+            fi
+            existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            temporary=$(mktemp -d)
+            trap 'rm -rf -- "$temporary"' EXIT
+            for asset in dist/*.tar.gz dist/*.tgz dist/SHA256SUMS; do
+              name=${asset##*/}
+              if grep -Fxq -- "$name" <<< "$existing"; then
+                gh release download "$TAG" --pattern "$name" --dir "$temporary"
+                if ! cmp -s -- "$asset" "$temporary/$name"; then
+                  echo "$TAG already has a different $name asset" >&2
+                  exit 1
+                fi
+              else
+                gh release upload "$TAG" "$asset"
+              fi
+            done
+          else
+            arguments=("$TAG" --draft --verify-tag --title "Work $VERSION" --notes-file release-notes.md)
+            if [[ "$PRERELEASE" == true ]]; then arguments+=(--prerelease); fi
+            gh release create "${arguments[@]}" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS
+          fi
       - name: Publish GitHub release
         env:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
