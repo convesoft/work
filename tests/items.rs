@@ -162,7 +162,7 @@ fn accepts_plain_strings_that_are_not_yaml_core_numbers() {
 fn accepts_standard_yaml_tags_with_their_decoded_types() {
     let fixture = Fixture::new();
     let content = format!(
-        "---\n!!map\nformat_version: !!int 1\nid: !!str {ID}\ntitle: !!str 123\nstate: !!str open\npriority: !!int \"2\"\nlabels: !!seq [!!str 456]\n---\nbody"
+        "---\n!!map\nformat_version: !!int +1\nid: !!str {ID}\ntitle: !!str 123\nstate: !!str open\npriority: !!int 0x2\nlabels: !!seq [!!str 456]\n---\nbody"
     );
     fixture.write(&format!("{ID}.md"), content);
     let store = fixture.load();
@@ -171,6 +171,18 @@ fn accepts_standard_yaml_tags_with_their_decoded_types() {
     assert_eq!(header.title, "123");
     assert_eq!(header.labels, ["456"]);
     assert_eq!(header.priority, 2);
+
+    let fixture = Fixture::new();
+    fixture.write(
+        &format!("{ID}.md"),
+        item(ID, "priority: !!int 0o3\n", "body"),
+    );
+    let store = fixture.load();
+    assert!(store.is_valid(), "{}", errors(&store));
+    assert_eq!(
+        store.resolve(ID).unwrap().header.as_ref().unwrap().priority,
+        3
+    );
 
     let fixture = Fixture::new();
     let content =
@@ -220,6 +232,10 @@ fn reports_invalid_headers_and_retains_original_file_for_inspection() {
         ("priority: \"2\"", "priority must be an integer"),
         ("priority: 5", "priority must be an integer"),
         ("priority: 1_000", "priority must be an integer"),
+        (
+            "priority: !!int 0xG",
+            "tagged integer has invalid YAML 1.2 syntax",
+        ),
         ("mystery: true", "unknown header key"),
         ("labels: [x, x]", "duplicate value"),
         ("depends_on: [123]", "string IDs"),

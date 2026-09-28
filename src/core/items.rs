@@ -388,13 +388,9 @@ fn parse_node(
             match standard_tag(tag.as_ref()).map_err(|message| (line, message))? {
                 Some("str") => return Ok(Node::String(value.clone())),
                 Some("int") => {
-                    return if json_integer(value) {
-                        value.parse::<i64>().map(Node::Integer).map_err(|_| {
-                            (line, "tagged integer exceeds the supported range".into())
-                        })
-                    } else {
-                        Err((line, "tagged integer must use decimal JSON syntax".into()))
-                    };
+                    return tagged_integer(value)
+                        .map(Node::Integer)
+                        .map_err(|message| (line, message));
                 }
                 Some("float" | "bool" | "null") => return Ok(Node::OtherScalar),
                 Some(_) => return Err((line, "scalar has a collection YAML tag".into())),
@@ -522,6 +518,25 @@ fn json_integer(value: &str) -> bool {
 fn core_decimal_integer(value: &str) -> bool {
     let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
     !unsigned.is_empty() && unsigned.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn tagged_integer(value: &str) -> Result<i64, String> {
+    let parsed = if let Some(digits) = value.strip_prefix("0x") {
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("tagged integer has invalid YAML 1.2 syntax".into());
+        }
+        i64::from_str_radix(digits, 16)
+    } else if let Some(digits) = value.strip_prefix("0o") {
+        if digits.is_empty() || !digits.bytes().all(|byte| matches!(byte, b'0'..=b'7')) {
+            return Err("tagged integer has invalid YAML 1.2 syntax".into());
+        }
+        i64::from_str_radix(digits, 8)
+    } else if core_decimal_integer(value) {
+        value.parse::<i64>()
+    } else {
+        return Err("tagged integer has invalid YAML 1.2 syntax".into());
+    };
+    parsed.map_err(|_| "tagged integer exceeds the supported range".into())
 }
 
 fn core_float(value: &str) -> bool {
