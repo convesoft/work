@@ -118,10 +118,19 @@ impl ItemStore {
             }
         }
         names.sort();
-        let mut files: Vec<_> = names
+        let files: Vec<_> = names
             .into_iter()
             .map(|name| load_file(dir_path.join(&name), items_fd, &name))
             .collect();
+        Ok(Self::from_candidate_files(files))
+    }
+
+    /// Rebuild identity diagnostics after replacing or moving candidate files.
+    pub(crate) fn from_candidate_files(mut files: Vec<ItemFile>) -> Self {
+        for file in &mut files {
+            file.diagnostics
+                .retain(|diagnostic| !diagnostic.message.starts_with("duplicate item ID "));
+        }
         let mut by_id: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (index, file) in files.iter().enumerate() {
             if let Some(header) = &file.header {
@@ -140,7 +149,7 @@ impl ItemStore {
                 }
             }
         }
-        Ok(Self { files })
+        Self { files }
     }
 
     pub fn is_valid(&self) -> bool {

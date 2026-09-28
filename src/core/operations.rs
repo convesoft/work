@@ -166,7 +166,7 @@ impl DurableOperations {
             let mut view = store.clone();
             view.files.retain(|file| file.path != original.path);
             view.files.push(candidate.clone());
-            view
+            ItemStore::from_candidate_files(view.files)
         };
         let graph_after = ItemGraph::from_store(&candidate_store);
         let new_diagnostics: Vec<_> = graph_after
@@ -587,6 +587,17 @@ impl DurableOperations {
         staged: &Path,
         new_raw: &[u8],
     ) -> Result<(), OperationError> {
+        self.verify_exchange_with_hook(before, source, staged, new_raw, || {})
+    }
+
+    fn verify_exchange_with_hook(
+        &self,
+        before: &ItemStore,
+        source: &ItemFile,
+        staged: &Path,
+        new_raw: &[u8],
+        before_rollback: impl FnOnce(),
+    ) -> Result<(), OperationError> {
         let old = fs::symlink_metadata(staged).and_then(|meta| {
             if meta.file_type().is_file() {
                 fs::read(staged)
@@ -625,12 +636,19 @@ impl DurableOperations {
                 staged.display()
             )));
         }
+        before_rollback();
         renameat_with(CWD, staged, CWD, &source.path, RenameFlags::EXCHANGE).map_err(|e| {
+            OperationError::Conflict(format!(
+                "publication conflict; rollback failed: {e}; recovery copy retained at {}",
+                staged.display()
+            ))
+        })?;
+        self.sync_items().map_err(|e| {
             OperationError::Io(io::Error::other(format!(
-                "publication conflict; rollback failed: {e}"
+                "{e}; recovery copy retained at {}",
+                staged.display()
             )))
         })?;
-        self.sync_items()?;
         Err(OperationError::Conflict(format!(
             "items changed during publication; recovery copy retained at {}",
             staged.display()
@@ -711,7 +729,7 @@ fn candidate_store(
     } else {
         candidate.files.push(parsed);
     }
-    Ok(candidate)
+    Ok(ItemStore::from_candidate_files(candidate.files))
 }
 
 fn default_header(id: String, title: String) -> ItemHeader {
@@ -991,6 +1009,28 @@ mod tests {
         );
         assert_eq!(fs::read(&path).unwrap(), original);
         fs::remove_file(staged).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_rollback_reports_retained_recovery_path() {
+        let (root, id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let path = ops.item_path(&id);
+        let before = ops.load().unwrap();
+        let source = &before.files[0];
+        let proposed = serialize(&default_header(id, "Proposed".into()), b"Body");
+        let staged = ops.stage(&proposed).unwrap();
+        renameat_with(CWD, &staged, CWD, &path, RenameFlags::EXCHANGE).unwrap();
+        fs::write(&staged, b"changed old source").unwrap();
+        let error = ops
+            .verify_exchange_with_hook(&before, source, &staged, &proposed, || {
+                fs::remove_file(&path).unwrap();
+            })
+            .unwrap_err();
+        assert!(matches!(error, OperationError::Conflict(_)));
+        assert!(error.to_string().contains(staged.to_str().unwrap()));
+        assert_eq!(fs::read(&staged).unwrap(), b"changed old source");
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -331,6 +331,24 @@ fn repair_canonicalizes_a_misnamed_item_without_discarding_source() {
 }
 
 #[test]
+fn repair_rechecks_duplicate_ids_in_candidate_view() {
+    let f = Fixture::new();
+    f.write(1, "", b"Body one");
+    let wrong = f.0.join(".work/items/wrong.md");
+    fs::rename(f.path(&id(1)), &wrong).unwrap();
+    f.write(2, "", b"Body two");
+    fs::rename(f.path(&id(2)), f.path(&id(1))).unwrap();
+    let original_canonical = fs::read(f.path(&id(1))).unwrap();
+    let original_wrong = fs::read(&wrong).unwrap();
+    assert!(matches!(
+        f.ops().repair(&id(1), original_wrong.clone()),
+        Err(OperationError::InvalidCandidate(_))
+    ));
+    assert_eq!(fs::read(f.path(&id(1))).unwrap(), original_canonical);
+    assert_eq!(fs::read(wrong).unwrap(), original_wrong);
+}
+
+#[test]
 fn creates_files_readable_under_restrictive_umask() {
     if std::env::var_os("WORK_UMASK_TEST_CHILD").is_some() {
         let root = PathBuf::from(std::env::var_os("WORK_UMASK_TEST_ROOT").unwrap());
