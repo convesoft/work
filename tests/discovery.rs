@@ -125,3 +125,30 @@ fn preserves_newlines_and_non_utf8_bytes_in_checkout_paths() {
         assert_eq!(project.git_common_dir, checkout.join(".git"));
     }
 }
+
+#[test]
+fn cli_discovery_outputs_distinct_single_line_values_for_unusual_paths() {
+    let fixture = Fixture::new();
+    let mut outputs = Vec::new();
+    for byte in [0xff, 0xfe] {
+        let checkout = fixture.0.join(OsString::from_vec(vec![
+            b'p', b'a', b't', b'h', byte, b'\n', b'%',
+        ]));
+        fs::create_dir(&checkout).unwrap();
+        fixture.git(&checkout, &["init", "--initial-branch=main"]);
+        let output = Command::new(env!("CARGO_BIN_EXE_work"))
+            .arg("discover")
+            .arg(&checkout)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let lines: Vec<_> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("worktree_root="));
+        assert!(lines[1].starts_with("git_common_dir="));
+        assert!(stdout.contains(&format!("%{byte:02X}%0A%25")));
+        outputs.push(stdout);
+    }
+    assert_ne!(outputs[0], outputs[1]);
+}

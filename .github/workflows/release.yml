@@ -246,9 +246,24 @@ jobs:
               echo "$TAG already has a published or immutable GitHub release" >&2
               exit 1
             fi
-            existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
             temporary=$(mktemp -d)
             trap 'rm -rf -- "$temporary"' EXIT
+            gh release view "$TAG" --json assets > "$temporary/assets.json"
+            existing=$(node -e '
+              const fs = require("node:fs");
+              const path = require("node:path");
+              const assets = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).assets;
+              const expected = new Set(process.argv.slice(2).map(file => path.basename(file)));
+              const seen = new Set();
+              for (const asset of assets) {
+                if (!expected.has(asset.name) || seen.has(asset.name)) {
+                  console.error(`unexpected or duplicate draft asset: ${asset.name}`);
+                  process.exit(1);
+                }
+                seen.add(asset.name);
+              }
+              process.stdout.write([...seen].join("\n"));
+            ' "$temporary/assets.json" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS)
             for asset in dist/*.tar.gz dist/*.tgz dist/SHA256SUMS; do
               name=${asset##*/}
               if grep -Fxq -- "$name" <<< "$existing"; then
