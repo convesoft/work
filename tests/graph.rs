@@ -57,6 +57,17 @@ fn ready(graph: &ItemGraph) -> Vec<String> {
         .collect()
 }
 
+fn set_fixture_state(path: &Path, state: &str) {
+    let source = fs::read_to_string(path).unwrap();
+    let (header, body) = source.split_once("\n---\n").unwrap();
+    let header = if header.contains("\nstate: done") {
+        header.replacen("\nstate: done", &format!("\nstate: {state}"), 1)
+    } else {
+        header.replacen("\nstate: open", &format!("\nstate: {state}"), 1)
+    };
+    fs::write(path, format!("{header}\n---\n{body}")).unwrap();
+}
+
 #[test]
 fn nested_delivery_waits_for_manual_parent_and_derives_aggregate_completion() {
     let f = Fixture::new();
@@ -341,14 +352,13 @@ fn bootstrap_fixture_exposes_only_next_manual_child() {
     let foundation = "87b8795f934049c2acebaac42e81664d";
     let loader = "0fac69ec66004e088ce2b22cc0119bd2";
     let graph_item = "13ca14c6e5c14b24a5dea551c343bbeb";
-    // Fixture starts at initial bootstrap state regardless of the live item's progress.
+    // Fixture starts at the item-2-to-item-3 handoff regardless of live progress.
     let loader_path = f.0.join(".work/items").join(format!("{loader}.md"));
-    let loader_source = fs::read_to_string(&loader_path).unwrap();
-    fs::write(
-        &loader_path,
-        loader_source.replace("state: done", "state: open"),
-    )
-    .unwrap();
+    let graph_path = f.0.join(".work/items").join(format!("{graph_item}.md"));
+    // Exercise the future backlog state in which this item has been completed.
+    set_fixture_state(&graph_path, "done");
+    set_fixture_state(&loader_path, "open");
+    set_fixture_state(&graph_path, "open");
     let graph = f.graph();
     assert!(graph.is_valid(), "{:?}", graph.diagnostics());
     assert_eq!(ready(&graph), vec![loader.to_owned()]);
@@ -356,11 +366,6 @@ fn bootstrap_fixture_exposes_only_next_manual_child() {
         graph.relations(foundation).unwrap().blocks,
         [loader.to_owned()]
     );
-    let loader_source = fs::read_to_string(&loader_path).unwrap();
-    fs::write(
-        &loader_path,
-        loader_source.replace("state: open", "state: done"),
-    )
-    .unwrap();
+    set_fixture_state(&loader_path, "done");
     assert_eq!(ready(&f.graph()), vec![graph_item.to_owned()]);
 }
