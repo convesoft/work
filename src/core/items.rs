@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
+use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser, Tag};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
 
 use super::project::Project;
@@ -334,8 +334,23 @@ fn parse_node(
     match event {
         Event::Alias(_) => Err((line, "YAML aliases are forbidden".into())),
         Event::Scalar(value, style, anchor, tag) => {
-            if *anchor != 0 || tag.is_some() {
-                return Err((line, "YAML anchors and tags are forbidden".into()));
+            if *anchor != 0 {
+                return Err((line, "YAML anchors are forbidden".into()));
+            }
+            match standard_tag(tag.as_ref()).map_err(|message| (line, message))? {
+                Some("str") => return Ok(Node::String(value.clone())),
+                Some("int") => {
+                    return if json_integer(value) {
+                        value.parse::<i64>().map(Node::Integer).map_err(|_| {
+                            (line, "tagged integer exceeds the supported range".into())
+                        })
+                    } else {
+                        Err((line, "tagged integer must use decimal JSON syntax".into()))
+                    };
+                }
+                Some("float" | "bool" | "null") => return Ok(Node::OtherScalar),
+                Some(_) => return Err((line, "scalar has a collection YAML tag".into())),
+                None => {}
             }
             if *style != TScalarStyle::Plain {
                 return Ok(Node::String(value.clone()));
@@ -378,8 +393,14 @@ fn parse_node(
             Ok(Node::String(value.clone()))
         }
         Event::SequenceStart(anchor, tag) => {
-            if *anchor != 0 || tag.is_some() {
-                return Err((line, "YAML anchors and tags are forbidden".into()));
+            if *anchor != 0 {
+                return Err((line, "YAML anchors are forbidden".into()));
+            }
+            if !matches!(
+                standard_tag(tag.as_ref()).map_err(|message| (line, message))?,
+                None | Some("seq")
+            ) {
+                return Err((line, "sequence requires a sequence YAML tag".into()));
             }
             let mut values = Vec::new();
             while !matches!(events.get(*cursor), Some((Event::SequenceEnd, _))) {
@@ -389,8 +410,14 @@ fn parse_node(
             Ok(Node::Sequence(values))
         }
         Event::MappingStart(anchor, tag) => {
-            if *anchor != 0 || tag.is_some() {
-                return Err((line, "YAML anchors and tags are forbidden".into()));
+            if *anchor != 0 {
+                return Err((line, "YAML anchors are forbidden".into()));
+            }
+            if !matches!(
+                standard_tag(tag.as_ref()).map_err(|message| (line, message))?,
+                None | Some("map")
+            ) {
+                return Err((line, "mapping requires a mapping YAML tag".into()));
             }
             let mut values = BTreeMap::new();
             while !matches!(events.get(*cursor), Some((Event::MappingEnd, _))) {
@@ -411,6 +438,29 @@ fn parse_node(
             Ok(Node::Mapping(values))
         }
         _ => Err((line, "unexpected YAML event".into())),
+    }
+}
+
+fn standard_tag(tag: Option<&Tag>) -> Result<Option<&str>, String> {
+    let Some(tag) = tag else {
+        return Ok(None);
+    };
+    let name = if tag.handle == "tag:yaml.org,2002:" {
+        tag.suffix.as_str()
+    } else if tag.handle.is_empty() {
+        tag.suffix
+            .strip_prefix("tag:yaml.org,2002:")
+            .ok_or("custom YAML tags are forbidden")?
+    } else {
+        return Err("custom YAML tags are forbidden".into());
+    };
+    if matches!(
+        name,
+        "str" | "int" | "float" | "bool" | "null" | "seq" | "map"
+    ) {
+        Ok(Some(name))
+    } else {
+        Err(format!("unsupported YAML tag {name:?}"))
     }
 }
 

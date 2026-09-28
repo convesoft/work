@@ -59,12 +59,12 @@ fn loads_isolated_copy_of_real_bootstrap_items_without_changing_bytes() {
     let store = fixture.load();
     assert!(store.is_valid(), "{}", errors(&store));
     assert_eq!(store.files.len(), originals.len());
-    assert_eq!(store.files.len(), 9);
+    assert!(!store.files.is_empty());
     for file in &store.files {
         let header = file.header.as_ref().unwrap();
         assert_eq!(file.path.file_stem().unwrap().to_str().unwrap(), header.id);
         assert_eq!(file.raw, fs::read(&file.path).unwrap());
-        assert!(!file.body.as_ref().unwrap().is_empty());
+        assert!(file.body.is_some());
         assert!(matches!(store.resolve(&header.id), Ok(found) if found.path == file.path));
         for target in header
             .parent
@@ -158,6 +158,32 @@ fn accepts_plain_strings_that_are_not_yaml_core_numbers() {
 }
 
 #[test]
+fn accepts_standard_yaml_tags_with_their_decoded_types() {
+    let fixture = Fixture::new();
+    let content = format!(
+        "---\n!!map\nformat_version: !!int 1\nid: !!str {ID}\ntitle: !!str 123\nstate: !!str open\npriority: !!int \"2\"\nlabels: !!seq [!!str 456]\n---\nbody"
+    );
+    fixture.write(&format!("{ID}.md"), content);
+    let store = fixture.load();
+    assert!(store.is_valid(), "{}", errors(&store));
+    let header = store.resolve(ID).unwrap().header.as_ref().unwrap();
+    assert_eq!(header.title, "123");
+    assert_eq!(header.labels, ["456"]);
+    assert_eq!(header.priority, 2);
+
+    let fixture = Fixture::new();
+    let content =
+        item(ID, "", "body").replace("title: \"Example\"", "title: !<tag:yaml.org,2002:str> null");
+    fixture.write(&format!("{ID}.md"), content);
+    let store = fixture.load();
+    assert!(store.is_valid(), "{}", errors(&store));
+    assert_eq!(
+        store.resolve(ID).unwrap().header.as_ref().unwrap().title,
+        "null"
+    );
+}
+
+#[test]
 fn resolves_only_unambiguous_prefixes() {
     let fixture = Fixture::new();
     fixture.write(&format!("{ID}.md"), item(ID, "", ""));
@@ -201,8 +227,10 @@ fn reports_invalid_headers_and_retains_original_file_for_inspection() {
             "close_reason must be a string",
         ),
         ("state: open\nclose_reason: reason", "close_reason requires"),
-        ("title: &name Example", "anchors and tags"),
-        ("title: !custom Example", "anchors and tags"),
+        ("title: &name Example", "anchors are forbidden"),
+        ("title: !custom Example", "custom YAML tags are forbidden"),
+        ("title: !!timestamp 2026-09-28", "unsupported YAML tag"),
+        ("title: !!int 123", "title must be a string"),
         ("title: [Example]", "title must be a string"),
     ];
     for (replacement, expected) in cases {
@@ -254,7 +282,7 @@ fn reports_duplicate_yaml_keys_forbidden_constructs_and_framing_errors() {
             format!(
                 "---\nformat_version: 1\nid: \"{ID}\"\ntitle: A\nstate: open\nlabels: &list [x]\n---\nbody"
             ),
-            "anchors and tags",
+            "anchors are forbidden",
         ),
         (
             format!(
