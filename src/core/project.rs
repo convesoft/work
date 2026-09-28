@@ -71,11 +71,32 @@ pub fn discover(selected: Option<&Path>) -> Result<Project, DiscoveryError> {
 }
 
 fn git_query(path: &Path, args: &[&str]) -> Result<Vec<u8>, DiscoveryError> {
-    let output = Command::new("git")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_CEILING_DIRECTORIES")
+    // These repository-local overrides are listed by `git rev-parse
+    // --local-env-vars`. They belong to the caller's Git context, not to the
+    // explicitly selected checkout. The ceiling is a separate discovery limit.
+    const REPOSITORY_ENV: &[&str] = &[
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_CEILING_DIRECTORIES",
+    ];
+    let mut command = Command::new("git");
+    for name in REPOSITORY_ENV {
+        command.env_remove(name);
+    }
+    let output = command
         .arg("-C")
         .arg(path)
         .arg("rev-parse")
