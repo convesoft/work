@@ -1,6 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use work::core::items::{Completion, ItemStore, ManualState};
@@ -304,6 +305,79 @@ fn list_skips_malformed_files_while_raw_inspection_remains_available() {
     assert_eq!(raw.file.path, wrong);
     assert!(!raw.file.diagnostics.is_empty());
     assert!(!ItemStore::load_from_root(&f.0).unwrap().is_valid());
+}
+
+#[test]
+fn repair_canonicalizes_a_misnamed_item_without_discarding_source() {
+    let f = Fixture::new();
+    f.write(1, "", b"Body");
+    let wrong = f.0.join(".work/items/wrong.md");
+    fs::rename(f.path(&id(1)), &wrong).unwrap();
+    let original = fs::read(&wrong).unwrap();
+    let repaired = f.ops().repair(&id(1), original.clone()).unwrap();
+    assert_eq!(repaired.path, f.path(&id(1)));
+    assert_eq!(fs::read(f.path(&id(1))).unwrap(), original);
+    assert!(!wrong.exists());
+    assert!(ItemStore::load_from_root(&f.0).unwrap().is_valid());
+    assert!(
+        fs::read_dir(f.0.join(".work/items"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".operation-"))
+    );
+}
+
+#[test]
+fn creates_files_readable_under_restrictive_umask() {
+    if std::env::var_os("WORK_UMASK_TEST_CHILD").is_some() {
+        let root = PathBuf::from(std::env::var_os("WORK_UMASK_TEST_ROOT").unwrap());
+        let ops = DurableOperations::new(root.clone());
+        let created = ops
+            .create("New".into(), b"Body".to_vec(), MetadataChange::default())
+            .unwrap();
+        let id = created.file.header.unwrap().id;
+        assert_eq!(
+            fs::metadata(root.join(".work/items").join(format!("{id}.md")))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        ops.update(
+            &id,
+            MetadataChange {
+                title: Some("Updated".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(root.join(".work/operations.lock"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        return;
+    }
+    let f = Fixture::new();
+    let result = Command::new("sh")
+        .arg("-c")
+        .arg("umask 0777; exec \"$WORK_UMASK_TEST_BIN\" --exact creates_files_readable_under_restrictive_umask --nocapture")
+        .env("WORK_UMASK_TEST_BIN", std::env::current_exe().unwrap())
+        .env("WORK_UMASK_TEST_ROOT", &f.0)
+        .env("WORK_UMASK_TEST_CHILD", "1")
+        .output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]

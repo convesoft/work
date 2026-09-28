@@ -119,24 +119,7 @@ impl DurableOperations {
             ));
         }
         let store = self.load()?;
-        let file = if let Some(file) = store.files.iter().find(|f| f.path == self.item_path(id)) {
-            file.clone()
-        } else {
-            let matches: Vec<_> = store
-                .files
-                .iter()
-                .filter(|f| f.header.as_ref().is_some_and(|h| h.id == id))
-                .collect();
-            match matches.as_slice() {
-                [file] => (*file).clone(),
-                [] => return Err(OperationError::NotFound(id.into())),
-                _ => {
-                    return Err(OperationError::Conflict(format!(
-                        "multiple source files claim item {id}"
-                    )));
-                }
-            }
-        };
+        let file = self.raw_source(&store, id)?.clone();
         Ok(RawInspection {
             file,
             graph_diagnostics: ItemGraph::from_store(&store).diagnostics().to_vec(),
@@ -153,11 +136,8 @@ impl DurableOperations {
         }
         let _lock = self.lock()?;
         let store = self.load()?;
-        let original = store
-            .files
-            .iter()
-            .find(|f| f.path == self.item_path(id))
-            .ok_or_else(|| OperationError::NotFound(id.into()))?;
+        let original = self.raw_source(&store, id)?;
+        let target_path = self.item_path(id);
         let graph_before = ItemGraph::from_store(&store);
         if original.is_valid()
             && !graph_before
@@ -169,7 +149,7 @@ impl DurableOperations {
                 "item has no source or graph diagnostic to repair".into(),
             ));
         }
-        let candidate = parse_candidate(original.path.clone(), raw.clone());
+        let candidate = parse_candidate(target_path.clone(), raw.clone());
         if !candidate.is_valid() {
             return Err(OperationError::InvalidArgument(
                 candidate
@@ -180,7 +160,14 @@ impl DurableOperations {
                     .join("; "),
             ));
         }
-        let candidate_store = candidate_store(&store, &original.path, raw.clone())?;
+        let candidate_store = if original.path == target_path {
+            candidate_store(&store, &target_path, raw.clone())?
+        } else {
+            let mut view = store.clone();
+            view.files.retain(|file| file.path != original.path);
+            view.files.push(candidate.clone());
+            view
+        };
         let graph_after = ItemGraph::from_store(&candidate_store);
         let new_diagnostics: Vec<_> = graph_after
             .diagnostics()
@@ -195,6 +182,41 @@ impl DurableOperations {
         if let Err(error) = self.check_snapshot(&store) {
             let _ = fs::remove_file(&staged);
             return Err(error);
+        }
+        if original.path != target_path {
+            match renameat_with(CWD, &staged, CWD, &target_path, RenameFlags::NOREPLACE) {
+                Ok(()) => {}
+                Err(error) if error == rustix::io::Errno::EXIST => {
+                    let _ = fs::remove_file(&staged);
+                    return Err(OperationError::Conflict(
+                        "canonical item path appeared during repair".into(),
+                    ));
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&staged);
+                    return Err(OperationError::Io(io::Error::from(error)));
+                }
+            }
+            self.sync_items()?;
+            renameat_with(CWD, &original.path, CWD, &staged, RenameFlags::NOREPLACE).map_err(
+                |error| {
+                    OperationError::Io(io::Error::other(format!(
+                        "canonical item published but old path could not be retained: {error}"
+                    )))
+                },
+            )?;
+            self.sync_items()?;
+            let archived = fs::symlink_metadata(&staged)
+                .ok()
+                .filter(|meta| meta.file_type().is_file())
+                .and_then(|_| fs::read(&staged).ok());
+            if archived.as_deref() != Some(original.raw.as_slice()) {
+                return Err(OperationError::Conflict(format!(
+                    "source changed during filename repair; recovery copy retained at {}",
+                    staged.display()
+                )));
+            }
+            return Ok(candidate);
         }
         if let Err(error) = renameat_with(CWD, &staged, CWD, &original.path, RenameFlags::EXCHANGE)
         {
@@ -463,6 +485,27 @@ impl DurableOperations {
     fn item_path(&self, id: &str) -> PathBuf {
         self.root.join(".work/items").join(format!("{id}.md"))
     }
+    fn raw_source<'a>(
+        &self,
+        store: &'a ItemStore,
+        id: &str,
+    ) -> Result<&'a ItemFile, OperationError> {
+        if let Some(file) = store.files.iter().find(|f| f.path == self.item_path(id)) {
+            return Ok(file);
+        }
+        let matches: Vec<_> = store
+            .files
+            .iter()
+            .filter(|f| f.header.as_ref().is_some_and(|h| h.id == id))
+            .collect();
+        match matches.as_slice() {
+            [file] => Ok(*file),
+            [] => Err(OperationError::NotFound(id.into())),
+            _ => Err(OperationError::Conflict(format!(
+                "multiple source files claim item {id}"
+            ))),
+        }
+    }
     fn lock(&self) -> Result<File, OperationError> {
         let work_dir = openat(
             CWD,
@@ -480,6 +523,7 @@ impl DurableOperations {
             )
             .map_err(io::Error::from)?,
         );
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
         flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
         Ok(file)
     }
@@ -499,12 +543,15 @@ impl DurableOperations {
                 .open(&path)
             {
                 Ok(mut file) => {
-                    let result = file.write_all(raw).and_then(|_| {
-                        if let Some(mode) = mode {
-                            file.set_permissions(fs::Permissions::from_mode(mode))?;
-                        }
-                        file.sync_all()
-                    });
+                    let result = file
+                        .set_permissions(fs::Permissions::from_mode(0o600))
+                        .and_then(|_| file.write_all(raw))
+                        .and_then(|_| {
+                            if let Some(mode) = mode {
+                                file.set_permissions(fs::Permissions::from_mode(mode))?;
+                            }
+                            file.sync_all()
+                        });
                     if let Err(error) = result {
                         drop(file);
                         let _ = fs::remove_file(path);
