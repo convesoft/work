@@ -23,11 +23,28 @@ This Rust project is a local, agent-first issue tracker for managing work state.
 
 - Mara owns durable product meaning. `.work/items/` owns delivery tasks, task-specific acceptance criteria, priority, dependencies, and progress. GitHub owns pull requests, reviews, CI results, and merge/publication evidence. Do not introduce Mara task or release flavours to mirror the backlog.
 - Read the selected Work item and its Mara references before implementation. If a task or review reveals a product decision, update the canonical knowledge instead of leaving that decision only in a task or PR.
-- Follow [the delivery conventions](docs/delivery.mara.md). Start each implementation item on a dedicated branch from current `main`; use `w-<short-id>-<description>` and one bounded PR per item. Squash merging is the default.
+- Follow [the delivery conventions](docs/delivery.mara.md). Start each implementation item on a dedicated branch from current `main`; use `feature/w-<short-id>-<description>` and one bounded PR per item. Squash merging is the default.
 - During bootstrap, maintain item files manually according to `.work/README.md`. Keep canonical IDs, filenames, relationships, and unrelated body content intact. Do not invent claims or run records before the coordination layer exists.
 - For this repository's implementation tasks, mark done only after their acceptance criteria pass and the change is merged. Release preparation also requires the specified publication evidence. This delivery convention does not change Work's generic item lifecycle.
 - Keep acceptance criteria and release checklists in ordinary Markdown. Work does not parse or rewrite those sections.
 - Keep ChatGPT conversation links out of repository files.
+
+## Pull requests
+
+- Start each implementation item from current `main` using
+  `feature/w-<short-id>-<description>`. Open one bounded pull request per item
+  against `main` and use a Conventional Commit title suitable for squash merge.
+- Draft the PR from [the template](.github/PULL_REQUEST_TEMPLATE.md). Preserve
+  its sections and cite the canonical `.work/items/` path, relevant Mara IDs,
+  and verification evidence that actually exists. Use `N/A` when appropriate.
+- Squash merge by default. Use rebase merge only when preserving multiple
+  independently useful commits that already follow the commit convention.
+- When the user intends to publish or continue an item PR, the main session
+  uses the [Work PR flow](.agents/skills/work-pr-flow/SKILL.md) and delegates
+  GitHub operations to the [PR manager](.codex/agents/work_pr_manager.toml).
+  The PR manager does not use the main-session skill. Implementation, tests,
+  commits, local Work-item edits, and finding classification stay with the
+  main session. The PR manager reports evidence and never merges on its own.
 
 ## Bootstrap and releases
 
