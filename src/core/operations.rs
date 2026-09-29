@@ -139,7 +139,10 @@ struct OperationLock {
 
 impl DurableOperations {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root: PathBuf = root.into();
+        Self {
+            root: root.components().collect(),
+        }
     }
 
     pub fn inspect(&self, id: &str) -> Result<Inspection, OperationError> {
@@ -1642,12 +1645,18 @@ mod tests {
         let (root, _id) = fixture();
         let alias = root.with_extension("alias");
         std::os::unix::fs::symlink(&root, &alias).unwrap();
-        let ops = DurableOperations::new(&alias);
-        assert!(matches!(ops.list(), Err(OperationError::Io(_))));
-        assert!(matches!(
-            ops.create("New".into(), Vec::new(), MetadataChange::default()),
-            Err(OperationError::Io(_))
-        ));
+        for selected in [
+            alias.clone(),
+            PathBuf::from(format!("{}/", alias.display())),
+            alias.join("."),
+        ] {
+            let ops = DurableOperations::new(selected);
+            assert!(matches!(ops.list(), Err(OperationError::Io(_))));
+            assert!(matches!(
+                ops.create("New".into(), Vec::new(), MetadataChange::default()),
+                Err(OperationError::Io(_))
+            ));
+        }
         fs::remove_file(alias).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
