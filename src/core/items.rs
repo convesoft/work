@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser, Tag};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
@@ -71,6 +72,47 @@ pub struct ItemFile {
     /// Exact bytes after the closing frontmatter delimiter, when framing is valid.
     pub body: Option<Vec<u8>>,
     pub diagnostics: Vec<Diagnostic>,
+    pub(crate) fingerprint: Option<FileFingerprint>,
+}
+
+/// Identity and metadata observed while loading a directory entry. A link's
+/// destination is part of its identity for publication conflict checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileFingerprint {
+    pub dev: u64,
+    pub ino: u64,
+    pub mode: u32,
+    pub size: u64,
+    pub mtime: (i64, i64),
+    pub ctime: (i64, i64),
+    pub link_target: Option<PathBuf>,
+}
+
+impl FileFingerprint {
+    pub fn capture(path: &Path) -> io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        let link_target = if metadata.file_type().is_symlink() {
+            Some(std::fs::read_link(path)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            mode: metadata.mode(),
+            size: metadata.size(),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+            link_target,
+        })
+    }
+
+    pub fn same_identity_and_mode(&self, other: &Self) -> bool {
+        self.dev == other.dev
+            && self.ino == other.ino
+            && self.mode == other.mode
+            && self.link_target == other.link_target
+    }
 }
 
 impl ItemFile {
@@ -204,7 +246,8 @@ fn open_real_subdirectory(parent: &OwnedFd, name: &str, flags: OFlags) -> io::Re
 }
 
 fn load_file(path: PathBuf, directory: &OwnedFd, name: &OsStr) -> ItemFile {
-    match read_regular_item(directory, name) {
+    let before = FileFingerprint::capture(&path).ok();
+    let mut file = match read_regular_item(directory, name) {
         Ok(raw) => parse_candidate(path, raw),
         Err(message) => ItemFile {
             path: path.clone(),
@@ -216,8 +259,18 @@ fn load_file(path: PathBuf, directory: &OwnedFd, name: &OsStr) -> ItemFile {
                 line: None,
                 message,
             }],
+            fingerprint: None,
         },
+    };
+    if before != FileFingerprint::capture(&file.path).ok() {
+        file.diagnostics.push(Diagnostic {
+            path: file.path.clone(),
+            line: None,
+            message: "item changed while reading".into(),
+        });
     }
+    file.fingerprint = before;
+    file
 }
 
 /// Parse candidate bytes with the same framing and header rules as a loaded file.
@@ -228,6 +281,7 @@ pub(crate) fn parse_candidate(path: PathBuf, raw: Vec<u8>) -> ItemFile {
         header: None,
         body: None,
         diagnostics: Vec::new(),
+        fingerprint: None,
     };
     match parse_file(&file.raw, &path) {
         Ok((header, body)) => {
