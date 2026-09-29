@@ -1,6 +1,6 @@
 # Verification definitions
 
-These are planned acceptance checks. No check has been executed against a Work implementation and no passing implementation evidence is asserted.
+These are repeatable acceptance definitions, not execution results. The implemented durable-item slice has automated checks in `tests/`, including copied-backlog adoption in `tests/bootstrap_adoption.rs`; consult actual test runs for passing evidence and limitations. Checks for later slices remain planned.
 
 :::mara verification VER-DURABLE-ROUNDTRIP
 :mid: 01M3KARN7CQA58Z2TFCT9BHMYM

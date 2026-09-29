@@ -30,6 +30,8 @@ cargo run --locked -- --help
 
 For the durable item loop, use `work --json item create --title "Task" --body -`, `work --json item list`, `work --json item ready`, and `work --json item inspect ID`. Add a dependency with `work --json relation add depends_on SOURCE TARGET`; close or reopen with `work --json item close ID` and `work --json item reopen ID`. Prefix the command with `--worktree PATH` to select another linked checkout without switching branches. `work --help` lists the implemented commands. [DES-CLI-JSON](docs/design.mara.md) defines the command, JSON, and exit contracts.
 
+[Using the first durable item loop](docs/using-work.md) shows the supported CLI commands and MCP tools, how to start using the existing backlog, and the limits of this slice.
+
 Run `work mcp` from a Git working checkout to serve the same durable operations to an MCP client over stdio. Each tool also accepts an optional `worktree` path. [DES-MCP-STDIO](docs/design.mara.md) defines the first tool and transport contract.
 
 The `release.yml` pipeline captures a main commit, checks source and Mara knowledge, and builds native packages on the three selected hosts. Its protected publication job requires `WORK_RELEASE_READY=true` and the GitHub `release` environment. Before the release item enables it, configure npm trusted publishing for all four `@convesoft/work` packages with repository `convesoft/work` and workflow `release.yml`, without an npm environment-name restriction; configure GitHub environment reviewers separately. The workflow file alone does not verify any of these external settings. The placeholder Cargo version `0.0.0`, missing license, and absent packaged CLI/MCP smoke script intentionally stop candidate verification until release preparation supplies them.
