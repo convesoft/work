@@ -191,9 +191,10 @@ fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
         [noun, verb, tail @ ..] if noun == "item" => match verb.as_str() {
             "list" | "ready" | "diagnose" if tail.is_empty() => Ok(()),
             "inspect" if tail.len() == 1 || (tail.len() == 2 && tail[1] == "--raw") => Ok(()),
-            "create" => Ok(()),
-            "update" if tail.len() >= 2 => Ok(()),
-            "close" | "reopen" if !tail.is_empty() => Ok(()),
+            "create" => validate_metadata_syntax(tail, true),
+            "update" if tail.len() >= 2 => validate_metadata_syntax(&tail[1..], false),
+            "close" if tail.len() == 1 || (tail.len() == 3 && tail[1] == "--reason") => Ok(()),
+            "reopen" if tail.len() == 1 => Ok(()),
             "repair" if tail.len() == 3 && tail[1] == "--source" && tail[2] == "-" => Ok(()),
             _ => Err(usage("unknown item command or arguments")),
         },
@@ -206,6 +207,43 @@ fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
         }
         _ => Err(usage("expected item or relation command")),
     }
+}
+
+fn validate_metadata_syntax(args: &[String], create: bool) -> Result<(), CliError> {
+    let mut at = 0;
+    let mut has_title = false;
+    while at < args.len() {
+        let flag = args[at].as_str();
+        let clear = matches!(
+            flag,
+            "--clear-parent" | "--clear-labels" | "--clear-model" | "--clear-thinking"
+        );
+        let known = matches!(
+            flag,
+            "--title"
+                | "--completion"
+                | "--priority"
+                | "--parent"
+                | "--label"
+                | "--model"
+                | "--thinking"
+        ) || (create && flag == "--body")
+            || clear;
+        if !known {
+            return Err(usage(format!("unknown option {flag}")));
+        }
+        if !clear && args.get(at + 1).is_none() {
+            return Err(usage(format!("missing value for {flag}")));
+        }
+        if flag == "--title" {
+            has_title = true;
+        }
+        at += if clear { 1 } else { 2 };
+    }
+    if create && !has_title {
+        return Err(usage("item create requires --title"));
+    }
+    Ok(())
 }
 
 fn item_command(
@@ -248,21 +286,14 @@ fn item_command(
                 .title
                 .ok_or_else(|| usage("item create requires --title"))?;
             let item = ops.create(title, input.body.unwrap_or_default(), input.change)?;
-            let header = item
-                .file
-                .header
-                .as_ref()
-                .expect("successful create has a header");
-            let value = one_item_value(project, &item)
-                .map_err(|error| with_published_item(error, &header.id, &item.file.path))?;
-            Ok(json!({"item":value}))
+            Ok(json!({"item":mutation_item_value(project,&item)?}))
         }
         "update" if args.len() >= 2 => {
             let id = resolve(project, &args[0])?;
             let input = parse_metadata(project, &args[1..], true, false)?;
             let mut change = input.change;
             change.title = input.title;
-            Ok(json!({"item":one_item_value(project,&ops.update(&id,change)?)?}))
+            Ok(json!({"item":mutation_item_value(project,&ops.update(&id,change)?)?}))
         }
         "close" if !args.is_empty() => {
             let id = resolve(project, &args[0])?;
@@ -271,11 +302,11 @@ fn item_command(
                 [flag, value] if flag == "--reason" => Some(value.clone()),
                 _ => return Err(usage("item close ID [--reason TEXT]")),
             };
-            Ok(json!({"item":one_item_value(project,&ops.close(&id,reason)?)?}))
+            Ok(json!({"item":mutation_item_value(project,&ops.close(&id,reason)?)?}))
         }
         "reopen" if args.len() == 1 => {
             let id = resolve(project, &args[0])?;
-            Ok(json!({"item":one_item_value(project,&ops.reopen(&id)?)?}))
+            Ok(json!({"item":mutation_item_value(project,&ops.reopen(&id)?)?}))
         }
         "repair" if args.len() == 3 && args[1] == "--source" && args[2] == "-" => {
             ops.inspect_raw(&args[0])?;
@@ -322,7 +353,7 @@ fn relation_command(
         "remove" => ops.relation_remove(&source, kind, &target)?,
         _ => return Err(usage("relation add|remove KIND SOURCE TARGET")),
     };
-    Ok(json!({"item":one_item_value(project,&item)?}))
+    Ok(json!({"item":mutation_item_value(project,&item)?}))
 }
 
 struct MetadataInput {
@@ -479,6 +510,16 @@ fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
 fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
     let store = ItemStore::load(project).map_err(io_error)?;
     item_value(&display_prefixes(&store), item)
+}
+
+fn mutation_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
+    let header = item
+        .file
+        .header
+        .as_ref()
+        .expect("successful mutation has a header");
+    one_item_value(project, item)
+        .map_err(|error| with_published_item(error, &header.id, &item.file.path))
 }
 
 fn items_value(project: &Project, items: &[Inspection]) -> Result<Vec<Value>, CliError> {

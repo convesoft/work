@@ -198,6 +198,20 @@ fn durable_loop_and_machine_readable_errors() {
         2,
         "usage",
     );
+    error(
+        call(&std::env::temp_dir(), &["item", "create", "--title"], None),
+        2,
+        "usage",
+    );
+    error(
+        call(
+            &std::env::temp_dir(),
+            &["item", "create", "--bad", "x"],
+            None,
+        ),
+        2,
+        "usage",
+    );
     let (status, stdout, stderr) = human(&f.0, &["item", "create", "--title", "--json"]);
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.starts_with("w-"));
