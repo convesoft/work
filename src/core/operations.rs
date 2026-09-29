@@ -28,6 +28,11 @@ pub enum OperationError {
     InvalidCandidate(Vec<Diagnostic>),
     Conflict(String),
     Io(io::Error),
+    Published {
+        id: String,
+        path: PathBuf,
+        cause: Box<OperationError>,
+    },
 }
 
 impl OperationError {
@@ -40,6 +45,14 @@ impl OperationError {
             Self::InvalidCandidate(_) => "invalid_candidate",
             Self::Conflict(_) => "conflict",
             Self::Io(_) => "io",
+            Self::Published { cause, .. } => cause.code(),
+        }
+    }
+
+    pub fn published_item(&self) -> Option<(&str, &Path)> {
+        match self {
+            Self::Published { id, path, .. } => Some((id, path)),
+            _ => None,
         }
     }
 }
@@ -55,6 +68,13 @@ impl fmt::Display for OperationError {
                 write!(f, "{}: {} diagnostic(s)", self.code(), diagnostics.len())
             }
             Self::Io(error) => write!(f, "io: {error}"),
+            Self::Published { id, path, cause } => {
+                write!(
+                    f,
+                    "{cause}; item {id} may have been published at {}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -290,6 +310,16 @@ impl DurableOperations {
         body: Vec<u8>,
         change: MetadataChange,
     ) -> Result<Inspection, OperationError> {
+        self.create_with_hook(title, body, change, || Ok(()))
+    }
+
+    fn create_with_hook(
+        &self,
+        title: String,
+        body: Vec<u8>,
+        change: MetadataChange,
+        after_publish: impl Fn() -> Result<(), OperationError>,
+    ) -> Result<Inspection, OperationError> {
         let lock = self.lock()?;
         let items = self.items_dir(&lock)?;
         let store = self.load_from_dir(&items)?;
@@ -316,9 +346,17 @@ impl DurableOperations {
             let path = self.item_path(&id);
             match rename_in_dir(&items, &staged, &path, RenameFlags::NOREPLACE) {
                 Ok(()) => {
-                    self.sync_items(&items)?;
-                    self.ensure_selected_dir(&lock, &items)?;
-                    return inspect_store(&self.load_from_dir(&items)?, &id);
+                    return (|| {
+                        after_publish()?;
+                        self.sync_items(&items)?;
+                        self.ensure_selected_dir(&lock, &items)?;
+                        inspect_store(&self.load_from_dir(&items)?, &id)
+                    })()
+                    .map_err(|cause| OperationError::Published {
+                        id,
+                        path,
+                        cause: Box::new(cause),
+                    });
                 }
                 Err(error) if error == rustix::io::Errno::EXIST => {
                     remove_stage(&items, &staged);
@@ -1732,6 +1770,33 @@ mod tests {
         );
         assert_eq!(error.code(), "io");
         assert!(error.to_string().contains(recovery.to_str().unwrap()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_post_publication_error_identifies_published_item() {
+        let (root, _id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let error = ops
+            .create_with_hook(
+                "New item".into(),
+                b"Body".to_vec(),
+                MetadataChange::default(),
+                || {
+                    Err(OperationError::Io(io::Error::other(
+                        "injected sync failure",
+                    )))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "io");
+        let (published_id, path) = error.published_item().unwrap();
+        assert_eq!(path, ops.item_path(published_id));
+        assert_eq!(
+            ops.inspect(published_id).unwrap().file.body.as_deref(),
+            Some(&b"Body"[..])
+        );
+        assert!(error.to_string().contains(published_id));
         fs::remove_dir_all(root).unwrap();
     }
 
