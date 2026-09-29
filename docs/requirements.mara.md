@@ -143,7 +143,7 @@ Work shall diagnose duplicate identities, unresolved relationship targets, malfo
 :kind: functional
 :derives_from: SCN-PLAN-WORK
 
-Core work operations shall be available through a CLI with structured JSON output and machine-distinguishable failures. Agents shall be able to inspect, create, relate, claim, update, and complete work, and operate templates and temporary runs, without parsing terminal presentation. Exact commands, response schemas, and compatibility policy require interface design.
+Core work operations shall be available through a CLI with structured JSON output and machine-distinguishable failures. Agents shall be able to inspect, create, relate, claim, update, and complete work, and operate templates and temporary runs, without parsing terminal presentation. [[DES-CLI-JSON]] defines the first durable-item command and JSON slice; coordination, template, and run commands require their separate interface contracts.
 :::
 
 :::mara requirement REQ-RUN-ATOMICITY
