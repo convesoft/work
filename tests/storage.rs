@@ -611,3 +611,61 @@ fn migration_retains_backup_and_rolls_back_failed_schema_change() {
         "migration-token"
     );
 }
+
+#[test]
+fn restores_a_backup_created_before_migration_then_requires_migration() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'before-migration', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection.execute_batch("PRAGMA user_version=0").unwrap();
+    drop(connection);
+    let migrated = Storage::migrate(&project).unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'after-migration', 'actor', 'later', 'later')", [SECOND]).unwrap();
+    drop(connection);
+
+    let restored = Storage::restore_backup(&project, &migrated.backup_path).unwrap();
+    assert!(restored.requires_migration);
+    assert!(restored.coordination_may_be_stale);
+    assert_eq!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::UnsupportedSchema(0)
+    );
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    let tokens: Vec<String> = connection
+        .prepare("SELECT owner_token FROM claims ORDER BY item_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(tokens, ["before-migration"]);
+    drop(connection);
+    Storage::migrate(&project).unwrap();
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+}
+
+#[test]
+fn refuses_a_schema_zero_backup_with_a_different_store_identity() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    let connection = Connection::open(&backup).unwrap();
+    connection.execute_batch("UPDATE store_meta SET store_id='00000000000000000000000000000000'; PRAGMA user_version=0").unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::restore_backup(&project, &backup),
+        Err(StorageError::Status(StorageStatus::IdentityMismatch))
+    ));
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+}

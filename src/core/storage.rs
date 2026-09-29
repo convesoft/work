@@ -136,6 +136,8 @@ pub struct RecoveryReport {
     pub lost_coordination: bool,
     /// A restored backup may predate coordination changes made after capture.
     pub coordination_may_be_stale: bool,
+    /// The restored snapshot uses a recognized older schema and needs migration.
+    pub requires_migration: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,7 +412,7 @@ impl Storage {
         let _lock = storage_lock(project)?;
         let identity = read_identity(&project.work_store_identity_path())?;
         match inspect_database(backup, &identity) {
-            StorageStatus::Ready { .. } => {}
+            StorageStatus::Ready { .. } | StorageStatus::UnsupportedSchema(0) => {}
             status => return Err(StorageError::Status(status)),
         }
         let suffix = random_id()?;
@@ -422,10 +424,11 @@ impl Storage {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         source.backup(MAIN_DB, &staged, None)?;
-        match inspect_database(&staged, &identity) {
-            StorageStatus::Ready { .. } => {}
+        let requires_migration = match inspect_database(&staged, &identity) {
+            StorageStatus::Ready { .. } => false,
+            StorageStatus::UnsupportedSchema(0) => true,
             status => return Err(StorageError::Status(status)),
-        }
+        };
         File::open(&staged)?.sync_all()?;
         let retained_paths = quarantine_database(project, &suffix)?;
         fs::rename(&staged, project.work_database_path())?;
@@ -435,6 +438,7 @@ impl Storage {
             retained_paths,
             lost_coordination: false,
             coordination_may_be_stale: true,
+            requires_migration,
         })
     }
 
@@ -469,6 +473,7 @@ impl Storage {
             retained_paths,
             lost_coordination: true,
             coordination_may_be_stale: false,
+            requires_migration: false,
         })
     }
 }
@@ -764,6 +769,13 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
     })();
     match result {
         Ok((integrity, _)) if integrity != "ok" => StorageStatus::Corrupt(integrity),
+        Ok((_, 0)) => match connection.query_row("SELECT store_id FROM store_meta", [], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(store_id) if store_id != marker => StorageStatus::IdentityMismatch,
+            Ok(_) => StorageStatus::UnsupportedSchema(0),
+            Err(error) => StorageStatus::Corrupt(error.to_string()),
+        },
         Ok((_, version)) if version != SCHEMA_VERSION => StorageStatus::UnsupportedSchema(version),
         Ok((_, schema_version)) => {
             if let Err(error) = validate_schema_v1(&connection) {

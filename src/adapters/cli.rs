@@ -271,7 +271,7 @@ fn command_help(words: &[String]) -> Option<&'static str> {
             "Usage: work storage migrate\nBack up and transactionally migrate a recognized older coordination schema.",
         ),
         ["storage", "restore", "--help"] => Some(
-            "Usage: work storage restore --backup PATH\nWith active execution stopped, explicitly restore a verified backup after inspecting a storage fault.",
+            "Usage: work storage restore --backup PATH\nWith active execution stopped, explicitly restore a verified backup after inspecting a storage fault. A restored older schema requires an explicit storage migrate before coordination resumes.",
         ),
         ["storage", "recreate", "--help"] => Some(
             "Usage: work storage recreate\nWith active execution stopped, explicitly recreate a diagnosed lost or corrupt database. Existing claims and observations cannot be recovered from files.",
@@ -511,14 +511,16 @@ pub(super) fn storage_command(
             Ok(json!({"database_path":encode_path(&report.database_path),
                 "retained_paths":report.retained_paths.iter().map(|path|encode_path(path)).collect::<Vec<_>>(),
                 "lost_coordination":report.lost_coordination,
-                "coordination_may_be_stale":report.coordination_may_be_stale}))
+                "coordination_may_be_stale":report.coordination_may_be_stale,
+                "requires_migration":report.requires_migration}))
         }
         ("recreate", []) => {
             let report = Storage::recreate(project)?;
             Ok(json!({"database_path":encode_path(&report.database_path),
                 "retained_paths":report.retained_paths.iter().map(|path|encode_path(path)).collect::<Vec<_>>(),
                 "lost_coordination":report.lost_coordination,
-                "coordination_may_be_stale":report.coordination_may_be_stale}))
+                "coordination_may_be_stale":report.coordination_may_be_stale,
+                "requires_migration":report.requires_migration}))
         }
         _ => Err(usage(
             "storage inspect|rebuild|backup|migrate|restore --backup PATH|recreate",
