@@ -3,14 +3,15 @@
 //! Every Markdown file remains in `ItemStore::files`, including malformed ones.
 //! Consumers can inspect its original bytes and diagnostics before repairing it.
 
-use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, openat, statat};
+use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, openat, readlinkat, statat};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
+#[cfg(test)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser, Tag};
@@ -89,6 +90,7 @@ pub(crate) struct FileFingerprint {
 }
 
 impl FileFingerprint {
+    #[cfg(test)]
     pub fn capture(path: &Path) -> io::Result<Self> {
         let metadata = std::fs::symlink_metadata(path)?;
         let link_target = if metadata.file_type().is_symlink() {
@@ -103,6 +105,29 @@ impl FileFingerprint {
             size: metadata.size(),
             mtime: (metadata.mtime(), metadata.mtime_nsec()),
             ctime: (metadata.ctime(), metadata.ctime_nsec()),
+            link_target,
+        })
+    }
+
+    pub fn capture_at(directory: impl AsFd, name: &OsStr) -> io::Result<Self> {
+        let metadata =
+            statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+        let link_target = if FileType::from_raw_mode(metadata.st_mode) == FileType::Symlink {
+            Some(PathBuf::from(OsString::from_vec(
+                readlinkat(&directory, name, Vec::new())
+                    .map_err(io::Error::from)?
+                    .into_bytes(),
+            )))
+        } else {
+            None
+        };
+        Ok(Self {
+            dev: metadata.st_dev as u64,
+            ino: metadata.st_ino as u64,
+            mode: metadata.st_mode as u32,
+            size: metadata.st_size as u64,
+            mtime: (metadata.st_mtime as i64, metadata.st_mtime_nsec as i64),
+            ctime: (metadata.st_ctime as i64, metadata.st_ctime_nsec as i64),
             link_target,
         })
     }
@@ -150,7 +175,7 @@ impl ItemStore {
         Self::load_from_open_items(&items_fd, &root.join(".work/items"))
     }
 
-    fn load_from_open_items(items_fd: &OwnedFd, dir_path: &Path) -> io::Result<Self> {
+    pub(crate) fn load_from_open_items(items_fd: &OwnedFd, dir_path: &Path) -> io::Result<Self> {
         let mut names = Vec::new();
         for entry in Dir::read_from(items_fd).map_err(io::Error::from)? {
             let entry = entry.map_err(io::Error::from)?;
@@ -246,7 +271,7 @@ fn open_real_subdirectory(parent: &OwnedFd, name: &str, flags: OFlags) -> io::Re
 }
 
 fn load_file(path: PathBuf, directory: &OwnedFd, name: &OsStr) -> ItemFile {
-    let before = FileFingerprint::capture(&path).ok();
+    let before = FileFingerprint::capture_at(directory, name).ok();
     let mut file = match read_regular_item(directory, name) {
         Ok(raw) => parse_candidate(path, raw),
         Err(message) => ItemFile {
@@ -262,7 +287,7 @@ fn load_file(path: PathBuf, directory: &OwnedFd, name: &OsStr) -> ItemFile {
             fingerprint: None,
         },
     };
-    if before != FileFingerprint::capture(&file.path).ok() {
+    if before != FileFingerprint::capture_at(directory, name).ok() {
         file.diagnostics.push(Diagnostic {
             path: file.path.clone(),
             line: None,
