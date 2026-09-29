@@ -365,6 +365,45 @@ fn missing_and_corrupt_database_require_explicit_recovery() {
 }
 
 #[test]
+fn exclusive_sqlite_lock_is_retryable_busy_and_does_not_recreate_store() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let before = Storage::inspect(&project).unwrap().status;
+    let locker = Connection::open(project.work_database_path()).unwrap();
+    locker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+    let inspection = Storage::inspect(&project).unwrap();
+    assert_eq!(inspection.status, StorageStatus::Busy);
+    assert_eq!(inspection.status.code(), "storage_busy");
+    let open_error = match Storage::open(&project) {
+        Ok(_) => panic!("locked storage unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        open_error,
+        StorageError::Status(StorageStatus::Busy)
+    ));
+    assert!(open_error.to_string().contains("retry"));
+    assert!(matches!(
+        Storage::recreate(&project),
+        Err(StorageError::Status(StorageStatus::Busy))
+    ));
+    assert!(
+        !project
+            .work_storage_dir()
+            .join("recovery.in_progress")
+            .exists()
+    );
+    assert!(project.work_database_path().exists());
+    assert!(project.work_store_identity_path().exists());
+
+    locker.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(Storage::inspect(&project).unwrap().status, before);
+    drop(Storage::open(&project).unwrap());
+}
+
+#[test]
 fn interrupted_recreation_cannot_silently_initialize_and_can_be_resumed() {
     let fixture = Fixture::new();
     let project = fixture.project(&fixture.checkout);
@@ -516,6 +555,74 @@ fn missing_claim_uniqueness_is_reported_as_corrupt() {
             .ready()
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn claim_cascade_to_derived_view_is_rejected_in_v1_and_schema_zero() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE claims;
+             CREATE TABLE claims (
+                 item_id TEXT PRIMARY KEY, owner_token TEXT NOT NULL UNIQUE,
+                 actor_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                 run_id TEXT, session_id TEXT, workspace_id TEXT,
+                 FOREIGN KEY(item_id) REFERENCES views(root) ON DELETE CASCADE
+             );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO views(root, generation) VALUES (?1, 0)",
+            [FIRST],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'cascade-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap(),
+        0
+    );
+    drop(connection);
+
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail)
+            if detail.contains("coordination table claims must not have foreign keys")
+    ));
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute_batch("PRAGMA user_version=0").unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail)
+            if detail.contains("coordination table claims must not have foreign keys")
+    ));
+    assert!(matches!(
+        Storage::migrate(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "cascade-token"
     );
 }
 

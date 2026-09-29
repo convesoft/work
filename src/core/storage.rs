@@ -12,7 +12,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{
-    Connection, MAIN_DB, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    Connection, ErrorCode, MAIN_DB, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+    params,
 };
 use rustix::fs::{CWD, FlockOperation, Mode, OFlags, flock, openat};
 
@@ -33,6 +34,7 @@ pub enum StorageStatus {
     MissingDatabase,
     MissingIdentity,
     IdentityMismatch,
+    Busy,
     Corrupt(String),
     UnsupportedSchema(i64),
 }
@@ -45,6 +47,7 @@ impl StorageStatus {
             Self::MissingDatabase => "missing_database",
             Self::MissingIdentity => "missing_identity",
             Self::IdentityMismatch => "identity_mismatch",
+            Self::Busy => "storage_busy",
             Self::Corrupt(_) => "corrupt_database",
             Self::UnsupportedSchema(_) => "unsupported_schema",
         }
@@ -87,6 +90,9 @@ impl StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Status(StorageStatus::Busy) => f.write_str(
+                "coordination storage is busy; retry after the current SQLite operation completes",
+            ),
             Self::Status(status) => write!(
                 f,
                 "coordination storage needs inspection or explicit recovery: {status:?}"
@@ -482,6 +488,9 @@ impl Storage {
                 "recreation requires a diagnosed storage fault".into(),
             ));
         }
+        if status == StorageStatus::Busy {
+            return Err(StorageError::Status(status));
+        }
         let mut retained_paths = if recovery_marker_exists(project)? {
             existing_retained_paths(project)?
         } else {
@@ -692,6 +701,12 @@ fn validate_coordination_schema(connection: &Connection) -> Result<(), StorageEr
         ("runtime_records", RECORDS),
     ] {
         validate_columns(connection, table, expected)?;
+        let mut statement = connection.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+        if statement.query([])?.next()?.is_some() {
+            return Err(StorageError::InvalidArgument(format!(
+                "schema coordination table {table} must not have foreign keys"
+            )));
+        }
     }
     if !has_unique_column(connection, "claims", "owner_token")? {
         return Err(StorageError::InvalidArgument(
@@ -826,8 +841,11 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     ) {
         Ok(connection) => connection,
-        Err(error) => return StorageStatus::Corrupt(error.to_string()),
+        Err(error) => return inspection_error(error.into()),
     };
+    if let Err(error) = connection.busy_timeout(std::time::Duration::from_millis(250)) {
+        return inspection_error(error.into());
+    }
     let result = (|| -> rusqlite::Result<(String, i64)> {
         let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -837,20 +855,20 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
         Ok((integrity, _)) if integrity != "ok" => StorageStatus::Corrupt(integrity),
         Ok((_, 0)) => {
             if let Err(error) = validate_coordination_schema(&connection) {
-                return StorageStatus::Corrupt(error.to_string());
+                return inspection_error(error);
             }
             match connection.query_row("SELECT store_id FROM store_meta", [], |row| {
                 row.get::<_, String>(0)
             }) {
                 Ok(store_id) if store_id != marker => StorageStatus::IdentityMismatch,
                 Ok(_) => StorageStatus::UnsupportedSchema(0),
-                Err(error) => StorageStatus::Corrupt(error.to_string()),
+                Err(error) => inspection_error(error.into()),
             }
         }
         Ok((_, version)) if version != SCHEMA_VERSION => StorageStatus::UnsupportedSchema(version),
         Ok((_, schema_version)) => {
             if let Err(error) = validate_schema_v1(&connection) {
-                return StorageStatus::Corrupt(error.to_string());
+                return inspection_error(error);
             }
             match connection.query_row("SELECT store_id FROM store_meta", [], |row| {
                 row.get::<_, String>(0)
@@ -860,10 +878,24 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
                     store_id,
                     schema_version,
                 },
-                Err(error) => StorageStatus::Corrupt(error.to_string()),
+                Err(error) => inspection_error(error.into()),
             }
         }
-        Err(error) => StorageStatus::Corrupt(error.to_string()),
+        Err(error) => inspection_error(error.into()),
+    }
+}
+
+fn inspection_error(error: StorageError) -> StorageStatus {
+    match &error {
+        StorageError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
+            if matches!(
+                failure.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            ) =>
+        {
+            StorageStatus::Busy
+        }
+        _ => StorageStatus::Corrupt(error.to_string()),
     }
 }
 

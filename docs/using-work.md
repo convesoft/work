@@ -38,7 +38,7 @@ Use `--worktree PATH` before a command to read or edit another linked checkout's
 
 ## Inspect shared storage
 
-Linked worktrees share SQLite coordination storage under their resolved Git common directory. Item files in each selected checkout remain authoritative; `item list`, `inspect`, and `ready` reload them and reconcile a derived view. If the database is missing after prior use or fails validation, those file-derived queries still return results with `storage_warning` in JSON/MCP and a warning on stderr in human CLI output. Coordination operations require explicit recovery.
+Linked worktrees share SQLite coordination storage under their resolved Git common directory. Item files in each selected checkout remain authoritative; `item list`, `inspect`, and `ready` reload them and reconcile a derived view. If the database is missing after prior use or fails validation, those file-derived queries still return results with `storage_warning` in JSON/MCP and a warning on stderr in human CLI output. Coordination operations require explicit recovery. A `storage_busy` warning means another process holds a SQLite lock; retry after the lock clears.
 
 ```sh
 target/debug/work --json storage inspect
