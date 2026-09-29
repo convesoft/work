@@ -275,12 +275,7 @@ impl Storage {
         let connection = open_rw(&inspection.database_path)?;
         let expected_id =
             read_identity(&inspection.identity_path).map_err(storage_boundary_error)?;
-        let opened_id: String = connection
-            .query_row("SELECT store_id FROM store_meta", [], |row| row.get(0))
-            .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
-        if opened_id != expected_id {
-            return Err(StorageError::Status(StorageStatus::IdentityMismatch));
-        }
+        require_one_matching_identity(&connection, &expected_id)?;
         Ok(Self {
             common_dir: project.git_common_dir.clone(),
             connection,
@@ -307,6 +302,67 @@ impl Storage {
         self.update_projection(project, store, true)
     }
 
+    /// Rebuild a selected view, repairing disposable derived tables when their
+    /// schema is damaged but the identity and coordination state are intact.
+    pub fn rebuild_selected(
+        project: &Project,
+        store: &ItemStore,
+    ) -> Result<ReconcileReport, StorageError> {
+        match Self::open(project) {
+            Ok(mut storage) => match storage.rebuild(project, store) {
+                Err(StorageError::Status(StorageStatus::Corrupt(_))) => {
+                    drop(storage);
+                    Self::repair_derived_and_rebuild(project, store)
+                }
+                result => result,
+            },
+            Err(StorageError::Status(StorageStatus::Corrupt(_))) => {
+                Self::repair_derived_and_rebuild(project, store)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn repair_derived_and_rebuild(
+        project: &Project,
+        store: &ItemStore,
+    ) -> Result<ReconcileReport, StorageError> {
+        let graph = ItemGraph::from_store(store);
+        if !graph.is_valid() {
+            return Err(StorageError::InvalidSource(graph.diagnostics().to_vec()));
+        }
+        let ephemeral = scan_ephemeral(&project.work_storage_dir().join("runs"))?;
+        ensure_storage_dir(project).map_err(storage_boundary_error)?;
+        let _lock = storage_lock(project).map_err(storage_boundary_error)?;
+        let status = Self::inspect(project)?.status;
+        if recovery_marker_exists(project)?
+            || !matches!(
+                status,
+                StorageStatus::Corrupt(_) | StorageStatus::Ready { .. }
+            )
+        {
+            return Err(StorageError::Status(status));
+        }
+        let identity = read_identity(&project.work_store_identity_path())
+            .map_err(|error| StorageError::Status(inspection_error(error)))?;
+        let mut connection = open_rw(&project.work_database_path())?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_rebuild_base(&tx, &identity)?;
+        if let Err(error) = validate_schema_v1(&tx) {
+            let status = inspection_error(error);
+            if !matches!(status, StorageStatus::Corrupt(_)) {
+                return Err(StorageError::Status(status));
+            }
+            drop_derived_for_repair(&tx)?;
+            create_schema_v1(&tx)?;
+            validate_schema_v1(&tx)
+                .map_err(|error| StorageError::Status(inspection_error(error)))?;
+        }
+        let report = Self::write_projection(&tx, project, store, &ephemeral, true)?;
+        tx.commit()?;
+        Ok(report)
+    }
+
     fn update_projection(
         &mut self,
         project: &Project,
@@ -323,17 +379,29 @@ impl Storage {
             return Err(StorageError::InvalidSource(graph.diagnostics().to_vec()));
         }
         let ephemeral = scan_ephemeral(&project.work_storage_dir().join("runs"))?;
-        let root = project.worktree_root.as_os_str().as_bytes();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate_schema_v1(&tx).map_err(|error| StorageError::Status(inspection_error(error)))?;
+        let report = Self::write_projection(&tx, project, store, &ephemeral, rebuild)?;
+        tx.commit()?;
+        Ok(report)
+    }
+
+    fn write_projection(
+        tx: &Transaction<'_>,
+        project: &Project,
+        store: &ItemStore,
+        ephemeral: &BTreeMap<Vec<u8>, Vec<u8>>,
+        rebuild: bool,
+    ) -> Result<ReconcileReport, StorageError> {
+        let root = project.worktree_root.as_os_str().as_bytes();
         tx.execute(
             "INSERT OR IGNORE INTO views(root, generation) VALUES (?1, 0)",
             params![root],
         )?;
-        let previous = read_sources(&tx, root)?;
-        let previous_ephemeral = read_ephemeral(&tx)?;
+        let previous = read_sources(tx, root)?;
+        let previous_ephemeral = read_ephemeral(tx)?;
         if rebuild {
             tx.execute(
                 "DELETE FROM source_files WHERE view_root = ?1",
@@ -369,7 +437,7 @@ impl Storage {
                     "DELETE FROM source_files WHERE view_root = ?1 AND path = ?2",
                     params![root, path],
                 )?;
-                insert_source(&tx, root, &path, &digest, file)?;
+                insert_source(tx, root, &path, &digest, file)?;
             }
             current.insert(path, ());
         }
@@ -386,7 +454,7 @@ impl Storage {
         }
         let mut changed_ephemeral_files = 0;
         let mut removed_ephemeral_files = 0;
-        for (path, source_digest) in &ephemeral {
+        for (path, source_digest) in ephemeral {
             let same = previous_ephemeral
                 .get(path)
                 .is_some_and(|old_digest| old_digest == source_digest);
@@ -425,7 +493,6 @@ impl Storage {
             params![root],
             |row| row.get(0),
         )?;
-        tx.commit()?;
         Ok(ReconcileReport {
             view_root: project.worktree_root.clone(),
             changed_files,
@@ -461,15 +528,11 @@ impl Storage {
         let mut connection = open_rw(&project.work_database_path())?;
         validate_coordination_schema(&connection)
             .map_err(|error| StorageError::Status(inspection_error(error)))?;
-        let stored: String = connection
-            .query_row("SELECT store_id FROM store_meta", [], |row| row.get(0))
-            .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
-        if stored != marker {
-            return Err(StorageError::Status(StorageStatus::IdentityMismatch));
-        }
+        require_one_matching_identity(&connection, &marker)?;
         let backup_path = retain_backup(&connection, project)?;
         (|| -> Result<(), StorageError> {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            require_one_matching_identity(&tx, &marker)?;
             drop_derived_tables(&tx)?;
             create_schema_v1(&tx)?;
             validate_schema_v1(&tx)?;
@@ -662,6 +725,69 @@ fn drop_derived_tables(tx: &Transaction<'_>) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn drop_derived_for_repair(tx: &Transaction<'_>) -> Result<(), StorageError> {
+    for name in [
+        "edges",
+        "items",
+        "source_files",
+        "views",
+        "ephemeral_sources",
+    ] {
+        let kind: Option<String> = tx
+            .query_row(
+                "SELECT type FROM sqlite_schema WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match kind.as_deref() {
+            Some("table") => tx.execute_batch(&format!("DROP TABLE {name}"))?,
+            Some("view") => tx.execute_batch(&format!("DROP VIEW {name}"))?,
+            None => {}
+            Some(_) => {
+                return Err(StorageError::Status(StorageStatus::Corrupt(format!(
+                    "derived object {name} is not a table or view"
+                ))));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_rebuild_base(connection: &Connection, identity: &str) -> Result<(), StorageError> {
+    let integrity: String = connection
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
+    if integrity != "ok" {
+        return Err(StorageError::Status(StorageStatus::Corrupt(integrity)));
+    }
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
+    if version != SCHEMA_VERSION {
+        return Err(StorageError::Status(StorageStatus::UnsupportedSchema(
+            version,
+        )));
+    }
+    validate_coordination_schema(connection)
+        .map_err(|error| StorageError::Status(inspection_error(error)))?;
+    validate_canonical_tables(connection, COORDINATION_TABLES)
+        .map_err(|error| StorageError::Status(inspection_error(error)))?;
+    let trigger: Option<String> = connection
+        .query_row(
+            "SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name IN ('store_meta','claims','runtime_records') LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(name) = trigger {
+        return Err(StorageError::Status(StorageStatus::Corrupt(format!(
+            "coordination table contains unexpected trigger {name}"
+        ))));
+    }
+    require_one_matching_identity(connection, identity)
+}
+
 fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
     validate_coordination_schema(connection)?;
     validate_no_triggers(connection)?;
@@ -764,13 +890,19 @@ fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
 }
 
 fn validate_canonical_v1_tables(connection: &Connection) -> Result<(), StorageError> {
+    validate_canonical_tables(connection, V1_TABLES)
+}
+
+const COORDINATION_TABLES: &str = "'store_meta','claims','runtime_records'";
+const V1_TABLES: &str = "'store_meta','views','source_files','items','edges','ephemeral_sources','claims','runtime_records'";
+
+fn validate_canonical_tables(connection: &Connection, tables: &str) -> Result<(), StorageError> {
     // SQLite table_info omits CHECK clauses, defaults, collations, and other
     // constraints that can make a seemingly ready store reject normal writes.
     let canonical = Connection::open_in_memory()?;
     canonical.execute_batch(SCHEMA_V1_SQL)?;
-    const TABLES: &str = "'store_meta','views','source_files','items','edges','ephemeral_sources','claims','runtime_records'";
     let query = format!(
-        "SELECT name, sql FROM sqlite_schema WHERE type='table' AND name IN ({TABLES}) ORDER BY name"
+        "SELECT name, sql FROM sqlite_schema WHERE type='table' AND name IN ({tables}) ORDER BY name"
     );
     let definitions = |db: &Connection| -> Result<Vec<(String, String)>, StorageError> {
         let mut statement = db.prepare(&query)?;
@@ -785,7 +917,7 @@ fn validate_canonical_v1_tables(connection: &Connection) -> Result<(), StorageEr
     }
     let extra_index: Option<String> = connection
         .query_row(
-            &format!("SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name IN ({TABLES}) AND sql IS NOT NULL LIMIT 1"),
+            &format!("SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name IN ({tables}) AND sql IS NOT NULL LIMIT 1"),
             [],
             |row| row.get(0),
         )
@@ -1001,7 +1133,7 @@ fn validated_database_identity(database: &Path) -> Result<String, StorageError> 
         .busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
     let identities: Vec<String> = connection
-        .prepare("SELECT store_id FROM store_meta")
+        .prepare("SELECT store_id FROM store_meta LIMIT 2")
         .and_then(|mut statement| {
             statement
                 .query_map([], |row| row.get(0))?
@@ -1022,6 +1154,29 @@ fn validated_database_identity(database: &Path) -> Result<String, StorageError> 
         StorageStatus::Ready { .. } | StorageStatus::UnsupportedSchema(0) => Ok(identity.clone()),
         status => Err(StorageError::Status(status)),
     }
+}
+
+fn require_one_matching_identity(
+    connection: &Connection,
+    expected: &str,
+) -> Result<(), StorageError> {
+    let identities: Vec<String> = connection
+        .prepare("SELECT store_id FROM store_meta LIMIT 2")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()
+        })
+        .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
+    let [identity] = identities.as_slice() else {
+        return Err(StorageError::Status(StorageStatus::Corrupt(
+            "store_meta must contain exactly one identity".into(),
+        )));
+    };
+    if identity != expected {
+        return Err(StorageError::Status(StorageStatus::IdentityMismatch));
+    }
+    Ok(())
 }
 
 fn retained_pair_identity(project: &Project) -> Result<String, StorageError> {
@@ -1125,12 +1280,10 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
             if let Err(error) = validate_coordination_schema(&connection) {
                 return inspection_error(error);
             }
-            match connection.query_row("SELECT store_id FROM store_meta", [], |row| {
-                row.get::<_, String>(0)
-            }) {
-                Ok(store_id) if store_id != marker => StorageStatus::IdentityMismatch,
-                Ok(_) => StorageStatus::UnsupportedSchema(0),
-                Err(error) => inspection_error(error.into()),
+            match require_one_matching_identity(&connection, marker) {
+                Ok(()) => StorageStatus::UnsupportedSchema(0),
+                Err(StorageError::Status(status)) => status,
+                Err(error) => inspection_error(error),
             }
         }
         Ok((_, version)) if version != SCHEMA_VERSION => StorageStatus::UnsupportedSchema(version),
@@ -1138,15 +1291,13 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
             if let Err(error) = validate_schema_v1(&connection) {
                 return inspection_error(error);
             }
-            match connection.query_row("SELECT store_id FROM store_meta", [], |row| {
-                row.get::<_, String>(0)
-            }) {
-                Ok(store_id) if store_id != marker => StorageStatus::IdentityMismatch,
-                Ok(store_id) => StorageStatus::Ready {
-                    store_id,
+            match require_one_matching_identity(&connection, marker) {
+                Ok(()) => StorageStatus::Ready {
+                    store_id: marker.to_owned(),
                     schema_version,
                 },
-                Err(error) => inspection_error(error.into()),
+                Err(StorageError::Status(status)) => status,
+                Err(error) => inspection_error(error),
             }
         }
         Err(error) => inspection_error(error.into()),

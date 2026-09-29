@@ -46,7 +46,7 @@ target/debug/work --json storage rebuild
 target/debug/work --json storage backup
 ```
 
-`storage inspect` does not initialize or change the database. On the first ordinary use, Work initializes an entirely absent store. `storage rebuild` replaces only derived indexes from valid item files and retained run-file digests, preserving coordination records. After stopping active execution, an operator can use `storage restore --backup ENCODED_PATH` with a path returned by backup or migration, or `storage recreate` after a diagnosed fault. A restored older schema reports `requires_migration: true`; run `storage migrate` explicitly before coordination resumes. Recreating reports lost coordination because claims and observations cannot be reconstructed from files.
+`storage inspect` does not initialize or change the database. On the first ordinary use, Work initializes an entirely absent store. `storage rebuild` repairs damaged derived tables and rebuilds indexes from valid item files and retained run-file digests in one transaction when the store identity and coordination tables are intact; it preserves claims and runtime records. After stopping active execution, an operator can use `storage restore --backup ENCODED_PATH` with a path returned by backup or migration, or `storage recreate` after a diagnosed fault. A restored older schema reports `requires_migration: true`; run `storage migrate` explicitly before coordination resumes. Recreating reports lost coordination because claims and observations cannot be reconstructed from files.
 
 ## Preview a reusable template
 

@@ -279,7 +279,7 @@ fn command_help(words: &[String]) -> Option<&'static str> {
             "Usage: work storage inspect\nRead storage status without creating or changing the database.",
         ),
         ["storage", "rebuild", "--help"] => Some(
-            "Usage: work storage rebuild\nRebuild the selected worktree's derived index while preserving coordination records.",
+            "Usage: work storage rebuild\nRepair damaged derived tables and rebuild the selected worktree's index while preserving coordination records.",
         ),
         ["storage", "backup", "--help"] => Some(
             "Usage: work storage backup\nRetain a consistent copy of the coordination database.",
@@ -531,7 +531,7 @@ pub(super) fn storage_command(
         }
         ("rebuild", []) => {
             let store = ItemStore::load(project).map_err(io_error)?;
-            let report = Storage::open(project)?.rebuild(project, &store)?;
+            let report = Storage::rebuild_selected(project, &store)?;
             Ok(json!({"view_root":encode_path(&report.view_root),
                 "changed_files":report.changed_files,"removed_files":report.removed_files,
                 "unchanged_files":report.unchanged_files,

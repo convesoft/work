@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rusqlite::Connection;
 use serde_json::{Value, json};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -595,6 +596,55 @@ fn storage_recovery_warning_and_rebuild_match_cli_and_mcp() {
             .get("storage_warning")
             .is_none()
     );
+}
+
+#[test]
+fn cli_and_mcp_repair_derived_schema_without_losing_claims() {
+    let fixture = Fixture::new();
+    let id = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+    fixture.write(id, "");
+    let mut client = Client::new(&fixture.0);
+    client.ok("item_ready", json!({}));
+    let database = fixture.0.join(".git/work/work.db");
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'kept-token', 'actor', 'now', 'now')",
+            [id],
+        )
+        .unwrap();
+    connection.execute_batch("DROP TABLE edges").unwrap();
+    drop(connection);
+
+    assert_eq!(
+        client.ok("storage_inspect", json!({}))["storage"]["status"],
+        "corrupt_database"
+    );
+    let repaired = fixture.cli(&["storage", "rebuild"]);
+    assert_eq!(repaired["ok"], true, "{repaired}");
+    assert_eq!(
+        client.ok("storage_inspect", json!({}))["storage"]["status"],
+        "ready"
+    );
+
+    let connection = Connection::open(&database).unwrap();
+    connection.execute_batch("DROP TABLE edges").unwrap();
+    drop(connection);
+    let rebuilt = client.ok("storage_rebuild", json!({}));
+    assert_eq!(rebuilt["changed_files"], 1);
+    assert_eq!(
+        client.ok("storage_inspect", json!({}))["storage"]["status"],
+        "ready"
+    );
+    let connection = Connection::open(&database).unwrap();
+    let token: String = connection
+        .query_row(
+            "SELECT owner_token FROM claims WHERE item_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(token, "kept-token");
 }
 
 #[test]

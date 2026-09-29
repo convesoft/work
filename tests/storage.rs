@@ -224,6 +224,14 @@ fn linked_views_reconcile_uncommitted_changes_without_leaking_readiness() {
         0
     );
     assert_eq!(indexed_state(&connection, &main, SECOND).0, "Dependent");
+    drop(storage);
+    let rebuilt = Storage::rebuild_selected(&linked, &fixture.store(&fixture.linked)).unwrap();
+    assert_eq!(rebuilt.changed_files, 1);
+    assert_eq!(indexed_state(&connection, &main, FIRST).0, "Original");
+    assert_eq!(
+        indexed_state(&connection, &linked, FIRST).0,
+        "Linked reopened"
+    );
 }
 
 #[test]
@@ -313,6 +321,175 @@ fn rebuild_rolls_back_on_failure_and_preserves_coordination_and_run_inventory() 
         .unwrap();
     assert_eq!(report.changed_files, 0);
     assert_eq!(report.unchanged_files, 2);
+}
+
+#[test]
+fn selected_rebuild_repairs_missing_derived_table_without_losing_coordination() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let mut storage = Storage::open(&project).unwrap();
+    storage
+        .reconcile(&project, &fixture.store(&fixture.checkout))
+        .unwrap();
+    drop(storage);
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'repair-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection.execute("INSERT INTO runtime_records(kind, record_key, value) VALUES ('observation', 'repair', X'CAFE')", []).unwrap();
+    connection.execute_batch("DROP TABLE source_files").unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(_)
+    ));
+    let report = Storage::rebuild_selected(&project, &fixture.store(&fixture.checkout)).unwrap();
+    assert_eq!(report.changed_files, 2);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(indexed_state(&connection, &project, FIRST).0, "Original");
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "repair-claim"
+    );
+    assert_eq!(
+        connection
+            .query_row::<Vec<u8>, _, _>(
+                "SELECT value FROM runtime_records WHERE record_key = 'repair'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        b"\xca\xfe"
+    );
+}
+
+#[test]
+fn selected_rebuild_replaces_malformed_derived_constraint() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'constraint-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE source_files;
+        CREATE TABLE source_files (
+            view_root BLOB NOT NULL, path BLOB NOT NULL CHECK(length(path) = 0),
+            source_digest BLOB NOT NULL, PRIMARY KEY(view_root, path),
+            FOREIGN KEY(view_root) REFERENCES views(root) ON DELETE CASCADE
+        )",
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(_)
+    ));
+    Storage::rebuild_selected(&project, &fixture.store(&fixture.checkout)).unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(indexed_state(&connection, &project, FIRST).0, "Original");
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "constraint-claim"
+    );
+}
+
+#[test]
+fn selected_rebuild_rolls_back_schema_repair_on_invalid_sources_or_runs() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'rollback-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection.execute_batch("DROP TABLE source_files").unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::rebuild_selected(&project, &fixture.store(&fixture.linked)),
+        Err(StorageError::InvalidArgument(_))
+    ));
+    let runs = project.work_storage_dir().join("runs");
+    symlink(&fixture.root, &runs).unwrap();
+    assert!(matches!(
+        Storage::rebuild_selected(&project, &fixture.store(&fixture.checkout)),
+        Err(StorageError::InvalidArgument(_))
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='source_files'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "rollback-claim"
+    );
+    drop(connection);
+    fs::remove_file(&runs).unwrap();
+    Storage::rebuild_selected(&project, &fixture.store(&fixture.checkout)).unwrap();
+}
+
+#[test]
+fn selected_rebuild_refuses_missing_coordination_without_changing_derived_schema() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'protected-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection
+        .execute_batch("DROP TABLE runtime_records; DROP TABLE source_files")
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        Storage::rebuild_selected(&project, &fixture.store(&fixture.checkout)),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='source_files'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "protected-claim"
+    );
 }
 
 #[test]
@@ -1023,6 +1200,62 @@ fn missing_required_table_is_reported_as_corrupt() {
         Storage::open(&project),
         Err(StorageError::Status(StorageStatus::Corrupt(_)))
     ));
+}
+
+#[test]
+fn two_store_identity_rows_block_v1_open_rebuild_and_schema_zero_migration() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'identity-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection
+        .execute(
+            "INSERT INTO store_meta(store_id) VALUES ('ffffffffffffffffffffffffffffffff')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail) if detail.contains("exactly one identity")
+    ));
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    assert!(matches!(
+        Storage::rebuild_selected(&project, &fixture.store(&fixture.checkout)),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute_batch("PRAGMA user_version=0").unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail) if detail.contains("exactly one identity")
+    ));
+    assert!(matches!(
+        Storage::migrate(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "identity-claim"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT count(*) FROM store_meta", [], |row| row.get(0))
+            .unwrap(),
+        2
+    );
 }
 
 #[test]

@@ -244,7 +244,7 @@ fn tools() -> Vec<Value> {
             "storage_rebuild",
             common.clone(),
             &[],
-            "Rebuild derived indexes for the selected checkout without changing claims or runtime records.",
+            "Repair and rebuild derived indexes for the selected checkout without changing claims or runtime records.",
         ),
         tool(
             "storage_backup",
