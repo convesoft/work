@@ -13,7 +13,7 @@ use rustix::fs::{
     statat, unlinkat,
 };
 
-use super::graph::{Evaluation, ItemGraph, Relations};
+use super::graph::{Evaluation, GraphError, ItemGraph, Relations};
 use super::items::{
     Completion, Diagnostic, FileFingerprint, ItemFile, ItemHeader, ItemStore, ManualState,
     parse_candidate,
@@ -416,6 +416,20 @@ impl DurableOperations {
         ids.sort();
         ids.into_iter()
             .map(|id| inspect_with_graph(&store, &graph, &id))
+            .collect()
+    }
+
+    /// Select executable items from one validated durable view.
+    pub fn ready(&self) -> Result<Vec<Inspection>, OperationError> {
+        let store = self.load()?;
+        let graph = ItemGraph::from_store(&store);
+        let evaluations = graph.ready().map_err(|error| match error {
+            GraphError::Invalid(diagnostics) => OperationError::InvalidSource(diagnostics),
+            GraphError::NotFound(id) => OperationError::NotFound(id),
+        })?;
+        evaluations
+            .into_iter()
+            .map(|evaluation| inspect_with_graph(&store, &graph, &evaluation.id))
             .collect()
     }
 

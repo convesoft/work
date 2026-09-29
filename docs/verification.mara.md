@@ -106,7 +106,7 @@ Exercise duplicate identities, missing prerequisite IDs, self-blocking, a multi-
 :method: test
 :verifies: REQ-CLI-JSON
 
-Once the detailed interface schema is defined, exercise representative successful operations, empty results, invalid input, missing items, and competing claims using a JSON parser. Assert documented result shapes and machine-distinguishable failure outcomes without parsing human prose. Include template instantiation and temporary-run inspection/finalization. Separate process restart from item identity and state persistence.
+Exercise [[DES-CLI-JSON]] through the executable and parse stdout as JSON: create, inspect/list, update, relate, ready, close/reopen, diagnose, and repair in disposable Git fixtures. Assert full canonical IDs, human display prefixes, selected-worktree isolation, an empty ready array, invalid arguments, missing and ambiguous IDs, malformed source, invalid graphs, and conflicting writes with documented codes and exit statuses. Confirm one JSON object on each success or failure and no deferred command advertising. Later CLI slices extend this check to claims, templates, temporary runs, and process restart.
 :::
 
 :::mara verification VER-GATE-REVISION
