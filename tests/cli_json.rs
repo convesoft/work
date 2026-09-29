@@ -205,7 +205,7 @@ fn durable_loop_and_machine_readable_errors() {
 }
 
 #[test]
-fn invalid_create_options_fail_before_waiting_for_stdin() {
+fn invalid_commands_fail_before_waiting_for_stdin() {
     let f = Fixture::new();
     for args in [
         vec!["--json", "item", "create", "--body", "-"],
@@ -220,6 +220,7 @@ fn invalid_create_options_fail_before_waiting_for_stdin() {
             "--priority",
             "5",
         ],
+        vec!["--json", "item", "repair", "nope", "--source", "-"],
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_work"))
             .current_dir(&f.0)
@@ -233,7 +234,7 @@ fn invalid_create_options_fail_before_waiting_for_stdin() {
             if Instant::now() >= deadline {
                 child.kill().unwrap();
                 child.wait().unwrap();
-                panic!("invalid create waited for stdin EOF");
+                panic!("invalid command waited for stdin EOF");
             }
             std::thread::sleep(Duration::from_millis(10));
         }

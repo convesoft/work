@@ -216,22 +216,7 @@ fn item_command(
 ) -> Result<Value, CliError> {
     match verb {
         "list" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.list()?)?})),
-        "ready" if args.is_empty() => {
-            let store = ItemStore::load(project).map_err(io_error)?;
-            let graph = ItemGraph::from_store(&store);
-            if !graph.is_valid() {
-                return Err(invalid_source(graph.diagnostics().to_vec()));
-            }
-            let mut items = ops.list()?;
-            items.retain(|i| i.evaluation.as_ref().is_some_and(|e| e.executable));
-            items.sort_by_key(|i| {
-                (
-                    i.file.header.as_ref().unwrap().priority,
-                    i.file.header.as_ref().unwrap().id.clone(),
-                )
-            });
-            Ok(json!({"items":items_value(project,&items)?}))
-        }
+        "ready" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.ready()?)?})),
         "diagnose" if args.is_empty() => {
             let store = ItemStore::load(project).map_err(io_error)?;
             let graph = ItemGraph::from_store(&store);
@@ -286,6 +271,7 @@ fn item_command(
             Ok(json!({"item":one_item_value(project,&ops.reopen(&id)?)?}))
         }
         "repair" if args.len() == 3 && args[1] == "--source" && args[2] == "-" => {
+            ops.inspect_raw(&args[0])?;
             let mut source = Vec::new();
             io::stdin().read_to_end(&mut source).map_err(io_error)?;
             let raw = ops.repair(&args[0], source)?;
