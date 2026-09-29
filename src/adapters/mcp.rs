@@ -74,8 +74,8 @@ fn handle(request: Value, initialized: &mut bool) -> Option<Value> {
             json!({"protocolVersion":VERSION,"capabilities":{"tools":{}},
                 "serverInfo":{"name":"work","version":env!("CARGO_PKG_VERSION")}})
         }
-        _ if !*initialized => return Some(rpc_error(id, -32000, "Initialize first")),
         "ping" => json!({}),
+        _ if !*initialized => return Some(rpc_error(id, -32000, "Initialize first")),
         "tools/list" => json!({"tools":tools()}),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
@@ -330,9 +330,16 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, CliError> {
         .as_bytes()
         .chunks_exact(2)
         .map(|pair| {
-            let text = std::str::from_utf8(pair).unwrap();
-            u8::from_str_radix(text, 16)
-                .map_err(|_| invalid("raw_hex must contain hexadecimal bytes"))
+            let digit = |byte| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            match (digit(pair[0]), digit(pair[1])) {
+                (Some(high), Some(low)) => Ok((high << 4) | low),
+                _ => Err(invalid("raw_hex must contain hexadecimal bytes")),
+            }
         })
         .collect()
 }

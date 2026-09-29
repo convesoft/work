@@ -95,6 +95,7 @@ impl Client {
             stdout,
             next_id: 1,
         };
+        assert_eq!(client.request("ping", json!({}))["result"], json!({}));
         let initialized = client.request("initialize",json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"work-test-client","version":"1"}}));
         assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
         assert!(initialized["result"]["capabilities"]["tools"].is_object());
@@ -262,6 +263,12 @@ fn protocol_schema_rejects_null_wrong_types_and_source_errors() {
     ] {
         client.error("item_create", args, "invalid_argument");
     }
+    client.error(
+        "item_repair",
+        json!({"id":"11111111111141118111111111111111","raw_hex":"aéb"}),
+        "invalid_argument",
+    );
+    assert_eq!(client.request("ping", json!({}))["result"], json!({}));
     assert_eq!(
         fs::read_dir(f.0.join(".work/items")).unwrap().count(),
         before
