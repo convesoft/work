@@ -15,7 +15,7 @@ The product model and initial scope are established. The remaining work below co
 | Squash and cleanup | Idempotent digest publication and interruption recovery. Use a surviving checkout and refuse deletion when outside references still require temporary records; do not rewrite those references automatically | [[REQ-RUN-FINALIZATION]], [[DES-SQUASH-DIGEST]] |
 | Handoff operations | Concurrent receiver changes and recoverable save/release/cleanup. Cancellation resolves a receiver; reopening does not resurrect deleted notes | [[DES-HANDOFF-RECORDS]] |
 | Selection metadata | Scope/filter operation schema and model/thinking template default mechanics. Version 1 defines priority 0–4 with ID tie-breaking, exact case-sensitive labels, and no parent inheritance | [[DES-ITEM-FORMAT]], [[REQ-WORK-SELECTION]], [[REQ-EXECUTOR-HINTS]] |
-| Operation schemas | CLI command and MCP tool names, input/result/error schemas, pagination and compatibility guarantees | [[REQ-CLI-MCP-PARITY]], [[REQ-CLI-JSON]] |
+| Operation schemas | The first durable CLI and MCP slice is defined in [[DES-CLI-JSON]] and [[DES-MCP-STDIO]]. Later claim, template, and run schemas, pagination, and compatibility guarantees remain | [[REQ-CLI-MCP-PARITY]], [[REQ-CLI-JSON]] |
 | Graph errors | Diagnostic representation and repair interfaces. An invalid selected graph blocks readiness and claims; inspection/repair and other projects remain available | [[REQ-GRAPH-INTEGRITY]] |
 | Repository storage | Format migrations and backup/recovery mechanics. Git working checkouts are required; linked worktrees share coordination, independent clones do not | [[DES-SHARED-SQLITE]], [[REQ-GIT-CHECKOUT]] |
 

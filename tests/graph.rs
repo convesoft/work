@@ -353,16 +353,19 @@ fn bootstrap_fixture_exposes_only_next_manual_child() {
     let loader = "0fac69ec66004e088ce2b22cc0119bd2";
     let graph_item = "13ca14c6e5c14b24a5dea551c343bbeb";
     let operations_item = "cec96d7e174d47c1ab3117968b0bba0f";
+    let cli_item = "393f86fafaf54449944d27da1af0a24b";
     // Fixture starts at the item-2-to-item-3 handoff regardless of live progress.
     let loader_path = f.0.join(".work/items").join(format!("{loader}.md"));
     let graph_path = f.0.join(".work/items").join(format!("{graph_item}.md"));
     let operations_path =
         f.0.join(".work/items")
             .join(format!("{operations_item}.md"));
+    let cli_path = f.0.join(".work/items").join(format!("{cli_item}.md"));
     // Normalize copied progress so this fixture models the item-2 handoff.
     set_fixture_state(&loader_path, "open");
     set_fixture_state(&graph_path, "open");
     set_fixture_state(&operations_path, "open");
+    set_fixture_state(&cli_path, "open");
     let graph = f.graph();
     assert!(graph.is_valid(), "{:?}", graph.diagnostics());
     assert_eq!(ready(&graph), vec![loader.to_owned()]);

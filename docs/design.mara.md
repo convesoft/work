@@ -247,3 +247,17 @@ With `--json`, each invocation writes exactly one UTF-8 JSON object and a newlin
 
 Stable error codes for this slice are `usage`, `invalid_argument`, `not_found`, `ambiguous_id`, `already_exists`, `invalid_source`, `invalid_candidate`, `conflict`, `unsupported_project`, and `io`. Syntax/invalid arguments exit 2; missing or ambiguous IDs exit 3; invalid source/candidate exits 4; conflict/already-exists exits 5; discovery or I/O exits 1. Success exits 0. A JSON failure uses stdout only; human failures use stderr. An invalid graph blocks ready and mutations but list, inspect, diagnose, and repair remain available. Error categories preserve the shared operation meaning; CLI parsing adds `usage` and `ambiguous_id`. Unknown commands and deferred operations return usage, never a placeholder success. Additive result fields may appear later; existing field meaning and error codes are stable within the initial version.
 :::
+
+:::mara design DES-MCP-STDIO
+:mid: 01M3P4Z9P9XAPF9KC4FR0DQN9E
+:title: Expose durable operations through MCP stdio
+:status: accepted
+:kind: interface
+:satisfies: REQ-CLI-MCP-PARITY
+
+`work mcp` serves newline-delimited JSON-RPC 2.0 over stdio, negotiating MCP protocol version `2025-06-18`. It advertises tools and no resource or prompt capabilities. Tool calls return the CLI JSON result payload as `structuredContent` and JSON text content. Domain, source, and selection failures return `isError: true` with `{"error":{"code","message",...}}` in structured content; unknown protocol methods and tool names use JSON-RPC errors. stdout contains only protocol messages.
+
+The first slice advertises `discover`, `item_create`, `item_list`, `item_inspect`, `item_inspect_raw`, `item_diagnose`, `item_ready`, `item_update`, `item_close`, `item_reopen`, `item_repair`, `relation_add`, and `relation_remove`. Every tool accepts optional `worktree` (a Git working checkout path); omission selects the server process checkout. Item references use `id`, relation calls use `source`, `kind`, and `target`, and the shared core receives resolved full IDs. Raw repair uses `raw_hex` to preserve arbitrary source bytes. Create accepts required `title` and optional `body`; create and update accept `completion`, `priority`, `parent`, `labels`, `model`, and `thinking`. Update accepts required `id` and optional `title`. Explicit `clear_parent`, `clear_model`, and `clear_thinking` booleans clear those optional fields; an empty `labels` array clears labels. Close accepts required `id` and optional `reason`; reopen and both inspections require `id`. Relation kind is one of `parent`, `depends_on`, `related`, or `discovered_from`.
+
+Each `inputSchema` is an object with `additionalProperties: false`, required fields as stated, and JSON types: strings for text and IDs, integer 0–4 for priority, string array for labels, booleans for clear flags. Optional fields are absent when unset; explicit null or wrong-type values fail as `invalid_argument`. Conflicting set and clear inputs fail likewise. No tool in this slice claims work, starts a run, launches an agent, or manages a worktree. Tool names and schemas may grow in later slices without changing the semantic meaning of existing fields.
+:::

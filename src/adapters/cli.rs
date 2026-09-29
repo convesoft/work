@@ -15,7 +15,7 @@ use work::core::operations::{
 };
 use work::core::project::{DiscoveryError, Project, discover};
 
-struct CliError {
+pub(super) struct CliError {
     code: &'static str,
     message: String,
     diagnostics: Vec<Diagnostic>,
@@ -24,7 +24,7 @@ struct CliError {
 }
 
 impl CliError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(super) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -42,7 +42,7 @@ impl CliError {
             _ => 1,
         }
     }
-    fn value(&self) -> Value {
+    pub(super) fn value(&self) -> Value {
         let mut v = json!({"code":self.code,"message":self.message});
         if !self.diagnostics.is_empty() {
             v["diagnostics"] = json!(self.diagnostics.iter().map(diagnostic).collect::<Vec<_>>());
@@ -318,7 +318,7 @@ fn item_command(
         _ => Err(usage("unknown item command or arguments")),
     }
 }
-fn source_value(id: &str, raw: &RawInspection) -> Value {
+pub(super) fn source_value(id: &str, raw: &RawInspection) -> Value {
     let mut hex = String::with_capacity(raw.file.raw.len() * 2);
     for byte in &raw.file.raw {
         write!(hex, "{byte:02x}").unwrap();
@@ -443,38 +443,7 @@ fn parse_metadata(
             .title
             .as_deref()
             .ok_or_else(|| usage("item create requires --title"))?;
-        if !valid_line(title) {
-            return Err(CliError::new(
-                "invalid_argument",
-                "title must be a nonblank single line",
-            ));
-        }
-        if input
-            .change
-            .labels
-            .as_ref()
-            .is_some_and(|labels| labels.iter().any(|label| !valid_line(label)))
-        {
-            return Err(CliError::new(
-                "invalid_argument",
-                "labels must be nonblank single lines",
-            ));
-        }
-        for (name, value) in [
-            ("model", &input.change.model),
-            ("thinking", &input.change.thinking),
-        ] {
-            if value
-                .as_ref()
-                .and_then(|v| v.as_deref())
-                .is_some_and(|v| !valid_line(v))
-            {
-                return Err(CliError::new(
-                    "invalid_argument",
-                    format!("{name} must be a nonblank single line"),
-                ));
-            }
-        }
+        validate_create_fields(title, &input.change)?;
     }
     if read_body_from_stdin {
         let mut bytes = Vec::new();
@@ -484,11 +453,43 @@ fn parse_metadata(
     Ok(input)
 }
 
+pub(super) fn validate_create_fields(title: &str, change: &MetadataChange) -> Result<(), CliError> {
+    if !valid_line(title) {
+        return Err(CliError::new(
+            "invalid_argument",
+            "title must be a nonblank single line",
+        ));
+    }
+    if change
+        .labels
+        .as_ref()
+        .is_some_and(|labels| labels.iter().any(|label| !valid_line(label)))
+    {
+        return Err(CliError::new(
+            "invalid_argument",
+            "labels must be nonblank single lines",
+        ));
+    }
+    for (name, value) in [("model", &change.model), ("thinking", &change.thinking)] {
+        if value
+            .as_ref()
+            .and_then(|v| v.as_deref())
+            .is_some_and(|v| !valid_line(v))
+        {
+            return Err(CliError::new(
+                "invalid_argument",
+                format!("{name} must be a nonblank single line"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn valid_line(value: &str) -> bool {
     !value.trim().is_empty() && !value.contains(['\n', '\r'])
 }
 
-fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
+pub(super) fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
     let candidate = input.strip_prefix("w-").unwrap_or(input);
     if candidate.len() == 32 && !valid_full_id(candidate) {
         return Err(CliError::new(
@@ -525,12 +526,12 @@ fn valid_full_id(value: &str) -> bool {
         && matches!(bytes[16], b'8' | b'9' | b'a' | b'b')
 }
 
-fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
+pub(super) fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
     let store = ItemStore::load(project).map_err(io_error)?;
     item_value(&display_prefixes(&store), item)
 }
 
-fn mutation_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
+pub(super) fn mutation_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
     let header = item
         .file
         .header
@@ -540,7 +541,7 @@ fn mutation_item_value(project: &Project, item: &Inspection) -> Result<Value, Cl
         .map_err(|error| with_published_item(error, &header.id, &item.file.path))
 }
 
-fn items_value(project: &Project, items: &[Inspection]) -> Result<Vec<Value>, CliError> {
+pub(super) fn items_value(project: &Project, items: &[Inspection]) -> Result<Vec<Value>, CliError> {
     let store = ItemStore::load(project).map_err(io_error)?;
     let prefixes = display_prefixes(&store);
     items
@@ -614,7 +615,7 @@ fn item_value(prefixes: &BTreeMap<String, usize>, item: &Inspection) -> Result<V
         "recovery_path":item.recovery_path.as_deref().map(encode_path)
     }))
 }
-fn invalid_source(diagnostics: Vec<Diagnostic>) -> CliError {
+pub(super) fn invalid_source(diagnostics: Vec<Diagnostic>) -> CliError {
     CliError {
         code: "invalid_source",
         message: "selected source or graph is invalid".into(),
@@ -623,7 +624,7 @@ fn invalid_source(diagnostics: Vec<Diagnostic>) -> CliError {
         previous_source_path: None,
     }
 }
-fn diagnostic(d: &Diagnostic) -> Value {
+pub(super) fn diagnostic(d: &Diagnostic) -> Value {
     json!({"path":encode_path(&d.path),"line":d.line,"message":d.message})
 }
 fn io_error(error: io::Error) -> CliError {
@@ -666,11 +667,11 @@ fn print_human(value: &Value) {
         println!("{}", serde_json::to_string_pretty(value).unwrap());
     }
 }
-const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove\n\
+const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove; mcp starts a stdio server\n\
 Use --json for one structured result or error object. Run item create --title TEXT [--body TEXT|-]; item update ID with --title, --completion, --priority, --parent, --label, --model, or --thinking. Use item repair FULL_ID --source - for malformed source.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
-fn encode_path(path: &Path) -> String {
+pub(super) fn encode_path(path: &Path) -> String {
     let mut encoded = String::new();
     for byte in path.as_os_str().as_bytes() {
         if byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'.' | b'_' | b'-' | b'~') {
