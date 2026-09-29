@@ -5,9 +5,11 @@
 //! to the graph evaluator.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +17,9 @@ use rusqlite::{
     Connection, ErrorCode, MAIN_DB, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
     params,
 };
-use rustix::fs::{CWD, FlockOperation, Mode, OFlags, flock, openat};
+use rustix::fs::{
+    AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, flock, openat, statat,
+};
 
 use super::graph::ItemGraph;
 use super::items::{Completion, Diagnostic, ItemFile, ItemStore, ManualState};
@@ -1262,43 +1266,89 @@ fn insert_edge(
 }
 
 fn scan_ephemeral(root: &Path) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StorageError> {
-    let mut result = BTreeMap::new();
-    match fs::symlink_metadata(root) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(result),
-        Err(error) => return Err(error.into()),
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => {
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let parent = root.parent().ok_or_else(|| {
+        StorageError::InvalidArgument(format!("run source root has no parent: {}", root.display()))
+    })?;
+    let name = root.file_name().ok_or_else(|| {
+        StorageError::InvalidArgument(format!("run source root has no name: {}", root.display()))
+    })?;
+    let parent =
+        openat(CWD, parent, directory_flags, Mode::empty()).map_err(|error| match error {
+            rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => {
+                StorageError::InvalidArgument(format!(
+                    "run source parent is not a real directory: {}",
+                    parent.display()
+                ))
+            }
+            other => StorageError::Io(io::Error::from(other)),
+        })?;
+    let root_fd = match openat(&parent, name, directory_flags, Mode::empty()) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(BTreeMap::new()),
+        Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => {
             return Err(StorageError::InvalidArgument(format!(
                 "run source root is not a real directory: {}",
                 root.display()
             )));
         }
-    }
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory)? {
-            let entry = entry?;
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)?;
-            if metadata.file_type().is_symlink() {
-                return Err(StorageError::InvalidArgument(format!(
-                    "ephemeral source is a symlink: {}",
-                    path.display()
-                )));
+        Err(error) => return Err(io::Error::from(error).into()),
+    };
+    scan_open_ephemeral(root, root_fd)
+}
+
+fn scan_open_ephemeral(
+    root: &Path,
+    root_fd: OwnedFd,
+) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StorageError> {
+    let mut result = BTreeMap::new();
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut pending = vec![(root_fd, std::path::PathBuf::new())];
+    while let Some((directory, prefix)) = pending.pop() {
+        for entry in Dir::read_from(&directory).map_err(io::Error::from)? {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = entry.file_name().to_bytes();
+            if name == b"." || name == b".." {
+                continue;
             }
-            if metadata.is_dir() {
-                pending.push(path);
-            } else if metadata.is_file() {
-                let relative = path.strip_prefix(root).expect("walked beneath run root");
-                result.insert(
-                    relative.as_os_str().as_bytes().to_vec(),
-                    digest_file(&path)?,
-                );
-            } else {
-                return Err(StorageError::InvalidArgument(format!(
-                    "ephemeral source is not a regular file: {}",
-                    path.display()
-                )));
+            let name = OsStr::from_bytes(name);
+            let relative = prefix.join(name);
+            let path = root.join(&relative);
+            let stat =
+                statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+            match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Directory => {
+                    let child = openat(&directory, name, directory_flags, Mode::empty()).map_err(
+                        |error| match error {
+                            rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => {
+                                StorageError::InvalidArgument(format!(
+                                    "ephemeral source is not a real directory: {}",
+                                    path.display()
+                                ))
+                            }
+                            other => StorageError::Io(io::Error::from(other)),
+                        },
+                    )?;
+                    pending.push((child, relative));
+                }
+                FileType::RegularFile => {
+                    result.insert(
+                        relative.as_os_str().as_bytes().to_vec(),
+                        digest_file(&directory, name, &path)?,
+                    );
+                }
+                FileType::Symlink => {
+                    return Err(StorageError::InvalidArgument(format!(
+                        "ephemeral source is a symlink: {}",
+                        path.display()
+                    )));
+                }
+                _ => {
+                    return Err(StorageError::InvalidArgument(format!(
+                        "ephemeral source is not a regular file: {}",
+                        path.display()
+                    )));
+                }
             }
         }
     }
@@ -1312,16 +1362,28 @@ fn digest(raw: &[u8]) -> Vec<u8> {
     hasher.finish()
 }
 
-fn digest_file(path: &Path) -> Result<Vec<u8>, StorageError> {
+fn digest_file(directory: &OwnedFd, name: &OsStr, path: &Path) -> Result<Vec<u8>, StorageError> {
     let mut file = File::from(
         openat(
-            CWD,
-            path,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(io::Error::from)?,
+        .map_err(|error| match error {
+            rustix::io::Errno::LOOP => StorageError::InvalidArgument(format!(
+                "ephemeral source is a symlink: {}",
+                path.display()
+            )),
+            other => StorageError::Io(io::Error::from(other)),
+        })?,
     );
+    if !file.metadata()?.is_file() {
+        return Err(StorageError::InvalidArgument(format!(
+            "ephemeral source is not a regular file: {}",
+            path.display()
+        )));
+    }
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 8192];
     loop {
@@ -1459,8 +1521,15 @@ impl Sha256 {
 
 #[cfg(test)]
 mod tests {
-    use super::{StorageError, StorageStatus, storage_boundary_error};
+    use super::{
+        StorageError, StorageStatus, digest, digest_file, random_id, scan_open_ephemeral,
+        storage_boundary_error,
+    };
+    use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, mkfifoat, openat, statat};
+    use std::ffi::OsStr;
+    use std::fs;
     use std::io;
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn storage_boundary_keeps_invalid_identity_data_distinct_from_access_failure() {
@@ -1477,5 +1546,63 @@ mod tests {
             storage_boundary_error(denied),
             StorageError::Status(StorageStatus::Unavailable(_))
         ));
+    }
+
+    #[test]
+    fn held_run_directory_does_not_follow_a_replacement_symlink() {
+        let scratch = std::env::temp_dir().join(format!("work-held-runs-{}", random_id().unwrap()));
+        let root = scratch.join("runs");
+        let child = root.join("run-one");
+        let outside = scratch.join("outside");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(child.join("inside.bin"), b"inside").unwrap();
+        fs::write(outside.join("outside.bin"), b"outside").unwrap();
+        let held = openat(
+            CWD,
+            &child,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        fs::rename(&child, root.join("held")).unwrap();
+        symlink(&outside, &child).unwrap();
+
+        let inventory = scan_open_ephemeral(&child, held).unwrap();
+        assert_eq!(
+            inventory.get(b"inside.bin".as_slice()),
+            Some(&digest(b"inside"))
+        );
+        assert!(!inventory.contains_key(b"outside.bin".as_slice()));
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn file_replaced_by_fifo_after_type_check_is_rejected_without_waiting() {
+        let scratch = std::env::temp_dir().join(format!("work-fifo-race-{}", random_id().unwrap()));
+        fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("payload.bin");
+        fs::write(&path, b"regular").unwrap();
+        let directory = openat(
+            CWD,
+            &scratch,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let name = OsStr::new("payload.bin");
+        let checked = statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW).unwrap();
+        assert_eq!(
+            FileType::from_raw_mode(checked.st_mode),
+            FileType::RegularFile
+        );
+        fs::remove_file(&path).unwrap();
+        mkfifoat(&directory, name, Mode::RUSR | Mode::WUSR).unwrap();
+
+        assert!(matches!(
+            digest_file(&directory, name, &path),
+            Err(StorageError::InvalidArgument(_))
+        ));
+        fs::remove_dir_all(scratch).unwrap();
     }
 }

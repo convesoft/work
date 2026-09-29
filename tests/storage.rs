@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 
 use rusqlite::{Connection, params};
+use rustix::fs::{CWD, Mode, mkfifoat};
 use work::core::graph::ItemGraph;
 use work::core::items::ItemStore;
 use work::core::project::{Project, discover};
@@ -979,6 +980,58 @@ fn large_run_file_is_indexed_by_streamed_sha256_digest() {
         .reconcile(&project, &fixture.store(&fixture.checkout))
         .unwrap();
     assert_eq!(changed.changed_ephemeral_files, 1);
+}
+
+#[test]
+fn run_inventory_rejects_symlinked_root_and_child() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let mut storage = Storage::open(&project).unwrap();
+    let runs = project.work_storage_dir().join("runs");
+    let outside = fixture.root.join("outside-runs");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("outside.bin"), b"outside").unwrap();
+    symlink(&outside, &runs).unwrap();
+    assert!(matches!(
+        storage.reconcile(&project, &fixture.store(&fixture.checkout)),
+        Err(StorageError::InvalidArgument(_))
+    ));
+    fs::remove_file(&runs).unwrap();
+    fs::create_dir(&runs).unwrap();
+    symlink(&outside, runs.join("linked")).unwrap();
+    assert!(matches!(
+        storage.reconcile(&project, &fixture.store(&fixture.checkout)),
+        Err(StorageError::InvalidArgument(_))
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT count(*) FROM ephemeral_sources", [], |row| row
+                .get(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn run_inventory_rejects_fifo_and_can_reconcile_after_replacement() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let mut storage = Storage::open(&project).unwrap();
+    let runs = project.work_storage_dir().join("runs/run-one");
+    fs::create_dir_all(&runs).unwrap();
+    let path = runs.join("payload.bin");
+    mkfifoat(CWD, &path, Mode::RUSR | Mode::WUSR).unwrap();
+    assert!(matches!(
+        storage.reconcile(&project, &fixture.store(&fixture.checkout)),
+        Err(StorageError::InvalidArgument(_))
+    ));
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, b"regular").unwrap();
+    let report = storage
+        .reconcile(&project, &fixture.store(&fixture.checkout))
+        .unwrap();
+    assert_eq!(report.changed_ephemeral_files, 1);
 }
 
 #[test]
