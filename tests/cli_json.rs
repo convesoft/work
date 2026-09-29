@@ -96,6 +96,19 @@ fn error((status, value): (i32, Value), expected_status: i32, code: &str) -> Val
     value["error"].clone()
 }
 
+fn human(cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_work"))
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
 #[test]
 fn durable_loop_and_machine_readable_errors() {
     let f = Fixture::new();
@@ -170,6 +183,15 @@ fn durable_loop_and_machine_readable_errors() {
         "invalid_argument",
     );
     error(f.call(&["claim", "next"]), 2, "usage");
+    error(
+        call(&std::env::temp_dir(), &["claim", "next"], None),
+        2,
+        "usage",
+    );
+    let (status, stdout, stderr) = human(&f.0, &["item", "create", "--title", "--json"]);
+    assert_eq!(status, 0, "{stderr}");
+    assert!(stdout.starts_with("w-"));
+    assert!(!stdout.starts_with('{'));
 }
 
 #[test]
@@ -221,6 +243,9 @@ fn invalid_source_graph_and_ambiguous_prefix_are_distinct() {
     let b = "abcdef12000040008000000000000002";
     f.write(a, "");
     f.write(b, "");
+    let listed = ok(f.call(&["item", "list"]));
+    assert_eq!(listed["items"][0]["display_id"], format!("w-{a}"));
+    assert_eq!(listed["items"][1]["display_id"], format!("w-{b}"));
     error(
         f.call(&["item", "inspect", "w-abcdef12"]),
         3,
@@ -240,6 +265,11 @@ fn invalid_source_graph_and_ambiguous_prefix_are_distinct() {
     let diagnostics = ok(f.call(&["item", "diagnose"]));
     assert!(!diagnostics["diagnostics"].as_array().unwrap().is_empty());
     error(f.call(&["item", "inspect", b]), 4, "invalid_source");
+    error(
+        f.call(&["item", "inspect", &format!("w-{b}")]),
+        4,
+        "invalid_source",
+    );
     let raw = ok(f.call(&["item", "inspect", b, "--raw"]));
     assert_eq!(raw["source"]["raw_hex"], "62616420736f75726365");
     let failure = error(f.call(&["item", "ready"]), 4, "invalid_source");

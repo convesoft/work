@@ -1,5 +1,6 @@
 //! CLI presentation over shared durable operations.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{self, Read};
@@ -90,7 +91,7 @@ impl From<DiscoveryError> for CliError {
 
 pub fn run(args: impl Iterator<Item = OsString>) -> i32 {
     let args: Vec<_> = args.collect();
-    let json_mode = args.iter().any(|a| a == "--json");
+    let json_mode = leading_json_mode(&args);
     match dispatch(&args) {
         Ok(value) => {
             if json_mode {
@@ -109,6 +110,22 @@ pub fn run(args: impl Iterator<Item = OsString>) -> i32 {
             error.exit()
         }
     }
+}
+
+fn leading_json_mode(args: &[OsString]) -> bool {
+    let mut at = 0;
+    let mut json = false;
+    while let Some(arg) = args.get(at) {
+        if arg == "--json" {
+            json = true;
+            at += 1;
+        } else if arg == "--worktree" {
+            at += 2;
+        } else {
+            break;
+        }
+    }
+    json
 }
 
 fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
@@ -149,7 +166,6 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
             json!({"worktree_root":encode_path(&project.worktree_root),"git_common_dir":encode_path(&project.git_common_dir)}),
         );
     }
-    let project = discover(selected)?;
     let words: Vec<String> = args[at..]
         .iter()
         .map(|a| {
@@ -158,11 +174,34 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
                 .ok_or_else(|| CliError::new("invalid_argument", "command arguments must be UTF-8"))
         })
         .collect::<Result<_, _>>()?;
+    validate_command_shape(&words)?;
+    let project = discover(selected)?;
     let ops = DurableOperations::new(&project.worktree_root);
     match words.as_slice() {
         [noun, verb, tail @ ..] if noun == "item" => item_command(&project, &ops, verb, tail),
         [noun, verb, tail @ ..] if noun == "relation" => {
             relation_command(&project, &ops, verb, tail)
+        }
+        _ => Err(usage("expected item or relation command")),
+    }
+}
+
+fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
+    match words {
+        [noun, verb, tail @ ..] if noun == "item" => match verb.as_str() {
+            "list" | "ready" | "diagnose" if tail.is_empty() => Ok(()),
+            "inspect" if tail.len() == 1 || (tail.len() == 2 && tail[1] == "--raw") => Ok(()),
+            "create" => Ok(()),
+            "update" | "close" | "reopen" if !tail.is_empty() => Ok(()),
+            "repair" if tail.len() == 3 && tail[1] == "--source" && tail[2] == "-" => Ok(()),
+            _ => Err(usage("unknown item command or arguments")),
+        },
+        [noun, verb, tail @ ..] if noun == "relation" => {
+            if (verb == "add" || verb == "remove") && tail.len() == 3 {
+                Ok(())
+            } else {
+                Err(usage("relation add|remove KIND SOURCE TARGET"))
+            }
         }
         _ => Err(usage("expected item or relation command")),
     }
@@ -175,9 +214,7 @@ fn item_command(
     args: &[String],
 ) -> Result<Value, CliError> {
     match verb {
-        "list" if args.is_empty() => Ok(
-            json!({"items":ops.list()?.iter().map(|i| item_value(project,i)).collect::<Result<Vec<_>,_>>()?}),
-        ),
+        "list" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.list()?)?})),
         "ready" if args.is_empty() => {
             let store = ItemStore::load(project).map_err(io_error)?;
             let graph = ItemGraph::from_store(&store);
@@ -192,9 +229,7 @@ fn item_command(
                     i.file.header.as_ref().unwrap().id.clone(),
                 )
             });
-            Ok(
-                json!({"items":items.iter().map(|i|item_value(project,i)).collect::<Result<Vec<_>,_>>()?}),
-            )
+            Ok(json!({"items":items_value(project,&items)?}))
         }
         "diagnose" if args.is_empty() => {
             let store = ItemStore::load(project).map_err(io_error)?;
@@ -204,17 +239,18 @@ fn item_command(
             )
         }
         "inspect" if args.len() == 1 => {
+            let candidate = args[0].strip_prefix("w-").unwrap_or(&args[0]);
             let id = match resolve(project, &args[0]) {
                 Ok(id) => id,
-                Err(error) if error.code == "not_found" && args[0].len() == 32 => {
-                    if let Ok(raw) = ops.inspect_raw(&args[0]) {
+                Err(error) if error.code == "not_found" && candidate.len() == 32 => {
+                    if let Ok(raw) = ops.inspect_raw(candidate) {
                         return Err(invalid_source(raw.file.diagnostics));
                     }
                     return Err(error);
                 }
                 Err(error) => return Err(error),
             };
-            Ok(json!({"item":item_value(project,&ops.inspect(&id)?)?}))
+            Ok(json!({"item":one_item_value(project,&ops.inspect(&id)?)?}))
         }
         "inspect" if args.len() == 2 && args[1] == "--raw" => {
             let raw = ops.inspect_raw(&args[0])?;
@@ -226,14 +262,14 @@ fn item_command(
                 .title
                 .ok_or_else(|| usage("item create requires --title"))?;
             let item = ops.create(title, input.body.unwrap_or_default(), input.change)?;
-            Ok(json!({"item":item_value(project,&item)?}))
+            Ok(json!({"item":one_item_value(project,&item)?}))
         }
         "update" if !args.is_empty() => {
             let id = resolve(project, &args[0])?;
             let input = parse_metadata(project, &args[1..], true, false)?;
             let mut change = input.change;
             change.title = input.title;
-            Ok(json!({"item":item_value(project,&ops.update(&id,change)?)?}))
+            Ok(json!({"item":one_item_value(project,&ops.update(&id,change)?)?}))
         }
         "close" if !args.is_empty() => {
             let id = resolve(project, &args[0])?;
@@ -242,11 +278,11 @@ fn item_command(
                 [flag, value] if flag == "--reason" => Some(value.clone()),
                 _ => return Err(usage("item close ID [--reason TEXT]")),
             };
-            Ok(json!({"item":item_value(project,&ops.close(&id,reason)?)?}))
+            Ok(json!({"item":one_item_value(project,&ops.close(&id,reason)?)?}))
         }
         "reopen" if args.len() == 1 => {
             let id = resolve(project, &args[0])?;
-            Ok(json!({"item":item_value(project,&ops.reopen(&id)?)?}))
+            Ok(json!({"item":one_item_value(project,&ops.reopen(&id)?)?}))
         }
         "repair" if args.len() == 3 && args[1] == "--source" && args[2] == "-" => {
             let mut source = Vec::new();
@@ -292,7 +328,7 @@ fn relation_command(
         "remove" => ops.relation_remove(&source, kind, &target)?,
         _ => return Err(usage("relation add|remove KIND SOURCE TARGET")),
     };
-    Ok(json!({"item":item_value(project,&item)?}))
+    Ok(json!({"item":one_item_value(project,&item)?}))
 }
 
 struct MetadataInput {
@@ -397,23 +433,57 @@ fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
         Err(LookupError::Invalid(d)) => Err(invalid_source(d)),
     }
 }
-fn item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
+fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
+    let store = ItemStore::load(project).map_err(io_error)?;
+    item_value(&display_prefixes(&store), item)
+}
+
+fn items_value(project: &Project, items: &[Inspection]) -> Result<Vec<Value>, CliError> {
+    let store = ItemStore::load(project).map_err(io_error)?;
+    let prefixes = display_prefixes(&store);
+    items
+        .iter()
+        .map(|item| item_value(&prefixes, item))
+        .collect()
+}
+
+fn display_prefixes(store: &ItemStore) -> BTreeMap<String, usize> {
+    let mut ids: Vec<_> = store
+        .files
+        .iter()
+        .filter_map(|file| file.header.as_ref().map(|header| header.id.clone()))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut prefixes = BTreeMap::new();
+    for (index, id) in ids.iter().enumerate() {
+        let neighbors = [
+            index.checked_sub(1).and_then(|i| ids.get(i)),
+            ids.get(index + 1),
+        ];
+        let shared = neighbors
+            .into_iter()
+            .flatten()
+            .map(|other| {
+                id.bytes()
+                    .zip(other.bytes())
+                    .take_while(|(a, b)| a == b)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        prefixes.insert(id.clone(), (shared + 1).clamp(8, 32));
+    }
+    prefixes
+}
+
+fn item_value(prefixes: &BTreeMap<String, usize>, item: &Inspection) -> Result<Value, CliError> {
     let h = item
         .file
         .header
         .as_ref()
         .ok_or_else(|| CliError::new("invalid_source", "item header is invalid"))?;
-    let store = ItemStore::load(project).map_err(io_error)?;
-    let mut prefix = 8;
-    while prefix < 32
-        && store
-            .files
-            .iter()
-            .filter_map(|f| f.header.as_ref())
-            .any(|other| other.id != h.id && other.id.starts_with(&h.id[..prefix]))
-    {
-        prefix += 1;
-    }
+    let prefix = prefixes.get(&h.id).copied().unwrap_or(8);
     let r = &item.relations;
     let e = &item.evaluation;
     let blockers: Vec<Value> = e
