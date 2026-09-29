@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -130,6 +131,15 @@ fn durable_loop_and_machine_readable_errors() {
     let a = first["id"].as_str().unwrap().to_owned();
     assert_eq!(first["body"], "opaque body\n");
     assert_eq!(first["display_id"], format!("w-{}", &a[..8]));
+    let item_path = f.0.join(".work/items").join(format!("{a}.md"));
+    let before = fs::read(&item_path).unwrap();
+    let entries_before = fs::read_dir(f.0.join(".work/items")).unwrap().count();
+    error(f.call(&["item", "update", &a]), 2, "usage");
+    assert_eq!(fs::read(item_path).unwrap(), before);
+    assert_eq!(
+        fs::read_dir(f.0.join(".work/items")).unwrap().count(),
+        entries_before
+    );
     let second =
         ok(f.call(&["item", "create", "--title", "Deliver", "--label", "release"]))["item"].clone();
     let b = second["id"].as_str().unwrap().to_owned();
@@ -192,6 +202,48 @@ fn durable_loop_and_machine_readable_errors() {
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.starts_with("w-"));
     assert!(!stdout.starts_with('{'));
+}
+
+#[test]
+fn invalid_create_options_fail_before_waiting_for_stdin() {
+    let f = Fixture::new();
+    for args in [
+        vec!["--json", "item", "create", "--body", "-"],
+        vec![
+            "--json",
+            "item",
+            "create",
+            "--title",
+            "Task",
+            "--body",
+            "-",
+            "--priority",
+            "5",
+        ],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_work"))
+            .current_dir(&f.0)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("invalid create waited for stdin EOF");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            response["error"]["code"] == "usage" || response["error"]["code"] == "invalid_argument"
+        );
+    }
 }
 
 #[test]

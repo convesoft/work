@@ -192,7 +192,8 @@ fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
             "list" | "ready" | "diagnose" if tail.is_empty() => Ok(()),
             "inspect" if tail.len() == 1 || (tail.len() == 2 && tail[1] == "--raw") => Ok(()),
             "create" => Ok(()),
-            "update" | "close" | "reopen" if !tail.is_empty() => Ok(()),
+            "update" if tail.len() >= 2 => Ok(()),
+            "close" | "reopen" if !tail.is_empty() => Ok(()),
             "repair" if tail.len() == 3 && tail[1] == "--source" && tail[2] == "-" => Ok(()),
             _ => Err(usage("unknown item command or arguments")),
         },
@@ -264,7 +265,7 @@ fn item_command(
             let item = ops.create(title, input.body.unwrap_or_default(), input.change)?;
             Ok(json!({"item":one_item_value(project,&item)?}))
         }
-        "update" if !args.is_empty() => {
+        "update" if args.len() >= 2 => {
             let id = resolve(project, &args[0])?;
             let input = parse_metadata(project, &args[1..], true, false)?;
             let mut change = input.change;
@@ -347,6 +348,7 @@ fn parse_metadata(
         body: None,
         change: MetadataChange::default(),
     };
+    let mut read_body_from_stdin = false;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -367,13 +369,12 @@ fn parse_metadata(
             "--title" if title_allowed => input.title = value,
             "--body" if body_allowed => {
                 let value = value.unwrap();
-                input.body = Some(if value == "-" {
-                    let mut bytes = Vec::new();
-                    io::stdin().read_to_end(&mut bytes).map_err(io_error)?;
-                    bytes
+                read_body_from_stdin = value == "-";
+                input.body = if read_body_from_stdin {
+                    None
                 } else {
-                    value.into_bytes()
-                });
+                    Some(value.into_bytes())
+                };
             }
             "--completion" => {
                 input.change.completion = Some(match value.as_deref() {
@@ -388,12 +389,14 @@ fn parse_metadata(
                 })
             }
             "--priority" => {
-                input.change.priority = Some(
-                    value
-                        .unwrap()
-                        .parse()
-                        .map_err(|_| CliError::new("invalid_argument", "priority must be 0..4"))?,
-                )
+                let priority = value
+                    .unwrap()
+                    .parse::<u8>()
+                    .map_err(|_| CliError::new("invalid_argument", "priority must be 0..4"))?;
+                if priority > 4 {
+                    return Err(CliError::new("invalid_argument", "priority must be 0..4"));
+                }
+                input.change.priority = Some(priority);
             }
             "--parent" => input.change.parent = Some(Some(resolve(project, &value.unwrap())?)),
             "--clear-parent" => input.change.parent = Some(None),
@@ -411,7 +414,54 @@ fn parse_metadata(
         }
         at += if clear { 1 } else { 2 };
     }
+    if body_allowed {
+        let title = input
+            .title
+            .as_deref()
+            .ok_or_else(|| usage("item create requires --title"))?;
+        if !valid_line(title) {
+            return Err(CliError::new(
+                "invalid_argument",
+                "title must be a nonblank single line",
+            ));
+        }
+        if input
+            .change
+            .labels
+            .as_ref()
+            .is_some_and(|labels| labels.iter().any(|label| !valid_line(label)))
+        {
+            return Err(CliError::new(
+                "invalid_argument",
+                "labels must be nonblank single lines",
+            ));
+        }
+        for (name, value) in [
+            ("model", &input.change.model),
+            ("thinking", &input.change.thinking),
+        ] {
+            if value
+                .as_ref()
+                .and_then(|v| v.as_deref())
+                .is_some_and(|v| !valid_line(v))
+            {
+                return Err(CliError::new(
+                    "invalid_argument",
+                    format!("{name} must be a nonblank single line"),
+                ));
+            }
+        }
+    }
+    if read_body_from_stdin {
+        let mut bytes = Vec::new();
+        io::stdin().read_to_end(&mut bytes).map_err(io_error)?;
+        input.body = Some(bytes);
+    }
     Ok(input)
+}
+
+fn valid_line(value: &str) -> bool {
+    !value.trim().is_empty() && !value.contains(['\n', '\r'])
 }
 
 fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
