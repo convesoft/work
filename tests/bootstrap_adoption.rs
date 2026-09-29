@@ -1,8 +1,9 @@
 //! Adoption checks against disposable Git copies of the authored bootstrap backlog.
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,26 +37,22 @@ fn git(root: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-fn canonical_item_name(name: &OsStr) -> bool {
-    name.to_str()
-        .and_then(|name| name.strip_suffix(".md"))
-        .is_some_and(|id| {
-            let bytes = id.as_bytes();
-            bytes.len() == 32
-                && bytes[12] == b'4'
-                && matches!(bytes[16], b'8' | b'9' | b'a' | b'b')
-                && id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-}
 fn copy_backlog_items(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).unwrap() {
         let entry = entry.unwrap();
-        if !canonical_item_name(&entry.file_name()) {
+        let name = entry.file_name();
+        if name.as_bytes().starts_with(b".operation-") {
             continue;
         }
-        fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
+        let target = destination.join(name);
+        let kind = entry.file_type().unwrap();
+        if kind.is_symlink() {
+            symlink(fs::read_link(entry.path()).unwrap(), target).unwrap();
+        } else if kind.is_dir() {
+            fs::create_dir(target).unwrap();
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
     }
 }
 struct Fixture(PathBuf);
@@ -120,7 +117,7 @@ impl Fixture {
 }
 
 #[test]
-fn copied_backlog_ignores_recovery_entries() {
+fn copied_backlog_keeps_unexpected_entries_and_ignores_recovery() {
     let root = std::env::temp_dir().join(format!(
         "work-backlog-copy-{}-{}",
         std::process::id(),
@@ -134,11 +131,19 @@ fn copied_backlog_ignores_recovery_entries() {
     fs::write(source.join(&canonical), b"canonical item").unwrap();
     fs::write(source.join(".operation-recovery"), b"recovery copy").unwrap();
     fs::write(source.join("notes.md"), b"notes").unwrap();
+    fs::create_dir(source.join("unexpected-directory")).unwrap();
+    symlink("notes.md", source.join("unexpected-link")).unwrap();
     copy_backlog_items(&source, &destination);
-    assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), 4);
     assert_eq!(
         fs::read(destination.join(canonical)).unwrap(),
         b"canonical item"
+    );
+    assert_eq!(fs::read(destination.join("notes.md")).unwrap(), b"notes");
+    assert!(destination.join("unexpected-directory").is_dir());
+    assert_eq!(
+        fs::read_link(destination.join("unexpected-link")).unwrap(),
+        Path::new("notes.md")
     );
     fs::remove_dir_all(root).unwrap();
 }
