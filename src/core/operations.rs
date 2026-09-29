@@ -110,6 +110,11 @@ pub struct DurableOperations {
     root: PathBuf,
 }
 
+struct OperationLock {
+    _file: File,
+    work_dir: OwnedFd,
+}
+
 impl DurableOperations {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -144,8 +149,8 @@ impl DurableOperations {
                 "item must be a full UUIDv4 ID".into(),
             ));
         }
-        let _lock = self.lock()?;
-        let items = self.items_dir()?;
+        let lock = self.lock()?;
+        let items = self.items_dir(&lock)?;
         let store = self.load_from_dir(&items)?;
         let original = self.raw_source(&store, id)?;
         if let Some(header) = &original.header
@@ -234,7 +239,7 @@ impl DurableOperations {
                     staged.display()
                 )));
             }
-            self.ensure_selected_dir(&items)?;
+            self.ensure_selected_dir_after_publication(&items, &staged)?;
             let mut result = self.inspect_raw_from_dir(&items, id)?;
             result.recovery_path = Some(staged);
             return Ok(result);
@@ -246,7 +251,7 @@ impl DurableOperations {
         }
         self.verify_exchange(&items, &store, original, &staged, &raw, &published)?;
         self.sync_items(&items)?;
-        self.ensure_selected_dir(&items)?;
+        self.ensure_selected_dir_after_publication(&items, &staged)?;
         let mut result = self.inspect_raw_from_dir(&items, id)?;
         result.recovery_path = Some(staged);
         Ok(result)
@@ -276,8 +281,8 @@ impl DurableOperations {
         body: Vec<u8>,
         change: MetadataChange,
     ) -> Result<Inspection, OperationError> {
-        let _lock = self.lock()?;
-        let items = self.items_dir()?;
+        let lock = self.lock()?;
+        let items = self.items_dir(&lock)?;
         let store = self.load_from_dir(&items)?;
         require_valid(&store)?;
         if std::str::from_utf8(&body).is_err() {
@@ -471,8 +476,8 @@ impl DurableOperations {
                 "source must be a full UUIDv4 ID".into(),
             ));
         }
-        let _lock = self.lock()?;
-        let items = self.items_dir()?;
+        let lock = self.lock()?;
+        let items = self.items_dir(&lock)?;
         let store = self.load_from_dir(&items)?;
         require_valid(&store)?;
         let source = store
@@ -502,7 +507,7 @@ impl DurableOperations {
         }
         self.verify_exchange(&items, &store, source, &staged, &raw, &published)?;
         self.sync_items(&items)?;
-        self.ensure_selected_dir(&items)?;
+        self.ensure_selected_dir_after_publication(&items, &staged)?;
         let mut result = inspect_store(&self.load_from_dir(&items)?, id)?;
         result.recovery_path = Some(staged);
         Ok(result)
@@ -511,14 +516,16 @@ impl DurableOperations {
     fn load(&self) -> Result<ItemStore, OperationError> {
         Ok(ItemStore::load_from_root(&self.root)?)
     }
-    fn items_dir(&self) -> Result<OwnedFd, OperationError> {
-        Ok(openat(
-            CWD,
-            self.root.join(".work/items"),
+    fn items_dir(&self, lock: &OperationLock) -> Result<OwnedFd, OperationError> {
+        let items = openat(
+            &lock.work_dir,
+            "items",
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(io::Error::from)?)
+        .map_err(io::Error::from)?;
+        self.ensure_selected_dir(&items)?;
+        Ok(items)
     }
     fn load_from_dir(&self, items: &OwnedFd) -> Result<ItemStore, OperationError> {
         Ok(ItemStore::load_from_open_items(
@@ -539,6 +546,19 @@ impl DurableOperations {
             ));
         }
         Ok(())
+    }
+    fn ensure_selected_dir_after_publication(
+        &self,
+        items: &OwnedFd,
+        recovery: &Path,
+    ) -> Result<(), OperationError> {
+        self.ensure_selected_dir(items).map_err(|_| {
+            OperationError::Conflict(format!(
+                "items directory changed after publication; recovery copy {} remains in the originally opened items directory (former path {})",
+                entry_name(recovery).to_string_lossy(),
+                recovery.display()
+            ))
+        })
     }
     fn inspect_raw_from_dir(
         &self,
@@ -667,7 +687,7 @@ impl DurableOperations {
                             recovery.display()
                         )));
                     }
-                    self.ensure_selected_dir(items)?;
+                    self.ensure_selected_dir_after_publication(items, &recovery)?;
                     let mut result = self.inspect_raw_from_dir(items, id)?;
                     result.recovery_path = Some(recovery);
                     return Ok(result);
@@ -680,7 +700,7 @@ impl DurableOperations {
             "could not reserve filename repair recovery path".into(),
         ))
     }
-    fn lock(&self) -> Result<File, OperationError> {
+    fn lock(&self) -> Result<OperationLock, OperationError> {
         let work_dir = openat(
             CWD,
             self.root.join(".work"),
@@ -699,11 +719,14 @@ impl DurableOperations {
         );
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
-        Ok(file)
+        Ok(OperationLock {
+            _file: file,
+            work_dir,
+        })
     }
     #[cfg(test)]
     fn stage(&self, raw: &[u8]) -> Result<PathBuf, OperationError> {
-        self.stage_with_mode(&self.items_dir()?, raw, None)
+        self.stage_with_mode(&self.items_dir(&self.lock()?)?, raw, None)
     }
     fn stage_with_mode(
         &self,
@@ -1254,7 +1277,7 @@ mod tests {
     fn held_directory_exchange_cannot_follow_a_replaced_directory_path() {
         let (root, id) = fixture();
         let ops = DurableOperations::new(&root);
-        let items = ops.items_dir().unwrap();
+        let items = ops.items_dir(&ops.lock().unwrap()).unwrap();
         let target = ops.item_path(&id);
         let staged = ops.stage_with_mode(&items, b"replacement", None).unwrap();
         let outside = root.join("outside");
@@ -1270,6 +1293,34 @@ mod tests {
             fs::read(held.join(format!("{id}.md"))).unwrap(),
             b"replacement"
         );
+        let error = ops
+            .ensure_selected_dir_after_publication(&items, &staged)
+            .unwrap_err();
+        assert!(matches!(error, OperationError::Conflict(_)));
+        assert!(
+            error
+                .to_string()
+                .contains(entry_name(&staged).to_str().unwrap())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn items_directory_is_opened_from_the_locked_work_directory() {
+        let (root, id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let lock = ops.lock().unwrap();
+        let outside_work = root.join("outside-work");
+        fs::create_dir_all(outside_work.join("items")).unwrap();
+        let outside_item = outside_work.join("items").join(format!("{id}.md"));
+        fs::write(&outside_item, b"outside content").unwrap();
+        fs::rename(root.join(".work"), root.join("held-work")).unwrap();
+        std::os::unix::fs::symlink(&outside_work, root.join(".work")).unwrap();
+        assert!(matches!(
+            ops.items_dir(&lock),
+            Err(OperationError::Conflict(_))
+        ));
+        assert_eq!(fs::read(outside_item).unwrap(), b"outside content");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1284,7 +1335,7 @@ mod tests {
         fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink("missing-new", &path).unwrap();
         assert!(matches!(
-            ops.check_snapshot(&ops.items_dir().unwrap(), &before),
+            ops.check_snapshot(&ops.items_dir(&ops.lock().unwrap()).unwrap(), &before),
             Err(OperationError::Conflict(_))
         ));
         assert_eq!(fs::read_link(path).unwrap(), Path::new("missing-new"));
@@ -1331,7 +1382,7 @@ mod tests {
         renameat_with(CWD, &staged, CWD, &path, RenameFlags::EXCHANGE).unwrap();
         assert!(matches!(
             ops.verify_exchange(
-                &ops.items_dir().unwrap(),
+                &ops.items_dir(&ops.lock().unwrap()).unwrap(),
                 &before,
                 source,
                 &staged,
@@ -1361,7 +1412,7 @@ mod tests {
         fs::write(&path, &external).unwrap();
         assert!(matches!(
             ops.verify_exchange(
-                &ops.items_dir().unwrap(),
+                &ops.items_dir(&ops.lock().unwrap()).unwrap(),
                 &before,
                 source,
                 &staged,
@@ -1390,7 +1441,7 @@ mod tests {
         renameat_with(CWD, &staged, CWD, &path, RenameFlags::EXCHANGE).unwrap();
         assert!(matches!(
             ops.verify_exchange(
-                &ops.items_dir().unwrap(),
+                &ops.items_dir(&ops.lock().unwrap()).unwrap(),
                 &before,
                 source,
                 &staged,
@@ -1420,7 +1471,7 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
         assert!(matches!(
             ops.verify_exchange(
-                &ops.items_dir().unwrap(),
+                &ops.items_dir(&ops.lock().unwrap()).unwrap(),
                 &before,
                 source,
                 &staged,
@@ -1467,7 +1518,7 @@ mod tests {
         fs::write(&staged, b"changed old source").unwrap();
         let error = ops
             .verify_exchange_with_hook(
-                &ops.items_dir().unwrap(),
+                &ops.items_dir(&ops.lock().unwrap()).unwrap(),
                 &before,
                 source,
                 &staged,
