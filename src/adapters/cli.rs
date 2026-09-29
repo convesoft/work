@@ -432,14 +432,14 @@ fn template_preview_value(preview: &TemplatePreview) -> Value {
     json!({
         "name":preview.name,"root":preview.root,
         "parameters":preview.parameters,"existing":preview.existing,
-        "items":preview.items.iter().map(|item| json!({
+        "items":preview.items.iter().map(|item| (item.key.clone(), json!({
             "key":item.key,"title":item.title,"body":item.body,
             "completion":match item.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
             "state":item.state.map(|state|match state {ManualState::Open=>"open",ManualState::Done=>"done"}),
             "priority":item.priority,"labels":item.labels,
             "model":item.model,"model_source":item.model_source.as_ref().map(|source|source.as_str()),
             "thinking":item.thinking,"thinking_source":item.thinking_source.as_ref().map(|source|source.as_str()),
-        })).collect::<Vec<_>>(),
+        }))).collect::<BTreeMap<_,_>>(),
         "edges":preview.edges.iter().map(|edge| json!({
             "from":{"reference":edge.from.reference,"existing_id":edge.from.existing_id},
             "kind":edge.kind.as_str(),

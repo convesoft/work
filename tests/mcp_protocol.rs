@@ -593,9 +593,9 @@ edges:
         "parameters":{"subject":"BUG-7"}, "existing":{"delivery=typo":delivery}}),
         "invalid_argument",
     );
-    assert_eq!(mcp["preview"]["items"][0]["title"], "Fix BUG-7");
+    assert_eq!(mcp["preview"]["items"]["fix"]["title"], "Fix BUG-7");
     assert_eq!(
-        mcp["preview"]["items"][0]["model_source"],
+        mcp["preview"]["items"]["fix"]["model_source"],
         "template_default"
     );
     assert_eq!(
