@@ -19,6 +19,7 @@ const STEPS: [&str; 7] = [
 ];
 const AGGREGATE: &str = "933a6d82674c4a23ab45e810b8319bd2";
 const RELEASE: &str = "74c22e40cbc249229f86e355a663a942";
+const UNRELATED: &str = "fedcba98000040008000000000000001";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn git(root: &Path, args: &[&str]) {
@@ -289,6 +290,14 @@ fn body(bytes: &[u8]) -> &[u8] {
     &bytes[first..]
 }
 
+fn bootstrap_ready(surface: &mut Surface, root: &Path) -> Vec<String> {
+    surface
+        .ready(root)
+        .into_iter()
+        .filter(|id| STEPS.contains(&id.as_str()) || id == RELEASE)
+        .collect()
+}
+
 #[test]
 fn copied_handoff_remains_open_after_live_item_completion() {
     let source = fs::read_to_string(
@@ -312,11 +321,17 @@ fn copied_handoff_remains_open_after_live_item_completion() {
 fn real_backlog_adopts_and_advances_on_both_surfaces() {
     for via_mcp in [false, true] {
         let fixture = Fixture::new();
+        fs::write(
+            fixture.file(UNRELATED),
+            format!("---\nformat_version: 1\nid: \"{UNRELATED}\"\ntitle: Independent work\nstate: open\n---\nBody\n"),
+        )
+        .unwrap();
         let before = fixture.originals();
         let mut surface = Surface::new(&fixture.0, via_mcp);
         let listed = surface.ok(&fixture.0, &["item", "list"], "item_list", json!({}));
         assert_eq!(listed["items"].as_array().unwrap().len(), before.len());
-        assert_eq!(surface.ready(&fixture.0), vec![STEPS[6]]);
+        assert!(surface.ready(&fixture.0).contains(&UNRELATED.to_owned()));
+        assert_eq!(bootstrap_ready(&mut surface, &fixture.0), vec![STEPS[6]]);
         assert_eq!(surface.inspect(&fixture.0, AGGREGATE)["state"], Value::Null);
         let aggregate = surface.inspect(&fixture.0, AGGREGATE);
         let children = aggregate["relations"]["children"]
@@ -354,21 +369,24 @@ fn real_backlog_adopts_and_advances_on_both_surfaces() {
             surface.reopen(&fixture.0, id);
         }
         for (i, id) in STEPS.iter().enumerate() {
-            assert_eq!(surface.ready(&fixture.0), vec![*id]);
+            assert_eq!(bootstrap_ready(&mut surface, &fixture.0), vec![*id]);
             assert_eq!(
                 surface.inspect(&fixture.0, AGGREGATE)["effective_done"],
                 false
             );
             surface.close(&fixture.0, id);
             if i < 6 {
-                assert_eq!(surface.ready(&fixture.0), vec![STEPS[i + 1]]);
+                assert_eq!(
+                    bootstrap_ready(&mut surface, &fixture.0),
+                    vec![STEPS[i + 1]]
+                );
             }
         }
         assert_eq!(
             surface.inspect(&fixture.0, AGGREGATE)["effective_done"],
             true
         );
-        assert_eq!(surface.ready(&fixture.0), vec![RELEASE]);
+        assert_eq!(bootstrap_ready(&mut surface, &fixture.0), vec![RELEASE]);
         surface.reopen(&fixture.0, STEPS[0]);
         assert_eq!(
             surface.inspect(&fixture.0, AGGREGATE)["effective_done"],
