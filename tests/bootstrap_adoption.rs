@@ -55,6 +55,17 @@ impl Fixture {
             )
             .unwrap();
         }
+        // Model the handoff to item 7 independently of live backlog progress.
+        for (index, id) in STEPS.iter().enumerate() {
+            let path = root.join(".work/items").join(format!("{id}.md"));
+            let source = fs::read_to_string(&path).unwrap();
+            let state = if index == STEPS.len() - 1 {
+                "open"
+            } else {
+                "done"
+            };
+            fs::write(path, with_fixture_state(&source, state)).unwrap();
+        }
         git(&root, &["add", ".work/items"]);
         git(
             &root,
@@ -85,6 +96,24 @@ impl Fixture {
             })
             .collect()
     }
+}
+
+fn with_fixture_state(source: &str, state: &str) -> String {
+    let (header, body) = source.split_once("\n---\n").unwrap();
+    assert!(header.lines().any(|line| line.starts_with("state: ")));
+    let header = header
+        .lines()
+        .filter(|line| state != "open" || !line.starts_with("close_reason:"))
+        .map(|line| {
+            if line.starts_with("state: ") {
+                format!("state: {state}")
+            } else {
+                (*line).to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{header}\n---\n{body}")
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -255,6 +284,25 @@ impl Surface {
 fn body(bytes: &[u8]) -> &[u8] {
     let first = bytes.windows(5).position(|v| v == b"\n---\n").unwrap() + 5;
     &bytes[first..]
+}
+
+#[test]
+fn copied_handoff_remains_open_after_live_item_completion() {
+    let source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".work/items")
+            .join(format!("{}.md", STEPS[6])),
+    )
+    .unwrap();
+    let completed = with_fixture_state(&with_fixture_state(&source, "open"), "done").replacen(
+        "state: done\n",
+        "state: done\nclose_reason: \"merged\"\n",
+        1,
+    );
+    let open = with_fixture_state(&completed, "open");
+    assert!(open.contains("\nstate: open\n"));
+    assert!(!open.contains("close_reason:"));
+    assert_eq!(body(open.as_bytes()), body(source.as_bytes()));
 }
 
 #[test]
