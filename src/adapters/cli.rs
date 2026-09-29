@@ -464,7 +464,9 @@ fn storage_inspection_value(inspection: StorageInspection) -> Value {
             store_id,
             schema_version,
         } => (Some(store_id.as_str()), Some(*schema_version), None),
-        StorageStatus::Corrupt(detail) => (None, None, Some(detail.as_str())),
+        StorageStatus::Corrupt(detail) | StorageStatus::Unavailable(detail) => {
+            (None, None, Some(detail.as_str()))
+        }
         StorageStatus::UnsupportedSchema(version) => (None, Some(*version), None),
         _ => (None, None, None),
     };

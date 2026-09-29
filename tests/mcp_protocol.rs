@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -618,5 +619,40 @@ fn invalid_graph_is_not_reported_as_a_storage_fault() {
     assert_eq!(
         client.error("item_ready", json!({}), "invalid_source")["code"],
         "invalid_source"
+    );
+}
+
+#[test]
+fn inaccessible_database_reports_repairable_status_in_cli_and_mcp() {
+    let fixture = Fixture::new();
+    let id = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+    fixture.write(id, "");
+    let mut client = Client::new(&fixture.0);
+    client.ok("item_ready", json!({}));
+    let database = fixture.0.join(".git/work/work.db");
+    let mode = fs::metadata(&database).unwrap().permissions().mode();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&database).is_ok() {
+        // Privileged runners may bypass file modes in this fixture.
+        fs::set_permissions(&database, fs::Permissions::from_mode(mode)).unwrap();
+        return;
+    }
+
+    let cli_inspection = fixture.cli(&["storage", "inspect"])["result"].clone();
+    let mcp_inspection = client.ok("storage_inspect", json!({}));
+    assert_eq!(mcp_inspection, cli_inspection);
+    assert_eq!(mcp_inspection["storage"]["status"], "storage_unavailable");
+    assert!(mcp_inspection["storage"]["detail"].is_string());
+    let cli_list = fixture.cli(&["item", "list"])["result"].clone();
+    let mcp_list = client.ok("item_list", json!({}));
+    assert_eq!(mcp_list, cli_list);
+    assert_eq!(mcp_list["storage_warning"]["code"], "storage_unavailable");
+
+    fs::set_permissions(&database, fs::Permissions::from_mode(mode)).unwrap();
+    assert!(
+        client
+            .ok("item_ready", json!({}))
+            .get("storage_warning")
+            .is_none()
     );
 }

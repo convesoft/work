@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -401,6 +402,92 @@ fn exclusive_sqlite_lock_is_retryable_busy_and_does_not_recreate_store() {
     locker.execute_batch("ROLLBACK").unwrap();
     assert_eq!(Storage::inspect(&project).unwrap().status, before);
     drop(Storage::open(&project).unwrap());
+}
+
+#[test]
+fn immediate_writer_reports_storage_busy_and_reconcile_succeeds_after_release() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let mut storage = Storage::open(&project).unwrap();
+    let items = fixture.store(&fixture.checkout);
+    assert!(!ItemGraph::from_store(&items).ready().unwrap().is_empty());
+    let locker = Connection::open(project.work_database_path()).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+
+    let error = storage.reconcile(&project, &items).unwrap_err();
+    assert_eq!(error.code(), "storage_busy");
+    assert!(error.to_string().contains("retry"));
+    locker.execute_batch("ROLLBACK").unwrap();
+    let report = storage.reconcile(&project, &items).unwrap();
+    assert_eq!(report.changed_files, 2);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+}
+
+#[test]
+fn unreadable_intact_database_is_unavailable_without_claim_loss() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let database = project.work_database_path();
+    let connection = Connection::open(&database).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'unreadable-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    drop(connection);
+    let mode = fs::metadata(&database).unwrap().permissions().mode();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&database).is_ok() {
+        // Privileged runners can bypass file modes, so they cannot exercise
+        // SQLite's permission-denied path with this fixture.
+        fs::set_permissions(&database, fs::Permissions::from_mode(mode)).unwrap();
+        return;
+    }
+
+    let inspection = Storage::inspect(&project).unwrap();
+    assert!(matches!(inspection.status, StorageStatus::Unavailable(_)));
+    assert_eq!(inspection.status.code(), "storage_unavailable");
+    let open_error = match Storage::open(&project) {
+        Ok(_) => panic!("unreadable database unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        open_error,
+        StorageError::Status(StorageStatus::Unavailable(_))
+    ));
+    assert!(open_error.to_string().contains("repair access"));
+    assert!(matches!(
+        Storage::recreate(&project),
+        Err(StorageError::Status(StorageStatus::Unavailable(_)))
+    ));
+    assert!(
+        !project
+            .work_storage_dir()
+            .join("recovery.in_progress")
+            .exists()
+    );
+
+    fs::set_permissions(&database, fs::Permissions::from_mode(mode)).unwrap();
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "unreadable-token"
+    );
 }
 
 #[test]

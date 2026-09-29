@@ -35,6 +35,7 @@ pub enum StorageStatus {
     MissingIdentity,
     IdentityMismatch,
     Busy,
+    Unavailable(String),
     Corrupt(String),
     UnsupportedSchema(i64),
 }
@@ -48,6 +49,7 @@ impl StorageStatus {
             Self::MissingIdentity => "missing_identity",
             Self::IdentityMismatch => "identity_mismatch",
             Self::Busy => "storage_busy",
+            Self::Unavailable(_) => "storage_unavailable",
             Self::Corrupt(_) => "corrupt_database",
             Self::UnsupportedSchema(_) => "unsupported_schema",
         }
@@ -82,6 +84,8 @@ impl StorageError {
             Self::InvalidArgument(_) => "invalid_argument",
             Self::MigrationFailed { .. } => "migration_failed",
             Self::Io(_) => "io",
+            Self::Sqlite(error) if sqlite_is_busy(error) => "storage_busy",
+            Self::Sqlite(error) if sqlite_is_unavailable(error) => "storage_unavailable",
             Self::Sqlite(_) => "storage_io",
         }
     }
@@ -92,6 +96,10 @@ impl fmt::Display for StorageError {
         match self {
             Self::Status(StorageStatus::Busy) => f.write_str(
                 "coordination storage is busy; retry after the current SQLite operation completes",
+            ),
+            Self::Status(StorageStatus::Unavailable(detail)) => write!(
+                f,
+                "coordination storage is unavailable; repair access or I/O and retry: {detail}"
             ),
             Self::Status(status) => write!(
                 f,
@@ -107,6 +115,18 @@ impl fmt::Display for StorageError {
                 backup_path.display()
             ),
             Self::Io(error) => write!(f, "storage I/O: {error}"),
+            Self::Sqlite(error) if sqlite_is_busy(error) => {
+                write!(
+                    f,
+                    "coordination storage is busy; retry after the current SQLite operation completes: {error}"
+                )
+            }
+            Self::Sqlite(error) if sqlite_is_unavailable(error) => {
+                write!(
+                    f,
+                    "coordination storage is unavailable; repair access or I/O and retry: {error}"
+                )
+            }
             Self::Sqlite(error) => write!(f, "SQLite: {error}"),
         }
     }
@@ -205,7 +225,7 @@ impl Storage {
         let expected_id = read_identity(&inspection.identity_path)?;
         let opened_id: String = connection
             .query_row("SELECT store_id FROM store_meta", [], |row| row.get(0))
-            .map_err(|error| StorageError::Status(StorageStatus::Corrupt(error.to_string())))?;
+            .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
         if opened_id != expected_id {
             return Err(StorageError::Status(StorageStatus::IdentityMismatch));
         }
@@ -387,10 +407,10 @@ impl Storage {
         let marker = read_identity(&project.work_store_identity_path())?;
         let mut connection = open_rw(&project.work_database_path())?;
         validate_coordination_schema(&connection)
-            .map_err(|error| StorageError::Status(StorageStatus::Corrupt(error.to_string())))?;
+            .map_err(|error| StorageError::Status(inspection_error(error)))?;
         let stored: String = connection
             .query_row("SELECT store_id FROM store_meta", [], |row| row.get(0))
-            .map_err(|error| StorageError::Status(StorageStatus::Corrupt(error.to_string())))?;
+            .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
         if stored != marker {
             return Err(StorageError::Status(StorageStatus::IdentityMismatch));
         }
@@ -488,7 +508,7 @@ impl Storage {
                 "recreation requires a diagnosed storage fault".into(),
             ));
         }
-        if status == StorageStatus::Busy {
+        if matches!(status, StorageStatus::Busy | StorageStatus::Unavailable(_)) {
             return Err(StorageError::Status(status));
         }
         let mut retained_paths = if recovery_marker_exists(project)? {
@@ -830,7 +850,7 @@ fn initialize(project: &Project) -> Result<(), StorageError> {
 fn inspect_existing(database: &Path, identity: &Path) -> StorageStatus {
     let marker = match read_identity(identity) {
         Ok(marker) => marker,
-        Err(error) => return StorageStatus::Corrupt(format!("invalid store identity: {error}")),
+        Err(error) => return inspection_error(error),
     };
     inspect_database(database, &marker)
 }
@@ -887,16 +907,40 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
 
 fn inspection_error(error: StorageError) -> StorageStatus {
     match &error {
-        StorageError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
-            if matches!(
-                failure.code,
-                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
-            ) =>
-        {
-            StorageStatus::Busy
+        StorageError::Sqlite(sqlite) if sqlite_is_busy(sqlite) => StorageStatus::Busy,
+        StorageError::Sqlite(sqlite) if sqlite_is_unavailable(sqlite) => {
+            StorageStatus::Unavailable(sqlite.to_string())
+        }
+        StorageError::Io(io) if io.kind() != io::ErrorKind::InvalidData => {
+            StorageStatus::Unavailable(io.to_string())
         }
         _ => StorageStatus::Corrupt(error.to_string()),
     }
+}
+
+fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(failure.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
+}
+
+fn sqlite_is_unavailable(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(
+                failure.code,
+                ErrorCode::PermissionDenied
+                    | ErrorCode::CannotOpen
+                    | ErrorCode::SystemIoFailure
+                    | ErrorCode::ReadOnly
+                    | ErrorCode::AuthorizationForStatementDenied
+                    | ErrorCode::NoLargeFileSupport
+                    | ErrorCode::DiskFull
+            )
+    )
 }
 
 fn open_rw(path: &Path) -> Result<Connection, StorageError> {
