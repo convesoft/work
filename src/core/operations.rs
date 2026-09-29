@@ -167,6 +167,7 @@ impl DurableOperations {
         }
         let graph_before = ItemGraph::from_store(&store);
         if original.is_valid()
+            && !graph_before.is_cycle_member(id)
             && !graph_before
                 .diagnostics()
                 .iter()
@@ -534,6 +535,13 @@ impl DurableOperations {
         )?)
     }
     fn ensure_selected_dir(&self, items: &OwnedFd) -> Result<(), OperationError> {
+        let work = fs::symlink_metadata(self.root.join(".work"))
+            .map_err(|_| OperationError::Conflict("work directory changed on disk".into()))?;
+        if !work.is_dir() {
+            return Err(OperationError::Conflict(
+                "work directory changed on disk".into(),
+            ));
+        }
         let selected = fs::symlink_metadata(self.root.join(".work/items"))
             .map_err(|_| OperationError::Conflict("items directory changed on disk".into()))?;
         let held = rustix::fs::fstat(items).map_err(io::Error::from)?;
@@ -1321,6 +1329,33 @@ mod tests {
             Err(OperationError::Conflict(_))
         ));
         assert_eq!(fs::read(outside_item).unwrap(), b"outside content");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn work_path_symlink_to_held_directory_is_still_a_conflict() {
+        let (root, id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let original = fs::read(ops.item_path(&id)).unwrap();
+        let work = root.join(".work");
+        let held = root.join("held-work");
+        let result = ops.mutate_with_hook(
+            &id,
+            |_, header| {
+                header.title = "Changed".into();
+                Ok(())
+            },
+            || {
+                fs::rename(&work, &held)?;
+                std::os::unix::fs::symlink(&held, &work)?;
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(OperationError::Conflict(_))));
+        assert_eq!(
+            fs::read(held.join("items").join(format!("{id}.md"))).unwrap(),
+            original
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -462,6 +462,33 @@ fn repair_returns_remaining_graph_diagnostics() {
 }
 
 #[test]
+fn repair_can_remove_an_edge_authored_by_a_cycle_participant() {
+    let f = Fixture::new();
+    f.write(1, "", b"Parent");
+    f.write(
+        2,
+        &format!("parent: \"{}\"\ndepends_on: [\"{}\"]\n", id(1), id(1)),
+        b"Child",
+    );
+    let ops = f.ops();
+    let before = ops.inspect_raw(&id(2)).unwrap();
+    assert!(
+        before
+            .graph_diagnostics
+            .iter()
+            .any(|d| d.message.contains("combined lifecycle deadlock") && d.path == f.path(&id(1)))
+    );
+    let replacement = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Child\nstate: open\nparent: \"{}\"\n---\nChild",
+        id(2),
+        id(1)
+    );
+    let repaired = ops.repair(&id(2), replacement.into_bytes()).unwrap();
+    assert!(repaired.graph_diagnostics.is_empty());
+    assert!(ItemStore::load_from_root(&f.0).unwrap().is_valid());
+}
+
+#[test]
 fn creates_files_readable_under_restrictive_umask() {
     if std::env::var_os("WORK_UMASK_TEST_CHILD").is_some() {
         let root = PathBuf::from(std::env::var_os("WORK_UMASK_TEST_ROOT").unwrap());

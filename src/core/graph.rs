@@ -61,6 +61,7 @@ pub struct ItemGraph {
     related: BTreeMap<String, BTreeSet<String>>,
     discovered_by: BTreeMap<String, BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
+    cycle_members: BTreeSet<String>,
 }
 
 impl ItemGraph {
@@ -72,6 +73,7 @@ impl ItemGraph {
             related: BTreeMap::new(),
             discovered_by: BTreeMap::new(),
             diagnostics: store.diagnostics().cloned().collect(),
+            cycle_members: BTreeSet::new(),
         };
         for file in &store.files {
             if file.is_valid() {
@@ -155,6 +157,9 @@ impl ItemGraph {
     }
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+    pub(crate) fn is_cycle_member(&self, id: &str) -> bool {
+        self.cycle_members.contains(id)
     }
 
     /// Inspection remains available when the selected graph is invalid.
@@ -337,6 +342,7 @@ impl ItemGraph {
             {
                 let mut ids: Vec<_> = component.iter().map(|node| graph[*node].clone()).collect();
                 ids.sort();
+                self.cycle_members.extend(ids.iter().cloned());
                 let path = self.nodes[&ids[0]].path.clone();
                 self.diagnostics.push(Diagnostic {
                     path,
