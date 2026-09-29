@@ -1,0 +1,25 @@
+format_version: 1
+name: review_cycle
+parameters: [change]
+defaults:
+  model: "gpt-6-sol"
+  thinking: "high"
+items:
+  - key: implement
+    title: "Implement {{change}}"
+    body: |
+      Complete the change and record the result.
+  - key: review
+    title: "Review {{change}}"
+    body: |
+      Review the implementation and record findings.
+  - key: deliver
+    title: "Deliver {{change}}"
+    body: |
+      Confirm the required delivery conditions.
+edges:
+  - {from: "local:implement", kind: parent, to: root}
+  - {from: "local:review", kind: parent, to: root}
+  - {from: "local:deliver", kind: parent, to: root}
+  - {from: "local:review", kind: depends_on, to: "local:implement"}
+  - {from: "local:deliver", kind: depends_on, to: "local:review"}

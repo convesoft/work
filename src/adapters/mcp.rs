@@ -130,6 +130,9 @@ const TOOL_NAMES: &[&str] = &[
     "storage_migrate",
     "storage_restore",
     "storage_recreate",
+    "template_list",
+    "template_validate",
+    "template_preview",
 ];
 
 fn tool(name: &str, properties: Value, required: &[&str], description: &str) -> Value {
@@ -263,9 +266,29 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "storage_recreate",
-            common,
+            common.clone(),
             &[],
             "Explicitly recreate a diagnosed faulty store with active execution stopped; lost claims cannot be reconstructed.",
+        ),
+        tool(
+            "template_list",
+            common.clone(),
+            &[],
+            "Discover valid and invalid version-1 YAML templates in the selected checkout.",
+        ),
+        tool(
+            "template_validate",
+            json!({"worktree":s,"name":s}),
+            &["name"],
+            "Validate one version-1 YAML template definition.",
+        ),
+        tool(
+            "template_preview",
+            json!({"worktree":s,"name":s,"root":s,
+            "parameters":{"type":"object","additionalProperties":{"type":"string"}},
+            "existing":{"type":"object","additionalProperties":{"type":"string"}}}),
+            &["name", "root"],
+            "Render a complete symbolic item graph without publishing a run, items, permanent IDs, or claims.",
         ),
     ]
 }
@@ -303,6 +326,9 @@ fn validate<'a>(name: &str, args: &'a Value) -> Result<&'a Map<String, Value>, C
             "array" => value
                 .as_array()
                 .is_some_and(|a| a.iter().all(Value::is_string)),
+            "object" => value
+                .as_object()
+                .is_some_and(|map| map.values().all(Value::is_string)),
             _ => false,
         };
         if !valid
@@ -434,6 +460,39 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
                 required(args, "backup_path").to_owned(),
             ],
         ),
+        "template_list" => cli::template_command(&project, "list", &[]),
+        "template_validate" => {
+            cli::template_command(&project, "validate", &[required(args, "name").to_owned()])
+        }
+        "template_preview" => {
+            let mut arguments = vec![
+                required(args, "name").to_owned(),
+                "--root".to_owned(),
+                required(args, "root").to_owned(),
+            ];
+            for (field, flag) in [("parameters", "--param"), ("existing", "--existing")] {
+                if let Some(bindings) = args.get(field).and_then(Value::as_object) {
+                    for (name, value) in bindings {
+                        if !name
+                            .bytes()
+                            .next()
+                            .is_some_and(|byte| byte.is_ascii_lowercase())
+                            || !name.bytes().all(|byte| {
+                                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                            })
+                        {
+                            return Err(invalid(format!("invalid {field} binding name {name:?}")));
+                        }
+                        arguments.push(flag.to_owned());
+                        arguments.push(format!(
+                            "{name}={}",
+                            value.as_str().expect("validated string")
+                        ));
+                    }
+                }
+            }
+            cli::template_command(&project, "preview", &arguments)
+        }
         "item_diagnose" => {
             let store =
                 ItemStore::load(&project).map_err(|e| CliError::new("io", e.to_string()))?;
