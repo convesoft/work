@@ -248,7 +248,14 @@ fn item_command(
                 .title
                 .ok_or_else(|| usage("item create requires --title"))?;
             let item = ops.create(title, input.body.unwrap_or_default(), input.change)?;
-            Ok(json!({"item":one_item_value(project,&item)?}))
+            let header = item
+                .file
+                .header
+                .as_ref()
+                .expect("successful create has a header");
+            let value = one_item_value(project, &item)
+                .map_err(|error| with_published_item(error, &header.id, &item.file.path))?;
+            Ok(json!({"item":value}))
         }
         "update" if args.len() >= 2 => {
             let id = resolve(project, &args[0])?;
@@ -562,6 +569,10 @@ fn diagnostic(d: &Diagnostic) -> Value {
 }
 fn io_error(error: io::Error) -> CliError {
     CliError::new("io", error.to_string())
+}
+fn with_published_item(mut error: CliError, id: &str, path: &Path) -> CliError {
+    error.published_item = Some(json!({"id":id,"path":encode_path(path)}));
+    error
 }
 fn usage(message: impl Into<String>) -> CliError {
     CliError::new("usage", message)
