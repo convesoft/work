@@ -49,6 +49,12 @@ fn handle(request: Value, initialized: &mut bool) -> Option<Value> {
         return Some(rpc_error(Value::Null, -32600, "Invalid Request"));
     };
     let id = object.get("id").cloned();
+    if id
+        .as_ref()
+        .is_some_and(|id| !id.is_null() && !id.is_string() && !id.is_number())
+    {
+        return Some(rpc_error(Value::Null, -32600, "Invalid Request"));
+    }
     let Some(method) = object.get("method").and_then(Value::as_str) else {
         return Some(rpc_error(
             id.unwrap_or(Value::Null),

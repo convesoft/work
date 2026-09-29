@@ -346,6 +346,20 @@ fn malformed_rpc_and_noop_update_do_not_silently_succeed() {
     let response: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(response["id"], Value::Null);
     assert_eq!(response["error"]["code"], -32600);
+    for bad_id in [json!({}), json!([]), json!(true)] {
+        writeln!(client.stdin,"{}",json!({"jsonrpc":"2.0","id":bad_id,"method":"tools/call","params":{"name":"item_close","arguments":{"id":id}}})).unwrap();
+        client.stdin.flush().unwrap();
+        let mut line = String::new();
+        client.stdout.read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], -32600);
+    }
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        fs::read_dir(fixture.0.join(".work/items")).unwrap().count(),
+        entries
+    );
     assert_eq!(client.request("ping", json!({}))["result"], json!({}));
 }
 
