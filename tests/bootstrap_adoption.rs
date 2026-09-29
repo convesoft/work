@@ -66,6 +66,9 @@ impl Fixture {
             };
             fs::write(path, with_fixture_state(&source, state)).unwrap();
         }
+        let release = root.join(".work/items").join(format!("{RELEASE}.md"));
+        let source = fs::read_to_string(&release).unwrap();
+        fs::write(release, with_fixture_state(&source, "open")).unwrap();
         git(&root, &["add", ".work/items"]);
         git(
             &root,
@@ -330,6 +333,7 @@ fn real_backlog_adopts_and_advances_on_both_surfaces() {
             surface.inspect(&fixture.0, RELEASE)["relations"]["depends_on"][0],
             AGGREGATE
         );
+        assert_eq!(surface.inspect(&fixture.0, RELEASE)["state"], "open");
         assert_eq!(
             surface.inspect(&fixture.0, AGGREGATE)["effective_done"],
             false
