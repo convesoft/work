@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
 
 use rusqlite::{Connection, params};
 use work::core::graph::ItemGraph;
@@ -102,6 +103,31 @@ fn indexed_state(connection: &Connection, project: &Project, id: &str) -> (Strin
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap()
+}
+
+#[test]
+fn concurrent_first_open_shares_one_initialized_store() {
+    let fixture = Fixture::new();
+    let project = Arc::new(fixture.project(&fixture.checkout));
+    assert!(!project.work_storage_dir().exists());
+    let barrier = Arc::new(Barrier::new(16));
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let project = Arc::clone(&project);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                drop(Storage::open(&project).unwrap());
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
 }
 
 #[test]
@@ -548,12 +574,24 @@ fn encoded_backup_path_round_trips_through_cli_restore() {
 fn migration_retains_backup_and_rolls_back_failed_schema_change() {
     let fixture = Fixture::new();
     let project = fixture.project(&fixture.checkout);
-    drop(Storage::open(&project).unwrap());
+    let mut storage = Storage::open(&project).unwrap();
+    storage
+        .reconcile(&project, &fixture.store(&fixture.checkout))
+        .unwrap();
+    drop(storage);
     let connection = Connection::open(project.work_database_path()).unwrap();
     connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'migration-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection.execute("INSERT INTO runtime_records(kind, record_key, value) VALUES ('observation', 'migration-record', X'CAFE')", []).unwrap();
+    let old_source_count: i64 = connection
+        .query_row("SELECT count(*) FROM source_files", [], |row| row.get(0))
+        .unwrap();
+    assert!(old_source_count > 0);
     connection
         .execute_batch(
-            "DROP TABLE views; CREATE TABLE views(root BLOB PRIMARY KEY); PRAGMA user_version = 0;",
+            "PRAGMA foreign_keys=OFF;
+             DROP TABLE views;
+             CREATE VIEW views AS SELECT CAST('old-root' AS BLOB) AS root;
+             PRAGMA user_version = 0;",
         )
         .unwrap();
     drop(connection);
@@ -569,6 +607,22 @@ fn migration_retains_backup_and_rolls_back_failed_schema_change() {
         StorageStatus::UnsupportedSchema(0)
     );
     let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT count(*) FROM source_files", [], |row| row.get(0))
+            .unwrap(),
+        old_source_count
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT type FROM sqlite_schema WHERE name = 'views'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "view"
+    );
     assert_eq!(
         connection
             .query_row::<String, _, _>(
@@ -590,7 +644,9 @@ fn migration_retains_backup_and_rolls_back_failed_schema_change() {
         })
         .collect();
     assert_eq!(backups.len(), 1);
-    connection.execute_batch("DROP TABLE views; CREATE TABLE views(root BLOB PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0);").unwrap();
+    connection
+        .execute_batch("DROP VIEW views; CREATE TABLE views(root BLOB PRIMARY KEY)")
+        .unwrap();
     drop(connection);
     let migrated = Storage::migrate(&project).unwrap();
     assert_eq!(migrated.from_version, 0);
@@ -602,6 +658,18 @@ fn migration_retains_backup_and_rolls_back_failed_schema_change() {
     let connection = Connection::open(project.work_database_path()).unwrap();
     assert_eq!(
         connection
+            .query_row::<i64, _, _>("SELECT count(*) FROM source_files", [], |row| row.get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT count(*) FROM views", [], |row| row.get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
             .query_row::<String, _, _>(
                 "SELECT owner_token FROM claims WHERE item_id = ?1",
                 [FIRST],
@@ -609,6 +677,23 @@ fn migration_retains_backup_and_rolls_back_failed_schema_change() {
             )
             .unwrap(),
         "migration-token"
+    );
+    assert_eq!(
+        connection
+            .query_row::<Vec<u8>, _, _>(
+                "SELECT value FROM runtime_records WHERE record_key = 'migration-record'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        b"\xca\xfe"
+    );
+    let backup = Connection::open(migrated.backup_path).unwrap();
+    assert_eq!(
+        backup
+            .query_row::<i64, _, _>("SELECT count(*) FROM source_files", [], |row| row.get(0))
+            .unwrap(),
+        old_source_count
     );
 }
 

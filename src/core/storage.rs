@@ -383,6 +383,7 @@ impl Storage {
         let backup_path = retain_backup(&connection, project)?;
         (|| -> Result<(), StorageError> {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            drop_derived_tables(&tx)?;
             create_schema_v1(&tx)?;
             validate_schema_v1(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -522,6 +523,19 @@ fn create_schema_v1(tx: &Transaction<'_>) -> Result<(), StorageError> {
             kind TEXT NOT NULL, record_key TEXT NOT NULL, value BLOB NOT NULL,
             PRIMARY KEY(kind, record_key)
         );")?;
+    Ok(())
+}
+
+fn drop_derived_tables(tx: &Transaction<'_>) -> Result<(), StorageError> {
+    // Drop dependents first while foreign-key enforcement is enabled. The
+    // transaction also restores the old projection if creation later fails.
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS edges;
+         DROP TABLE IF EXISTS items;
+         DROP TABLE IF EXISTS source_files;
+         DROP TABLE IF EXISTS views;
+         DROP TABLE IF EXISTS ephemeral_sources;",
+    )?;
     Ok(())
 }
 
@@ -854,7 +868,22 @@ fn ensure_storage_dir(project: &Project) -> Result<(), StorageError> {
             path.display()
         ))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(&path)?;
+            match fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    match fs::symlink_metadata(&path) {
+                        Ok(metadata) if metadata.file_type().is_dir() => {}
+                        Ok(_) => {
+                            return Err(StorageError::InvalidArgument(format!(
+                                "storage path is not a real directory: {}",
+                                path.display()
+                            )));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
             sync_dir(&project.git_common_dir)?;
             Ok(())
         }
