@@ -184,20 +184,38 @@ impl Storage {
     pub fn inspect(project: &Project) -> Result<StorageInspection, StorageError> {
         let database_path = project.work_database_path();
         let identity_path = project.work_store_identity_path();
-        let status = if recovery_marker_exists(project)? {
-            StorageStatus::Corrupt(
-                "storage recreation was interrupted; inspect retained files and recover explicitly"
-                    .into(),
-            )
-        } else {
+        let status = (|| -> Result<StorageStatus, StorageError> {
+            let storage_dir = project.work_storage_dir();
+            match fs::symlink_metadata(&storage_dir) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    return Err(StorageError::InvalidArgument(format!(
+                        "storage path is not a real directory: {}",
+                        storage_dir.display()
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            if recovery_marker_exists(project)? {
+                return Ok(StorageStatus::Corrupt(
+                    "storage recreation was interrupted; inspect retained files and recover explicitly"
+                        .into(),
+                ));
+            }
             let db_exists = regular_file_or_absent(&database_path)?;
             let identity_exists = regular_file_or_absent(&identity_path)?;
-            match (db_exists, identity_exists) {
+            Ok(match (db_exists, identity_exists) {
                 (false, false) => StorageStatus::Uninitialized,
                 (false, true) => StorageStatus::MissingDatabase,
                 (true, false) => StorageStatus::MissingIdentity,
                 (true, true) => inspect_existing(&database_path, &identity_path),
-            }
+            })
+        })();
+        let status = match status {
+            Ok(status) => status,
+            Err(StorageError::Io(error)) => StorageStatus::Unavailable(error.to_string()),
+            Err(error) => return Err(error),
         };
         Ok(StorageInspection {
             database_path,
@@ -209,11 +227,11 @@ impl Storage {
     /// First use initializes an entirely absent store. Any later fault is
     /// reported rather than silently replacing coordination state.
     pub fn open(project: &Project) -> Result<Self, StorageError> {
-        ensure_storage_dir(project)?;
-        let _lock = storage_lock(project)?;
+        ensure_storage_dir(project).map_err(storage_boundary_error)?;
+        let _lock = storage_lock(project).map_err(storage_boundary_error)?;
         let inspection = Self::inspect(project)?;
         match inspection.status {
-            StorageStatus::Uninitialized => initialize(project)?,
+            StorageStatus::Uninitialized => initialize(project).map_err(storage_boundary_error)?,
             StorageStatus::Ready { .. } => {}
             status => return Err(StorageError::Status(status)),
         }
@@ -222,7 +240,8 @@ impl Storage {
             return Err(StorageError::Status(status));
         }
         let connection = open_rw(&inspection.database_path)?;
-        let expected_id = read_identity(&inspection.identity_path)?;
+        let expected_id =
+            read_identity(&inspection.identity_path).map_err(storage_boundary_error)?;
         let opened_id: String = connection
             .query_row("SELECT store_id FROM store_meta", [], |row| row.get(0))
             .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
@@ -399,8 +418,8 @@ impl Storage {
     /// Migrate a recognized pre-v1 store after retaining a consistent backup.
     /// Unknown future versions remain inspectable and require newer software.
     pub fn migrate(project: &Project) -> Result<MigrationReport, StorageError> {
-        ensure_storage_dir(project)?;
-        let _lock = storage_lock(project)?;
+        ensure_storage_dir(project).map_err(storage_boundary_error)?;
+        let _lock = storage_lock(project).map_err(storage_boundary_error)?;
         let status = Self::inspect(project)?.status;
         if status != StorageStatus::UnsupportedSchema(0) {
             return Err(StorageError::Status(status));
@@ -446,8 +465,8 @@ impl Storage {
         project: &Project,
         backup: &Path,
     ) -> Result<RecoveryReport, StorageError> {
-        ensure_storage_dir(project)?;
-        let _lock = storage_lock(project)?;
+        ensure_storage_dir(project).map_err(storage_boundary_error)?;
+        let _lock = storage_lock(project).map_err(storage_boundary_error)?;
         let interrupted = recovery_marker_exists(project)?;
         let mut retained_paths = if interrupted {
             if !regular_file_or_absent(&recovery_marker_path(project))? {
@@ -498,8 +517,8 @@ impl Storage {
     /// Existing database and identity files are retained for investigation.
     /// Active execution must stop; prior claim tokens must never be reused.
     pub fn recreate(project: &Project) -> Result<RecoveryReport, StorageError> {
-        ensure_storage_dir(project)?;
-        let _lock = storage_lock(project)?;
+        ensure_storage_dir(project).map_err(storage_boundary_error)?;
+        let _lock = storage_lock(project).map_err(storage_boundary_error)?;
         let status = Self::inspect(project)?.status;
         if matches!(
             status,
@@ -936,6 +955,13 @@ fn inspection_error(error: StorageError) -> StorageStatus {
     }
 }
 
+fn storage_boundary_error(error: StorageError) -> StorageError {
+    match error {
+        error @ StorageError::Io(_) => StorageError::Status(inspection_error(error)),
+        other => other,
+    }
+}
+
 fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
     matches!(
         error,
@@ -1083,14 +1109,23 @@ fn ensure_storage_dir(project: &Project) -> Result<(), StorageError> {
 }
 
 fn storage_lock(project: &Project) -> Result<File, StorageError> {
+    let path = project.work_storage_dir().join("storage.lock");
     let file = File::from(
         openat(
             CWD,
-            project.work_storage_dir().join("storage.lock"),
+            &path,
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
-        .map_err(io::Error::from)?,
+        .map_err(|error| match error {
+            rustix::io::Errno::LOOP | rustix::io::Errno::ISDIR => {
+                StorageError::InvalidArgument(format!(
+                    "storage lock path is not a regular file: {}",
+                    path.display()
+                ))
+            }
+            other => StorageError::Io(io::Error::from(other)),
+        })?,
     );
     flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
     Ok(file)
@@ -1419,5 +1454,28 @@ impl Sha256 {
         for (value, updated) in self.state.iter_mut().zip(working) {
             *value = value.wrapping_add(updated);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StorageError, StorageStatus, storage_boundary_error};
+    use std::io;
+
+    #[test]
+    fn storage_boundary_keeps_invalid_identity_data_distinct_from_access_failure() {
+        let malformed = StorageError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "malformed identity bytes",
+        ));
+        assert!(matches!(
+            storage_boundary_error(malformed),
+            StorageError::Status(StorageStatus::Corrupt(_))
+        ));
+        let denied = StorageError::Io(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(matches!(
+            storage_boundary_error(denied),
+            StorageError::Status(StorageStatus::Unavailable(_))
+        ));
     }
 }

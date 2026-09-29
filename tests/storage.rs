@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +19,17 @@ struct Fixture {
     root: PathBuf,
     checkout: PathBuf,
     linked: PathBuf,
+}
+
+struct RestorePermissions {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl Drop for RestorePermissions {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.mode));
+    }
 }
 
 impl Fixture {
@@ -488,6 +499,94 @@ fn unreadable_intact_database_is_unavailable_without_claim_loss() {
             .unwrap(),
         "unreadable-token"
     );
+}
+
+#[test]
+fn inaccessible_storage_directory_is_unavailable_until_access_is_repaired() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let database = project.work_database_path();
+    let identity = project.work_store_identity_path();
+    let connection = Connection::open(&database).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'directory-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    drop(connection);
+    let original_identity = fs::read(&identity).unwrap();
+    let directory = project.work_storage_dir();
+    let restore = RestorePermissions {
+        mode: fs::metadata(&directory).unwrap().permissions().mode(),
+        path: directory.clone(),
+    };
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o000)).unwrap();
+    if !matches!(
+        fs::symlink_metadata(directory.join("recovery.in_progress")),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+    ) {
+        // Privileged runners can bypass directory modes.
+        return;
+    }
+
+    let inspection = Storage::inspect(&project).unwrap();
+    assert!(matches!(inspection.status, StorageStatus::Unavailable(_)));
+    assert_eq!(inspection.status.code(), "storage_unavailable");
+    let open_error = match Storage::open(&project) {
+        Ok(_) => panic!("inaccessible storage unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert_eq!(open_error.code(), "storage_unavailable");
+    assert!(open_error.to_string().contains("repair access"));
+    assert!(matches!(
+        Storage::recreate(&project),
+        Err(StorageError::Status(StorageStatus::Unavailable(_)))
+    ));
+
+    drop(restore);
+    assert_eq!(fs::read(&identity).unwrap(), original_identity);
+    assert!(!directory.join("recovery.in_progress").exists());
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "directory-token"
+    );
+}
+
+#[test]
+fn symlinked_storage_and_lock_paths_remain_invalid() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage_dir = project.work_storage_dir();
+    let outside = fixture.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, &storage_dir).unwrap();
+    assert!(matches!(
+        Storage::inspect(&project),
+        Err(StorageError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::InvalidArgument(_))
+    ));
+    fs::remove_file(&storage_dir).unwrap();
+
+    drop(Storage::open(&project).unwrap());
+    let lock = storage_dir.join("storage.lock");
+    fs::remove_file(&lock).unwrap();
+    symlink(project.work_store_identity_path(), &lock).unwrap();
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::InvalidArgument(_))
+    ));
 }
 
 #[test]
