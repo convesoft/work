@@ -651,6 +651,132 @@ fn restores_a_backup_created_before_migration_then_requires_migration() {
 }
 
 #[test]
+fn refuses_schema_zero_backup_missing_coordination_without_replacing_current_store() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'current-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection.execute("INSERT INTO runtime_records(kind, record_key, value) VALUES ('observation', 'current', X'CAFE')", []).unwrap();
+    drop(connection);
+    let connection = Connection::open(&backup).unwrap();
+    connection
+        .execute_batch("DROP TABLE runtime_records; PRAGMA user_version=0")
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::restore_backup(&project, &backup),
+        Err(StorageError::Status(StorageStatus::Corrupt(detail)))
+            if detail.contains("runtime_records")
+    ));
+    let connection = Connection::open(&backup).unwrap();
+    connection.execute_batch("DROP TABLE claims").unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        Storage::restore_backup(&project, &backup),
+        Err(StorageError::Status(StorageStatus::Corrupt(detail)))
+            if detail.contains("claims")
+    ));
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "current-token"
+    );
+    assert_eq!(
+        connection
+            .query_row::<Vec<u8>, _, _>(
+                "SELECT value FROM runtime_records WHERE record_key = 'current'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        b"\xca\xfe"
+    );
+}
+
+#[test]
+fn refuses_to_migrate_schema_zero_without_coordination_tables_or_claim_exclusion() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection
+        .execute_batch("DROP TABLE claims; DROP TABLE runtime_records; PRAGMA user_version=0")
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::migrate(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(detail)))
+            if detail.contains("claims")
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    let coordination_tables: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('claims', 'runtime_records')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(coordination_tables, 0);
+    assert_eq!(
+        connection
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        0
+    );
+
+    connection
+        .execute_batch(
+            "CREATE TABLE claims (
+                item_id TEXT PRIMARY KEY, owner_token TEXT NOT NULL,
+                actor_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                run_id TEXT, session_id TEXT, workspace_id TEXT
+            );
+            CREATE TABLE runtime_records (
+                kind TEXT NOT NULL, record_key TEXT NOT NULL, value BLOB NOT NULL,
+                PRIMARY KEY(kind, record_key)
+            );",
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::migrate(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(detail)))
+            if detail.contains("owner_token must be unique")
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE UNIQUE INDEX claim_owner_token ON claims(owner_token);
+             DROP TABLE runtime_records;
+             CREATE TABLE runtime_records (
+                 kind TEXT NOT NULL, record_key TEXT NOT NULL, value TEXT NOT NULL,
+                 PRIMARY KEY(kind, record_key)
+             );",
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::migrate(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(detail)))
+            if detail.contains("runtime_records")
+    ));
+}
+
+#[test]
 fn refuses_a_schema_zero_backup_with_a_different_store_identity() {
     let fixture = Fixture::new();
     let project = fixture.project(&fixture.checkout);

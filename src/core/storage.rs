@@ -372,6 +372,8 @@ impl Storage {
         }
         let marker = read_identity(&project.work_store_identity_path())?;
         let mut connection = open_rw(&project.work_database_path())?;
+        validate_coordination_schema(&connection)
+            .map_err(|error| StorageError::Status(StorageStatus::Corrupt(error.to_string())))?;
         let stored: String = connection
             .query_row("SELECT store_id FROM store_meta", [], |row| row.get(0))
             .map_err(|error| StorageError::Status(StorageStatus::Corrupt(error.to_string())))?;
@@ -524,7 +526,7 @@ fn create_schema_v1(tx: &Transaction<'_>) -> Result<(), StorageError> {
 }
 
 fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
-    const META: &[(&str, &str, bool, i64)] = &[("store_id", "TEXT", true, 1)];
+    validate_coordination_schema(connection)?;
     const VIEWS: &[(&str, &str, bool, i64)] = &[
         ("root", "BLOB", false, 1),
         ("generation", "INTEGER", true, 0),
@@ -553,71 +555,14 @@ fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
         ("path", "BLOB", false, 1),
         ("source_digest", "BLOB", true, 0),
     ];
-    const CLAIMS: &[(&str, &str, bool, i64)] = &[
-        ("item_id", "TEXT", false, 1),
-        ("owner_token", "TEXT", true, 0),
-        ("actor_id", "TEXT", true, 0),
-        ("created_at", "TEXT", true, 0),
-        ("updated_at", "TEXT", true, 0),
-        ("run_id", "TEXT", false, 0),
-        ("session_id", "TEXT", false, 0),
-        ("workspace_id", "TEXT", false, 0),
-    ];
-    const RECORDS: &[(&str, &str, bool, i64)] = &[
-        ("kind", "TEXT", true, 1),
-        ("record_key", "TEXT", true, 2),
-        ("value", "BLOB", true, 0),
-    ];
     for (table, expected) in [
-        ("store_meta", META),
         ("views", VIEWS),
         ("source_files", SOURCES),
         ("items", ITEMS),
         ("edges", EDGES),
         ("ephemeral_sources", EPHEMERAL),
-        ("claims", CLAIMS),
-        ("runtime_records", RECORDS),
     ] {
-        let kind: Option<String> = connection
-            .query_row(
-                "SELECT type FROM sqlite_schema WHERE name = ?1",
-                [table],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if kind.as_deref() != Some("table") {
-            return Err(StorageError::InvalidArgument(format!(
-                "schema table {table} is missing or is not a table"
-            )));
-        }
-        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-        let actual: Vec<(String, String, bool, i64)> = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get::<_, i64>(3)? != 0,
-                    row.get(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        if actual.len() != expected.len()
-            || actual.iter().zip(expected).any(|(column, required)| {
-                column.0 != required.0
-                    || !column.1.eq_ignore_ascii_case(required.1)
-                    || column.2 != required.2
-                    || column.3 != required.3
-            })
-        {
-            return Err(StorageError::InvalidArgument(format!(
-                "schema table {table} does not match version 1"
-            )));
-        }
-    }
-    if !has_unique_column(connection, "claims", "owner_token")? {
-        return Err(StorageError::InvalidArgument(
-            "schema claims.owner_token must be unique".into(),
-        ));
+        validate_columns(connection, table, expected)?;
     }
     for (table, expected) in [
         (
@@ -674,6 +619,83 @@ fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
     if violations != 0 {
         return Err(StorageError::InvalidArgument(format!(
             "schema contains {violations} foreign key violation(s)"
+        )));
+    }
+    Ok(())
+}
+
+/// Version 0 is recognized only when its nonderivable coordination data is
+/// intact. Derived view tables may be repaired by the v1 migration.
+fn validate_coordination_schema(connection: &Connection) -> Result<(), StorageError> {
+    const META: &[(&str, &str, bool, i64)] = &[("store_id", "TEXT", true, 1)];
+    const CLAIMS: &[(&str, &str, bool, i64)] = &[
+        ("item_id", "TEXT", false, 1),
+        ("owner_token", "TEXT", true, 0),
+        ("actor_id", "TEXT", true, 0),
+        ("created_at", "TEXT", true, 0),
+        ("updated_at", "TEXT", true, 0),
+        ("run_id", "TEXT", false, 0),
+        ("session_id", "TEXT", false, 0),
+        ("workspace_id", "TEXT", false, 0),
+    ];
+    const RECORDS: &[(&str, &str, bool, i64)] = &[
+        ("kind", "TEXT", true, 1),
+        ("record_key", "TEXT", true, 2),
+        ("value", "BLOB", true, 0),
+    ];
+    for (table, expected) in [
+        ("store_meta", META),
+        ("claims", CLAIMS),
+        ("runtime_records", RECORDS),
+    ] {
+        validate_columns(connection, table, expected)?;
+    }
+    if !has_unique_column(connection, "claims", "owner_token")? {
+        return Err(StorageError::InvalidArgument(
+            "schema claims.owner_token must be unique".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_columns(
+    connection: &Connection,
+    table: &str,
+    expected: &[(&str, &str, bool, i64)],
+) -> Result<(), StorageError> {
+    let kind: Option<String> = connection
+        .query_row(
+            "SELECT type FROM sqlite_schema WHERE name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if kind.as_deref() != Some("table") {
+        return Err(StorageError::InvalidArgument(format!(
+            "schema table {table} is missing or is not a table"
+        )));
+    }
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let actual: Vec<(String, String, bool, i64)> = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(1)?,
+                row.get(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    if actual.len() != expected.len()
+        || actual.iter().zip(expected).any(|(column, required)| {
+            column.0 != required.0
+                || !column.1.eq_ignore_ascii_case(required.1)
+                || column.2 != required.2
+                || column.3 != required.3
+        })
+    {
+        return Err(StorageError::InvalidArgument(format!(
+            "schema table {table} does not match the recognized layout"
         )));
     }
     Ok(())
@@ -769,13 +791,18 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
     })();
     match result {
         Ok((integrity, _)) if integrity != "ok" => StorageStatus::Corrupt(integrity),
-        Ok((_, 0)) => match connection.query_row("SELECT store_id FROM store_meta", [], |row| {
-            row.get::<_, String>(0)
-        }) {
-            Ok(store_id) if store_id != marker => StorageStatus::IdentityMismatch,
-            Ok(_) => StorageStatus::UnsupportedSchema(0),
-            Err(error) => StorageStatus::Corrupt(error.to_string()),
-        },
+        Ok((_, 0)) => {
+            if let Err(error) = validate_coordination_schema(&connection) {
+                return StorageStatus::Corrupt(error.to_string());
+            }
+            match connection.query_row("SELECT store_id FROM store_meta", [], |row| {
+                row.get::<_, String>(0)
+            }) {
+                Ok(store_id) if store_id != marker => StorageStatus::IdentityMismatch,
+                Ok(_) => StorageStatus::UnsupportedSchema(0),
+                Err(error) => StorageStatus::Corrupt(error.to_string()),
+            }
+        }
         Ok((_, version)) if version != SCHEMA_VERSION => StorageStatus::UnsupportedSchema(version),
         Ok((_, schema_version)) => {
             if let Err(error) = validate_schema_v1(&connection) {
