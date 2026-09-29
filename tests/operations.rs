@@ -236,6 +236,58 @@ fn repair_rejects_a_healthy_item() {
 }
 
 #[test]
+fn repair_rejects_unreadable_source_before_publication() {
+    let f = Fixture::new();
+    let path = f.path(&id(1));
+    fs::write(&path, b"broken").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let replacement = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Repaired\nstate: open\n---\nBody",
+        id(1)
+    );
+    let error = f
+        .ops()
+        .repair(&id(1), replacement.into_bytes())
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid_argument");
+    assert!(error.to_string().contains("owner-read"));
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"broken");
+}
+
+#[test]
+fn repair_archives_misnamed_item_shadowed_by_malformed_canonical() {
+    let f = Fixture::new();
+    let canonical = f.path(&id(1));
+    let malformed = b"broken canonical";
+    fs::write(&canonical, malformed).unwrap();
+    let misnamed = f.0.join(".work/items/wrong.md");
+    let old = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Old\nstate: open\n---\nOld body",
+        id(1)
+    );
+    fs::write(&misnamed, &old).unwrap();
+    let replacement = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Repaired\nstate: open\n---\nNew body",
+        id(1)
+    );
+    let result = f
+        .ops()
+        .repair(&id(1), replacement.clone().into_bytes())
+        .unwrap();
+    assert_eq!(fs::read(&canonical).unwrap(), replacement.as_bytes());
+    assert!(!misnamed.exists());
+    assert_eq!(fs::read(result.recovery_path.unwrap()).unwrap(), malformed);
+    assert_eq!(result.additional_recovery_paths.len(), 1);
+    assert_eq!(
+        fs::read(&result.additional_recovery_paths[0]).unwrap(),
+        old.as_bytes()
+    );
+    assert!(ItemStore::load_from_root(&f.0).unwrap().is_valid());
+}
+
+#[test]
 fn repair_cannot_add_graph_errors_to_an_invalid_view() {
     let f = Fixture::new();
     f.write(1, &format!("depends_on: [\"{}\"]\n", id(3)), b"Body");

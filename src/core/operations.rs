@@ -102,6 +102,7 @@ pub struct RawInspection {
     pub file: ItemFile,
     pub graph_diagnostics: Vec<Diagnostic>,
     pub recovery_path: Option<PathBuf>,
+    pub additional_recovery_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -159,6 +160,7 @@ impl DurableOperations {
             file,
             graph_diagnostics: ItemGraph::from_store(&store).diagnostics().to_vec(),
             recovery_path: None,
+            additional_recovery_paths: Vec::new(),
         })
     }
 
@@ -172,8 +174,78 @@ impl DurableOperations {
         }
         let lock = self.lock()?;
         let items = self.items_dir(&lock)?;
-        let store = self.load_from_dir(&items)?;
-        let original = self.raw_source(&store, id)?;
+        let mut store = self.load_from_dir(&items)?;
+        let mut shadow_recovery = None;
+        let target = self.item_path(id);
+        if let Some(canonical) = store
+            .files
+            .iter()
+            .find(|file| file.path == target && file.header.is_none())
+        {
+            let matches: Vec<_> = store
+                .files
+                .iter()
+                .filter(|file| {
+                    file.path != target
+                        && file.header.as_ref().is_some_and(|header| header.id == id)
+                })
+                .collect();
+            if let [misnamed] = matches.as_slice() {
+                source_mode(canonical)?;
+                let candidate = parse_candidate(target.clone(), raw.clone());
+                if !candidate.is_valid() {
+                    return Err(OperationError::InvalidArgument(
+                        candidate
+                            .diagnostics
+                            .iter()
+                            .map(|d| d.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ));
+                }
+                let mut files = store.files.clone();
+                files.retain(|file| file.path != target && file.path != misnamed.path);
+                files.push(candidate);
+                let after = ItemGraph::from_store(&ItemStore::from_candidate_files(files));
+                let before = ItemGraph::from_store(&store);
+                let new_diagnostics: Vec<_> = after
+                    .diagnostics()
+                    .iter()
+                    .filter(|d| !before.diagnostics().contains(d))
+                    .cloned()
+                    .collect();
+                if !new_diagnostics.is_empty() {
+                    return Err(OperationError::InvalidCandidate(new_diagnostics));
+                }
+                self.check_snapshot(&lock, &items, &store)?;
+                let recovery = self.archive_shadow(&lock, &items, misnamed)?;
+                store = self
+                    .load_from_dir(&items)
+                    .map_err(|error| with_recovery(error, &recovery))?;
+                shadow_recovery = Some(recovery);
+            }
+        }
+        let result = self.repair_loaded(&lock, &items, id, &raw, &store);
+        match shadow_recovery {
+            Some(recovery) => result
+                .map(|mut inspection| {
+                    inspection.additional_recovery_paths.push(recovery.clone());
+                    inspection
+                })
+                .map_err(|error| with_recovery(error, &recovery)),
+            None => result,
+        }
+    }
+
+    fn repair_loaded(
+        &self,
+        lock: &OperationLock,
+        items: &OwnedFd,
+        id: &str,
+        raw: &[u8],
+        store: &ItemStore,
+    ) -> Result<RawInspection, OperationError> {
+        let original = self.raw_source(store, id)?;
         if let Some(header) = &original.header
             && header.id != id
         {
@@ -184,9 +256,9 @@ impl DurableOperations {
         }
         let target_path = self.item_path(id);
         if original.path != target_path && store.files.iter().any(|file| file.path == target_path) {
-            return self.resume_filename_repair(&lock, &items, id, &raw, &store, original);
+            return self.resume_filename_repair(lock, items, id, raw, store, original);
         }
-        let graph_before = ItemGraph::from_store(&store);
+        let graph_before = ItemGraph::from_store(store);
         if original.is_valid()
             && !graph_before.is_cycle_member(id)
             && !graph_before
@@ -198,7 +270,7 @@ impl DurableOperations {
                 "item has no source or graph diagnostic to repair".into(),
             ));
         }
-        let candidate = parse_candidate(target_path.clone(), raw.clone());
+        let candidate = parse_candidate(target_path.clone(), raw.to_vec());
         if !candidate.is_valid() {
             return Err(OperationError::InvalidArgument(
                 candidate
@@ -210,7 +282,7 @@ impl DurableOperations {
             ));
         }
         let candidate_store = if original.path == target_path {
-            candidate_store(&store, &target_path, raw.clone())?
+            candidate_store(store, &target_path, raw.to_vec())?
         } else {
             let mut view = store.clone();
             view.files.retain(|file| file.path != original.path);
@@ -227,60 +299,60 @@ impl DurableOperations {
         if !new_diagnostics.is_empty() {
             return Err(OperationError::InvalidCandidate(new_diagnostics));
         }
-        let staged = self.stage_with_mode(&items, &raw, Some(source_mode(original)?))?;
-        if let Err(error) = self.check_snapshot(&lock, &items, &store) {
-            remove_stage(&items, &staged);
+        let staged = self.stage_with_mode(items, raw, Some(source_mode(original)?))?;
+        if let Err(error) = self.check_snapshot(lock, items, store) {
+            remove_stage(items, &staged);
             return Err(error);
         }
         if original.path != target_path {
-            match rename_in_dir(&items, &staged, &target_path, RenameFlags::NOREPLACE) {
+            match rename_in_dir(items, &staged, &target_path, RenameFlags::NOREPLACE) {
                 Ok(()) => {}
                 Err(error) if error == rustix::io::Errno::EXIST => {
-                    remove_stage(&items, &staged);
+                    remove_stage(items, &staged);
                     return Err(OperationError::Conflict(
                         "canonical item path appeared during repair".into(),
                     ));
                 }
                 Err(error) => {
-                    remove_stage(&items, &staged);
+                    remove_stage(items, &staged);
                     return Err(OperationError::Io(io::Error::from(error)));
                 }
             }
-            self.sync_items(&items)
+            self.sync_items(items)
                 .map_err(|error| with_recovery(error, &original.path))?;
-            rename_in_dir(&items, &original.path, &staged, RenameFlags::NOREPLACE).map_err(
+            rename_in_dir(items, &original.path, &staged, RenameFlags::NOREPLACE).map_err(
                 |error| {
                     OperationError::Io(io::Error::other(format!(
                         "canonical item published but old path could not be retained: {error}"
                     )))
                 },
             )?;
-            self.sync_items(&items)
+            self.sync_items(items)
                 .map_err(|error| with_recovery(error, &staged))?;
-            if !archive_matches(&items, original, &staged) {
+            if !archive_matches(items, original, &staged) {
                 return Err(OperationError::Conflict(format!(
                     "source changed during filename repair; recovery copy retained at {}",
                     staged.display()
                 )));
             }
-            self.ensure_selected_dir_after_publication(&lock, &items, &staged)?;
+            self.ensure_selected_dir_after_publication(lock, items, &staged)?;
             let mut result = self
-                .inspect_raw_from_dir(&items, id)
+                .inspect_raw_from_dir(items, id)
                 .map_err(|error| with_recovery(error, &staged))?;
             result.recovery_path = Some(staged);
             return Ok(result);
         }
-        let published = fingerprint_at(&items, &staged)?;
-        if let Err(error) = rename_in_dir(&items, &staged, &original.path, RenameFlags::EXCHANGE) {
-            remove_stage(&items, &staged);
+        let published = fingerprint_at(items, &staged)?;
+        if let Err(error) = rename_in_dir(items, &staged, &original.path, RenameFlags::EXCHANGE) {
+            remove_stage(items, &staged);
             return Err(exchange_error(error));
         }
-        self.verify_exchange(&items, &store, original, &staged, &raw, &published)?;
-        self.sync_items(&items)
+        self.verify_exchange(items, store, original, &staged, raw, &published)?;
+        self.sync_items(items)
             .map_err(|error| with_recovery(error, &staged))?;
-        self.ensure_selected_dir_after_publication(&lock, &items, &staged)?;
+        self.ensure_selected_dir_after_publication(lock, items, &staged)?;
         let mut result = self
-            .inspect_raw_from_dir(&items, id)
+            .inspect_raw_from_dir(items, id)
             .map_err(|error| with_recovery(error, &staged))?;
         result.recovery_path = Some(staged);
         Ok(result)
@@ -693,7 +765,40 @@ impl DurableOperations {
             file,
             graph_diagnostics: ItemGraph::from_store(&store).diagnostics().to_vec(),
             recovery_path: None,
+            additional_recovery_paths: Vec::new(),
         })
+    }
+    fn archive_shadow(
+        &self,
+        lock: &OperationLock,
+        items: &OwnedFd,
+        source: &ItemFile,
+    ) -> Result<PathBuf, OperationError> {
+        for _ in 0..16 {
+            let recovery = self
+                .root
+                .join(".work/items")
+                .join(format!(".operation-{}", new_id()?));
+            match rename_in_dir(items, &source.path, &recovery, RenameFlags::NOREPLACE) {
+                Ok(()) => {
+                    self.sync_items(items)
+                        .map_err(|error| with_recovery(error, &recovery))?;
+                    if !archive_matches(items, source, &recovery) {
+                        return Err(OperationError::Conflict(format!(
+                            "shadowed source changed during repair; recovery copy retained at {}",
+                            recovery.display()
+                        )));
+                    }
+                    self.ensure_selected_dir_after_publication(lock, items, &recovery)?;
+                    return Ok(recovery);
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(error) => return Err(exchange_error(error)),
+            }
+        }
+        Err(OperationError::Conflict(
+            "could not reserve shadowed source recovery path".into(),
+        ))
     }
     fn item_path(&self, id: &str) -> PathBuf {
         self.root.join(".work/items").join(format!("{id}.md"))
@@ -1229,6 +1334,12 @@ fn source_mode(file: &ItemFile) -> Result<u32, OperationError> {
     let fingerprint = file.fingerprint.as_ref().ok_or_else(|| {
         OperationError::Conflict(format!("could not snapshot item {}", file.path.display()))
     })?;
+    if fingerprint.mode & 0o170000 == 0o100000 && fingerprint.mode & 0o400 == 0 {
+        return Err(OperationError::InvalidArgument(format!(
+            "item {} has no owner-read permission; make it readable before repair",
+            file.path.display()
+        )));
+    }
     Ok(if fingerprint.mode & 0o170000 == 0o100000 {
         fingerprint.mode & 0o7777
     } else {
