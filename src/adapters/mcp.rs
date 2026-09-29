@@ -419,7 +419,7 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
         "discover" => Ok(
             json!({"worktree_root":cli::encode_path(&project.worktree_root),"git_common_dir":cli::encode_path(&project.git_common_dir)}),
         ),
-        "item_list" => Ok(json!({"items":cli::items_value(&project,&ops.list()?)?})),
+        "item_list" => cli::list_value(&project, &ops),
         "item_ready" => cli::ready_value(&project, &ops),
         "storage_inspect" => cli::storage_command(&project, "inspect", &[]),
         "storage_rebuild" => cli::storage_command(&project, "rebuild", &[]),
@@ -438,7 +438,8 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
             let store =
                 ItemStore::load(&project).map_err(|e| CliError::new("io", e.to_string()))?;
             let graph = ItemGraph::from_store(&store);
-            Ok(
+            cli::with_storage_warning(
+                &project,
                 json!({"diagnostics":graph.diagnostics().iter().map(cli::diagnostic).collect::<Vec<_>>()}),
             )
         }
@@ -455,11 +456,14 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
                 }
                 Err(error) => return Err(error),
             };
-            Ok(json!({"item":cli::one_item_value(&project,&ops.inspect(&id)?)?}))
+            cli::inspect_value(&project, &ops, &id)
         }
         "item_inspect_raw" => {
             let id = required(args, "id");
-            Ok(json!({"source":cli::source_value(id,&ops.inspect_raw(id)?)}))
+            cli::with_storage_warning(
+                &project,
+                json!({"source":cli::source_value(id,&ops.inspect_raw(id)?)}),
+            )
         }
         "item_create" => {
             let change = metadata(&project, args)?;

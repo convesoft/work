@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -354,12 +354,13 @@ fn item_command(
     args: &[String],
 ) -> Result<Value, CliError> {
     match verb {
-        "list" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.list()?)?})),
+        "list" if args.is_empty() => list_value(project, ops),
         "ready" if args.is_empty() => ready_value(project, ops),
         "diagnose" if args.is_empty() => {
             let store = ItemStore::load(project).map_err(io_error)?;
             let graph = ItemGraph::from_store(&store);
-            Ok(
+            with_storage_warning(
+                project,
                 json!({"diagnostics":graph.diagnostics().iter().map(diagnostic).collect::<Vec<_>>()}),
             )
         }
@@ -375,11 +376,11 @@ fn item_command(
                 }
                 Err(error) => return Err(error),
             };
-            Ok(json!({"item":one_item_value(project,&ops.inspect(&id)?)?}))
+            inspect_value(project, ops, &id)
         }
         "inspect" if args.len() == 2 && args[1] == "--raw" => {
             let raw = ops.inspect_raw(&args[0])?;
-            Ok(json!({"source":source_value(&args[0],&raw)}))
+            with_storage_warning(project, json!({"source":source_value(&args[0],&raw)}))
         }
         "create" => {
             let input = parse_metadata(project, args, true, true)?;
@@ -422,12 +423,32 @@ fn item_command(
 
 pub(super) fn ready_value(project: &Project, ops: &DurableOperations) -> Result<Value, CliError> {
     let items = items_value(project, &ops.ready()?)?;
+    with_storage_warning(project, json!({"items":items}))
+}
+
+pub(super) fn list_value(project: &Project, ops: &DurableOperations) -> Result<Value, CliError> {
+    let items = items_value(project, &ops.list()?)?;
+    with_storage_warning(project, json!({"items":items}))
+}
+
+pub(super) fn inspect_value(
+    project: &Project,
+    ops: &DurableOperations,
+    id: &str,
+) -> Result<Value, CliError> {
+    let item = one_item_value(project, &ops.inspect(id)?)?;
+    with_storage_warning(project, json!({"item":item}))
+}
+
+pub(super) fn with_storage_warning(
+    project: &Project,
+    mut result: Value,
+) -> Result<Value, CliError> {
     let store = ItemStore::load(project).map_err(io_error)?;
     let warning = match Storage::open(project) {
         Ok(mut storage) => storage.reconcile(project, &store).err(),
         Err(error) => Some(error),
     };
-    let mut result = json!({"items":items});
     if let Some(error) = warning {
         result["storage_warning"] = json!({"code":error.code(),"message":error.to_string()});
     }
@@ -485,7 +506,8 @@ pub(super) fn storage_command(
             )
         }
         ("restore", [flag, path]) if flag == "--backup" => {
-            let report = Storage::restore_backup(project, Path::new(path))?;
+            let backup = decode_path(path)?;
+            let report = Storage::restore_backup(project, &backup)?;
             Ok(json!({"database_path":encode_path(&report.database_path),
                 "retained_paths":report.retained_paths.iter().map(|path|encode_path(path)).collect::<Vec<_>>(),
                 "lost_coordination":report.lost_coordination,
@@ -867,4 +889,35 @@ pub(super) fn encode_path(path: &Path) -> String {
         }
     }
     encoded
+}
+
+fn decode_path(encoded: &str) -> Result<PathBuf, CliError> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = bytes.get(at + 1..at + 3).ok_or_else(|| {
+                CliError::new("invalid_argument", "invalid percent-encoded backup path")
+            })?;
+            let value = std::str::from_utf8(hex)
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+                .ok_or_else(|| {
+                    CliError::new("invalid_argument", "invalid percent-encoded backup path")
+                })?;
+            decoded.push(value);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    if decoded.contains(&0) {
+        return Err(CliError::new(
+            "invalid_argument",
+            "backup path contains a null byte",
+        ));
+    }
+    Ok(PathBuf::from(OsString::from_vec(decoded)))
 }

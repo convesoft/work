@@ -22,7 +22,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "work-storage-{}-{}",
+            "work storage-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -332,6 +332,57 @@ fn missing_and_corrupt_database_require_explicit_recovery() {
     let recreated = Storage::recreate(&project).unwrap();
     assert!(recreated.lost_coordination);
     assert!(!recreated.retained_paths.is_empty());
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+}
+
+#[test]
+fn missing_required_table_is_reported_as_corrupt() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute_batch("DROP TABLE claims").unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(_)
+    ));
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+}
+
+#[test]
+fn encoded_backup_path_round_trips_through_cli_restore() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let output = Command::new(env!("CARGO_BIN_EXE_work"))
+        .args(["--json", "--worktree"])
+        .arg(&fixture.checkout)
+        .args(["storage", "backup"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let backup: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let encoded = backup["result"]["backup_path"].as_str().unwrap();
+    assert!(encoded.contains("%20"), "{encoded}");
+    fs::remove_file(project.work_database_path()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_work"))
+        .args(["--json", "--worktree"])
+        .arg(&fixture.checkout)
+        .args(["storage", "restore", "--backup", encoded])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(matches!(
         Storage::inspect(&project).unwrap().status,
         StorageStatus::Ready { .. }

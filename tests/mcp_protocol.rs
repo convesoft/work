@@ -558,6 +558,21 @@ fn storage_recovery_warning_and_rebuild_match_cli_and_mcp() {
     assert_eq!(ready, fixture.cli(&["item", "ready"])["result"]);
     assert_eq!(ready["items"][0]["id"], id);
     assert_eq!(ready["storage_warning"]["code"], "missing_database");
+    for (tool, command) in [("item_list", "list"), ("item_inspect", "inspect")] {
+        let args = if tool == "item_inspect" {
+            json!({"id":id})
+        } else {
+            json!({})
+        };
+        let cli = if tool == "item_inspect" {
+            fixture.cli(&["item", command, id])
+        } else {
+            fixture.cli(&["item", command])
+        };
+        let result = client.ok(tool, args);
+        assert_eq!(result, cli["result"]);
+        assert_eq!(result["storage_warning"]["code"], "missing_database");
+    }
     assert_eq!(
         client.ok("storage_recreate", json!({}))["lost_coordination"],
         true

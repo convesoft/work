@@ -509,7 +509,7 @@ fn create_schema_v1(tx: &Transaction<'_>) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn validate_schema_v1(tx: &Transaction<'_>) -> Result<(), StorageError> {
+fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
     for sql in [
         "SELECT store_id FROM store_meta LIMIT 0",
         "SELECT root, generation FROM views LIMIT 0",
@@ -520,7 +520,7 @@ fn validate_schema_v1(tx: &Transaction<'_>) -> Result<(), StorageError> {
         "SELECT item_id, owner_token, actor_id, created_at, updated_at, run_id, session_id, workspace_id FROM claims LIMIT 0",
         "SELECT kind, record_key, value FROM runtime_records LIMIT 0",
     ] {
-        tx.prepare(sql)?;
+        connection.prepare(sql)?;
     }
     Ok(())
 }
@@ -587,6 +587,9 @@ fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
         Ok((integrity, _)) if integrity != "ok" => StorageStatus::Corrupt(integrity),
         Ok((_, version)) if version != SCHEMA_VERSION => StorageStatus::UnsupportedSchema(version),
         Ok((_, schema_version)) => {
+            if let Err(error) = validate_schema_v1(&connection) {
+                return StorageStatus::Corrupt(error.to_string());
+            }
             match connection.query_row("SELECT store_id FROM store_meta", [], |row| {
                 row.get::<_, String>(0)
             }) {
