@@ -187,6 +187,13 @@ fn durable_loop_and_machine_readable_errors() {
         3,
         "not_found",
     );
+    for id in [
+        "00000000000000000000000000000000",
+        "w-00000000000000000000000000000000",
+    ] {
+        error(f.call(&["item", "inspect", id]), 2, "invalid_argument");
+        error(f.call(&["item", "close", id]), 2, "invalid_argument");
+    }
     error(
         f.call(&["item", "update", &a, "--priority", "bad"]),
         2,

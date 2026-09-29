@@ -489,6 +489,13 @@ fn valid_line(value: &str) -> bool {
 }
 
 fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
+    let candidate = input.strip_prefix("w-").unwrap_or(input);
+    if candidate.len() == 32 && !valid_full_id(candidate) {
+        return Err(CliError::new(
+            "invalid_argument",
+            "full item ID must be a lowercase UUIDv4",
+        ));
+    }
     let store = ItemStore::load(project).map_err(io_error)?;
     match store.resolve(input) {
         Ok(file) => Ok(file.header.as_ref().unwrap().id.clone()),
@@ -507,6 +514,17 @@ fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
         Err(LookupError::Invalid(d)) => Err(invalid_source(d)),
     }
 }
+
+fn valid_full_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 32
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && bytes[12] == b'4'
+        && matches!(bytes[16], b'8' | b'9' | b'a' | b'b')
+}
+
 fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
     let store = ItemStore::load(project).map_err(io_error)?;
     item_value(&display_prefixes(&store), item)
