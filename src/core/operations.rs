@@ -68,12 +68,15 @@ pub struct Inspection {
     pub relations: Relations,
     pub evaluation: Option<Evaluation>,
     pub graph_diagnostics: Vec<Diagnostic>,
+    /// Previous source retained so writes through an already open handle remain recoverable.
+    pub recovery_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RawInspection {
     pub file: ItemFile,
     pub graph_diagnostics: Vec<Diagnostic>,
+    pub recovery_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -124,6 +127,7 @@ impl DurableOperations {
         Ok(RawInspection {
             file,
             graph_diagnostics: ItemGraph::from_store(&store).diagnostics().to_vec(),
+            recovery_path: None,
         })
     }
 
@@ -224,7 +228,9 @@ impl DurableOperations {
                     staged.display()
                 )));
             }
-            return self.inspect_raw(id);
+            let mut result = self.inspect_raw(id)?;
+            result.recovery_path = Some(staged);
+            return Ok(result);
         }
         let published = FileFingerprint::capture(&staged)?;
         if let Err(error) = renameat_with(CWD, &staged, CWD, &original.path, RenameFlags::EXCHANGE)
@@ -234,8 +240,9 @@ impl DurableOperations {
         }
         self.verify_exchange(&store, original, &staged, &raw, &published)?;
         self.sync_items()?;
-        let _ = fs::remove_file(&staged);
-        self.inspect_raw(id)
+        let mut result = self.inspect_raw(id)?;
+        result.recovery_path = Some(staged);
+        Ok(result)
     }
 
     pub fn list(&self) -> Result<Vec<Inspection>, OperationError> {
@@ -485,9 +492,9 @@ impl DurableOperations {
         }
         self.verify_exchange(&store, source, &staged, &raw, &published)?;
         self.sync_items()?;
-        let _ = fs::remove_file(&staged);
-        self.sync_items()?;
-        inspect_store(&self.load()?, id)
+        let mut result = inspect_store(&self.load()?, id)?;
+        result.recovery_path = Some(staged);
+        Ok(result)
     }
 
     fn load(&self) -> Result<ItemStore, OperationError> {
@@ -606,7 +613,9 @@ impl DurableOperations {
                             recovery.display()
                         )));
                     }
-                    return self.inspect_raw(id);
+                    let mut result = self.inspect_raw(id)?;
+                    result.recovery_path = Some(recovery);
+                    return Ok(result);
                 }
                 Err(rustix::io::Errno::EXIST) => continue,
                 Err(error) => return Err(OperationError::Io(io::Error::from(error))),
@@ -816,6 +825,7 @@ fn inspect_with_graph(
         relations,
         evaluation,
         graph_diagnostics: graph.diagnostics().to_vec(),
+        recovery_path: None,
     })
 }
 

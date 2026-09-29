@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -71,6 +72,33 @@ fn creates_updates_and_preserves_opaque_body_bytes() {
     assert_eq!(changed.file.body.as_deref(), Some(body.as_slice()));
     assert_eq!(changed.file.header.unwrap().priority, 0);
     assert_eq!(ops.list().unwrap().len(), 1);
+    assert!(ItemStore::load_from_root(&f.0).unwrap().is_valid());
+}
+
+#[test]
+fn replacement_retains_source_for_writes_through_an_open_handle() {
+    let f = Fixture::new();
+    f.write(1, "", b"Original body");
+    let path = f.path(&id(1));
+    let old_bytes = fs::read(&path).unwrap();
+    let mut open_old = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let result = f
+        .ops()
+        .update(
+            &id(1),
+            MetadataChange {
+                title: Some("Updated".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let recovery = result.recovery_path.unwrap();
+    open_old.write_all(b" later edit").unwrap();
+    open_old.sync_all().unwrap();
+    let mut expected = old_bytes;
+    expected.extend_from_slice(b" later edit");
+    assert_eq!(fs::read(&recovery).unwrap(), expected);
+    assert!(!fs::read(&path).unwrap().ends_with(b" later edit"));
     assert!(ItemStore::load_from_root(&f.0).unwrap().is_valid());
 }
 
