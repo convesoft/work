@@ -418,6 +418,16 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
             for (field, flag) in [("parameters", "--param"), ("existing", "--existing")] {
                 if let Some(bindings) = args.get(field).and_then(Value::as_object) {
                     for (name, value) in bindings {
+                        if !name
+                            .bytes()
+                            .next()
+                            .is_some_and(|byte| byte.is_ascii_lowercase())
+                            || !name.bytes().all(|byte| {
+                                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                            })
+                        {
+                            return Err(invalid(format!("invalid {field} binding name {name:?}")));
+                        }
                         arguments.push(flag.to_owned());
                         arguments.push(format!(
                             "{name}={}",

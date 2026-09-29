@@ -581,6 +581,18 @@ edges:
         "parameters":{"subject":"BUG-7"}, "existing":{"delivery":delivery}}),
     );
     assert_eq!(mcp, cli["result"]);
+    client.error(
+        "template_preview",
+        json!({"name":"demo", "root":root,
+        "parameters":{"subject=typo":"value"}, "existing":{"delivery":delivery}}),
+        "invalid_argument",
+    );
+    client.error(
+        "template_preview",
+        json!({"name":"demo", "root":root,
+        "parameters":{"subject":"BUG-7"}, "existing":{"delivery=typo":delivery}}),
+        "invalid_argument",
+    );
     assert_eq!(mcp["preview"]["items"][0]["title"], "Fix BUG-7");
     assert_eq!(
         mcp["preview"]["items"][0]["model_source"],
