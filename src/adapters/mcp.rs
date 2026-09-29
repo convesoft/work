@@ -124,6 +124,9 @@ const TOOL_NAMES: &[&str] = &[
     "item_repair",
     "relation_add",
     "relation_remove",
+    "template_list",
+    "template_validate",
+    "template_preview",
 ];
 
 fn tool(name: &str, properties: Value, required: &[&str], description: &str) -> Value {
@@ -185,7 +188,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "item_ready",
-            common,
+            common.clone(),
             &[],
             "List open executable manual items whose lifecycle prerequisites are resolved. Readiness does not claim or execute work.",
         ),
@@ -225,6 +228,26 @@ fn tools() -> Vec<Value> {
             &["source", "kind", "target"],
             "Remove an existing relation. Parent and depends_on use the authored child or dependent as source; related may be removed from either endpoint.",
         ),
+        tool(
+            "template_list",
+            common.clone(),
+            &[],
+            "Discover valid and invalid version-1 YAML templates in the selected checkout.",
+        ),
+        tool(
+            "template_validate",
+            json!({"worktree":s,"name":s}),
+            &["name"],
+            "Validate one version-1 YAML template definition.",
+        ),
+        tool(
+            "template_preview",
+            json!({"worktree":s,"name":s,"root":s,
+            "parameters":{"type":"object","additionalProperties":{"type":"string"}},
+            "existing":{"type":"object","additionalProperties":{"type":"string"}}}),
+            &["name", "root"],
+            "Render a complete symbolic item graph without publishing a run, items, permanent IDs, or claims.",
+        ),
     ]
 }
 
@@ -261,6 +284,9 @@ fn validate<'a>(name: &str, args: &'a Value) -> Result<&'a Map<String, Value>, C
             "array" => value
                 .as_array()
                 .is_some_and(|a| a.iter().all(Value::is_string)),
+            "object" => value
+                .as_object()
+                .is_some_and(|map| map.values().all(Value::is_string)),
             _ => false,
         };
         if !valid
@@ -379,6 +405,29 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
         ),
         "item_list" => Ok(json!({"items":cli::items_value(&project,&ops.list()?)?})),
         "item_ready" => Ok(json!({"items":cli::items_value(&project,&ops.ready()?)?})),
+        "template_list" => cli::template_command(&project, "list", &[]),
+        "template_validate" => {
+            cli::template_command(&project, "validate", &[required(args, "name").to_owned()])
+        }
+        "template_preview" => {
+            let mut arguments = vec![
+                required(args, "name").to_owned(),
+                "--root".to_owned(),
+                required(args, "root").to_owned(),
+            ];
+            for (field, flag) in [("parameters", "--param"), ("existing", "--existing")] {
+                if let Some(bindings) = args.get(field).and_then(Value::as_object) {
+                    for (name, value) in bindings {
+                        arguments.push(flag.to_owned());
+                        arguments.push(format!(
+                            "{name}={}",
+                            value.as_str().expect("validated string")
+                        ));
+                    }
+                }
+            }
+            cli::template_command(&project, "preview", &arguments)
+        }
         "item_diagnose" => {
             let store =
                 ItemStore::load(&project).map_err(|e| CliError::new("io", e.to_string()))?;

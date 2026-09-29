@@ -170,13 +170,16 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 16);
     for name in [
         "item_create",
         "item_ready",
         "relation_add",
         "item_close",
         "item_repair",
+        "template_list",
+        "template_validate",
+        "template_preview",
     ] {
         assert!(tools.iter().any(|tool| tool["name"] == name));
     }
@@ -520,4 +523,72 @@ fn explicit_worktree_selects_other_durable_view() {
         &control.0,
         &["worktree", "remove", "--force", selected.to_str().unwrap()],
     );
+}
+
+#[test]
+fn template_preview_matches_cli_and_publishes_nothing() {
+    let fixture = Fixture::new();
+    let root = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+    let delivery = "bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb";
+    fixture.write(root, "");
+    fixture.write(delivery, "");
+    let templates = fixture.0.join(".work/templates");
+    fs::create_dir_all(&templates).unwrap();
+    fs::write(
+        templates.join("demo.yaml"),
+        r#"format_version: 1
+name: demo
+parameters: [subject]
+existing: [delivery]
+defaults:
+  model: gpt-6-sol
+  thinking: high
+items:
+  - key: fix
+    title: "Fix {{subject}}"
+    body: "Address {{subject}}.\n"
+edges:
+  - {from: "local:fix", kind: parent, to: root}
+  - {from: "existing:delivery", kind: depends_on, to: "local:fix"}
+"#,
+    )
+    .unwrap();
+    let before = fs::read_dir(fixture.0.join(".work/items")).unwrap().count();
+    let mut client = Client::new(&fixture.0);
+    assert_eq!(
+        client.ok("template_list", json!({})),
+        fixture.cli(&["template", "list"])["result"]
+    );
+    assert_eq!(
+        client.ok("template_validate", json!({"name":"demo"})),
+        fixture.cli(&["template", "validate", "demo"])["result"]
+    );
+    let cli = fixture.cli(&[
+        "template",
+        "preview",
+        "demo",
+        "--root",
+        root,
+        "--param",
+        "subject=BUG-7",
+        "--existing",
+        &format!("delivery={delivery}"),
+    ]);
+    assert_eq!(cli["ok"], true, "{cli}");
+    let mcp = client.ok(
+        "template_preview",
+        json!({"name":"demo", "root":root,
+        "parameters":{"subject":"BUG-7"}, "existing":{"delivery":delivery}}),
+    );
+    assert_eq!(mcp, cli["result"]);
+    assert_eq!(mcp["preview"]["items"][0]["title"], "Fix BUG-7");
+    assert_eq!(
+        mcp["preview"]["items"][0]["model_source"],
+        "template_default"
+    );
+    assert_eq!(
+        fs::read_dir(fixture.0.join(".work/items")).unwrap().count(),
+        before
+    );
+    assert!(!fixture.0.join(".git/work/runs").exists());
 }

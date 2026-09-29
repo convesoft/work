@@ -14,6 +14,9 @@ use work::core::operations::{
     DurableOperations, Inspection, MetadataChange, OperationError, RawInspection, RelationKind,
 };
 use work::core::project::{DiscoveryError, Project, discover};
+use work::core::templates::{
+    PreviewRequest, TemplateCatalog, TemplateDefinition, TemplateError, TemplatePreview,
+};
 
 pub(super) struct CliError {
     code: &'static str,
@@ -86,6 +89,17 @@ impl From<DiscoveryError> for CliError {
             "io"
         };
         Self::new(code, error.to_string())
+    }
+}
+impl From<TemplateError> for CliError {
+    fn from(error: TemplateError) -> Self {
+        Self {
+            code: error.code(),
+            message: error.to_string(),
+            diagnostics: error.diagnostics().to_vec(),
+            published_item: None,
+            previous_source_path: None,
+        }
     }
 }
 
@@ -188,7 +202,8 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
         [noun, verb, tail @ ..] if noun == "relation" => {
             relation_command(&project, &ops, verb, tail)
         }
-        _ => Err(usage("expected item or relation command")),
+        [noun, verb, tail @ ..] if noun == "template" => template_command(&project, verb, tail),
+        _ => Err(usage("expected item, relation, or template command")),
     }
 }
 
@@ -238,6 +253,18 @@ fn command_help(words: &[String]) -> Option<&'static str> {
         ["relation", "remove", "--help"] => Some(
             "Usage: work relation remove KIND SOURCE TARGET\nRemove an existing edge. SOURCE is the child for parent and the dependent for depends_on. related may be removed from either endpoint.",
         ),
+        ["template", "--help"] => Some(
+            "Usage: work template list|validate|preview\nDiscover version-1 YAML templates and render a symbolic item graph without publishing a run or items.",
+        ),
+        ["template", "list", "--help"] => Some(
+            "Usage: work template list\nList valid and invalid templates under .work/templates/.",
+        ),
+        ["template", "validate", "--help"] => Some(
+            "Usage: work template validate NAME\nValidate one version-1 YAML template definition.",
+        ),
+        ["template", "preview", "--help"] => Some(
+            "Usage: work template preview NAME --root FULL_ID [--param NAME=TEXT]... [--existing NAME=FULL_ID]...\nRender the exact symbolic graph for a selected checkout without creating items, runs, IDs, or claims.",
+        ),
         _ => None,
     }
 }
@@ -261,7 +288,16 @@ fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
                 Err(usage("relation add|remove KIND SOURCE TARGET"))
             }
         }
-        _ => Err(usage("expected item or relation command")),
+        [noun, verb, tail @ ..] if noun == "template" => match (verb.as_str(), tail) {
+            ("list", []) | ("validate", [_]) => Ok(()),
+            ("preview", [_, rest @ ..]) if rest.len() >= 2 && rest.len().is_multiple_of(2) => {
+                Ok(())
+            }
+            _ => Err(usage(
+                "template list|validate NAME|preview NAME --root FULL_ID [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
+            )),
+        },
+        _ => Err(usage("expected item, relation, or template command")),
     }
 }
 
@@ -372,6 +408,109 @@ fn item_command(
             Ok(json!({"source":source_value(&args[0],&raw)}))
         }
         _ => Err(usage("unknown item command or arguments")),
+    }
+}
+
+fn template_definition_value(definition: &TemplateDefinition) -> Value {
+    json!({
+        "name":definition.name,
+        "parameters":definition.parameters,
+        "existing":definition.existing,
+        "defaults":{"model":definition.defaults.model,"thinking":definition.defaults.thinking},
+        "items":definition.items.iter().map(|item| json!({
+            "key":item.key,"title":item.title,"body":item.body,
+            "completion":match item.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
+            "priority":item.priority,"labels":item.labels,"model":item.model,"thinking":item.thinking,
+        })).collect::<Vec<_>>(),
+        "edges":definition.edges.iter().map(|edge| json!({
+            "from":edge.from,"kind":edge.kind.as_str(),"to":edge.to,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn template_preview_value(preview: &TemplatePreview) -> Value {
+    json!({
+        "name":preview.name,"root":preview.root,
+        "parameters":preview.parameters,"existing":preview.existing,
+        "items":preview.items.iter().map(|item| json!({
+            "key":item.key,"title":item.title,"body":item.body,
+            "completion":match item.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
+            "state":item.state.map(|state|match state {ManualState::Open=>"open",ManualState::Done=>"done"}),
+            "priority":item.priority,"labels":item.labels,
+            "model":item.model,"model_source":item.model_source.as_ref().map(|source|source.as_str()),
+            "thinking":item.thinking,"thinking_source":item.thinking_source.as_ref().map(|source|source.as_str()),
+        })).collect::<Vec<_>>(),
+        "edges":preview.edges.iter().map(|edge| json!({
+            "from":{"reference":edge.from.reference,"existing_id":edge.from.existing_id},
+            "kind":edge.kind.as_str(),
+            "to":{"reference":edge.to.reference,"existing_id":edge.to.existing_id},
+        })).collect::<Vec<_>>(),
+    })
+}
+
+pub(super) fn template_command(
+    project: &Project,
+    verb: &str,
+    args: &[String],
+) -> Result<Value, CliError> {
+    let catalog = TemplateCatalog::load_from_root(&project.worktree_root).map_err(io_error)?;
+    match (verb, args) {
+        ("list", []) => Ok(json!({"templates":catalog.files.iter().map(|file|json!({
+            "name":file.name,"path":encode_path(&file.path),"valid":file.definition.is_some(),
+            "diagnostics":file.diagnostics.iter().map(diagnostic).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>()})),
+        ("validate", [name]) => {
+            let definition = catalog.validate(name)?;
+            Ok(json!({"template":template_definition_value(definition)}))
+        }
+        ("preview", [name, tail @ ..]) => {
+            let mut root = None;
+            let mut parameters = BTreeMap::new();
+            let mut existing = BTreeMap::new();
+            let mut chunks = tail.chunks_exact(2);
+            for pair in &mut chunks {
+                match pair[0].as_str() {
+                    "--root" if root.is_none() => root = Some(pair[1].clone()),
+                    "--param" | "--existing" => {
+                        let (key, value) = pair[1].split_once('=').ok_or_else(|| {
+                            CliError::new(
+                                "invalid_argument",
+                                format!("{} expects NAME=VALUE", pair[0]),
+                            )
+                        })?;
+                        let target = if pair[0] == "--param" {
+                            &mut parameters
+                        } else {
+                            &mut existing
+                        };
+                        if target.insert(key.to_owned(), value.to_owned()).is_some() {
+                            return Err(CliError::new(
+                                "invalid_argument",
+                                format!("duplicate {} binding {key}", pair[0]),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(usage(
+                            "template preview NAME --root FULL_ID [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
+                        ));
+                    }
+                }
+            }
+            if !chunks.remainder().is_empty() {
+                return Err(usage("template preview options require values"));
+            }
+            let request = PreviewRequest {
+                root: root.ok_or_else(|| usage("template preview requires --root FULL_ID"))?,
+                parameters,
+                existing,
+            };
+            let view = ItemStore::load(project).map_err(io_error)?;
+            Ok(json!({"preview":template_preview_value(&catalog.preview(name,&request,&view)?)}))
+        }
+        _ => Err(usage(
+            "template list|validate NAME|preview NAME --root FULL_ID [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
+        )),
     }
 }
 pub(super) fn source_value(id: &str, raw: &RawInspection) -> Value {
@@ -724,8 +863,8 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove; mcp starts a stdio server\n\
-Use --json for one structured result or error object. Run work item --help or work relation --help for command details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview; mcp starts a stdio server\n\
+Use --json for one structured result or error object. Run work item --help, work relation --help, or work template --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
 pub(super) fn encode_path(path: &Path) -> String {
