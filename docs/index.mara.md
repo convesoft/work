@@ -17,6 +17,7 @@ Mara items describe the Work product. They are not Work's own issue records: Mar
 | [Requirements](requirements.mara.md) | Observable obligations with accepted versus draft status |
 | [Design](design.mara.md) | Persistence boundaries, layouts, lifecycle proposals, and shared interfaces |
 | [Item format](item-format.mara.md) | Version-1 item file contract and frontmatter schema |
+| [Template format](template-format.mara.md) | Version-1 YAML template and symbolic preview contract |
 | [Decisions](decisions.mara.md) | Rationale for the graph, storage model, and initial scope |
 | [Verification](verification.mara.md) | Repeatable acceptance checks for delivered and planned slices |
 | [Remaining details](open-questions.mara.md) | Engineering contracts, small interface conventions, and material design risks |
@@ -58,4 +59,4 @@ The current corpus-preparation conversation on 2026-09-28 clarified three decisi
 
 ## Implementation evidence
 
-The current checkout contains the Cargo workspace, Rust CLI and MCP durable-item operations, and automated integration tests. `tests/bootstrap_adoption.rs` exercises both interfaces on isolated copies of the authored backlog; [the usage guide](using-work.md) describes the supported commands and current limits. Claims, templates, runs, and other later slices remain planned. A separate release-preparation item owns the generated changelog and publication evidence. Verification definitions describe repeatable checks, not recorded implementation test results; consult actual test runs for passing evidence.
+The current checkout contains the Cargo workspace, Rust CLI and MCP durable-item operations, read-only template discovery, validation, and symbolic preview, and automated integration tests. `tests/bootstrap_adoption.rs` exercises durable-item operations on isolated copies of the authored backlog; `tests/templates.rs` and `tests/mcp_protocol.rs` exercise template behavior and CLI/MCP parity. [The usage guide](using-work.md) describes the supported commands and current limits. Claims, template publication, runs, and other later slices remain planned. A separate release-preparation item owns the generated changelog and publication evidence. Verification definitions describe repeatable checks, not recorded implementation test results; consult actual test runs for passing evidence.

@@ -36,10 +36,22 @@ Every `--json` invocation writes one JSON object: success has `ok: true` and `re
 
 Use `--worktree PATH` before a command to read or edit another linked checkout's selected file view without switching the caller's branch. Work does not create that worktree. If two views contain the same ID with different content, each query uses the selected checkout's content.
 
+## Preview a reusable template
+
+Version-1 templates are YAML files under `.work/templates/`. Discover and validate them before rendering a graph:
+
+```sh
+target/debug/work --json template list
+target/debug/work --json template validate review_cycle
+target/debug/work --json template preview review_cycle --root ROOT_FULL_ID --param change='BUG-7'
+```
+
+Preview returns rendered items under template-local keys and their edges without writing items, runs, claims, or permanent IDs. The caller supplies an existing root item, exactly one value for each declared `{{name}}` text parameter, and any declared existing-item bindings with `--existing NAME=FULL_ID`. Unknown, missing, or unused parameters and unresolved tokens fail validation. See [the template contract](template-format.mara.md) for the version-1 fields and references. Publication and permanent ID assignment belong to the later file-backed run slice.
+
 ## MCP stdio
 
-Start `target/debug/work mcp` from a Git checkout and configure an MCP client to launch it over stdio. The server negotiates MCP `2025-06-18` and advertises 13 tools: `discover`, `item_create`, `item_list`, `item_inspect`, `item_inspect_raw`, `item_diagnose`, `item_ready`, `item_update`, `item_close`, `item_reopen`, `item_repair`, `relation_add`, and `relation_remove`. The names correspond to the CLI commands above. Every tool accepts optional `worktree`; otherwise it uses the server process checkout. `item_repair` takes replacement bytes encoded as `raw_hex`. Tool successes return the result as `structuredContent`; domain failures set `isError: true` and return `structuredContent.error.code`. Unknown MCP methods and tools are JSON-RPC errors. Use `tools/list` for exact argument schemas; optional fields must be omitted rather than sent as `null`.
+Start `target/debug/work mcp` from a Git checkout and configure an MCP client to launch it over stdio. The server negotiates MCP `2025-06-18` and advertises 16 tools: `discover`, `item_create`, `item_list`, `item_inspect`, `item_inspect_raw`, `item_diagnose`, `item_ready`, `item_update`, `item_close`, `item_reopen`, `item_repair`, `relation_add`, `relation_remove`, `template_list`, `template_validate`, and `template_preview`. The names correspond to the CLI commands above. Every tool accepts optional `worktree`; otherwise it uses the server process checkout. `item_repair` takes replacement bytes encoded as `raw_hex`. `template_preview` takes `name`, `root`, and optional `parameters` and `existing` maps. Tool successes return the result as `structuredContent`; domain failures set `isError: true` and return `structuredContent.error.code`. Unknown MCP methods and tools are JSON-RPC errors. Use `tools/list` for exact argument schemas; optional fields must be omitted rather than sent as `null`.
 
 ## Current limits and verification
 
-This slice manages durable item files and graph readiness. It has no claim or ownership coordination, templates, temporary runs, handoffs, session or workspace management, index rebuild, release action, or executor. It does not start agents, manage worktrees, or perform pull-request or CI actions. In particular, the broader Mara verification definitions covering those later capabilities are future checks, not evidence that they work today. The current acceptance test is `cargo test --locked --test bootstrap_adoption`; it copies the authored backlog into disposable Git repositories before changing state. Other source and operation contracts are covered by the existing integration tests.
+This slice manages durable item files, graph readiness, and read-only template preview. It has no claim or ownership coordination, template publication, temporary runs, handoffs, session or workspace management, index rebuild, release action, or executor. It does not start agents, manage worktrees, or perform pull-request or CI actions. In particular, the broader Mara verification definitions covering those later capabilities are future checks, not evidence that they work today. The current acceptance tests include `cargo test --locked --test bootstrap_adoption --test templates --test mcp_protocol`; they use disposable Git repositories before changing state. Other source and operation contracts are covered by the existing integration tests.

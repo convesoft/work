@@ -1,0 +1,30 @@
+format_version: 1
+name: review_fixes
+parameters: [change, finding]
+existing: [review, delivery]
+defaults:
+  model: "gpt-6-sol"
+  thinking: "high"
+items:
+  - key: fix
+    title: "Fix {{finding}} in {{change}}"
+    body: |
+      Address the finding and record the result.
+    model: "gpt-6-astra"
+  - key: consolidate
+    title: "Consolidate fixes for {{change}}"
+    body: |
+      Review the completed fixes together.
+  - key: review_again
+    title: "Review {{change}} again"
+    body: |
+      Check the consolidated result.
+edges:
+  - {from: "local:fix", kind: parent, to: root}
+  - {from: "local:consolidate", kind: parent, to: root}
+  - {from: "local:review_again", kind: parent, to: root}
+  - {from: "local:fix", kind: discovered_from, to: "existing:review"}
+  - {from: "local:consolidate", kind: depends_on, to: "local:fix"}
+  - {from: "local:review_again", kind: depends_on, to: "local:consolidate"}
+  - {from: "local:review_again", kind: depends_on, to: "existing:review"}
+  - {from: "existing:delivery", kind: depends_on, to: "local:review_again"}
