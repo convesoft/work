@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{
     AtFlags, CWD, FlockOperation, Mode, OFlags, RenameFlags, flock, fsync, openat, renameat_with,
-    unlinkat,
+    statat, unlinkat,
 };
 
 use super::graph::{Evaluation, ItemGraph, Relations};
@@ -111,7 +111,8 @@ pub struct DurableOperations {
 }
 
 struct OperationLock {
-    _file: File,
+    file: File,
+    root_dir: OwnedFd,
     work_dir: OwnedFd,
 }
 
@@ -398,20 +399,40 @@ impl DurableOperations {
             ));
         }
         if kind == RelationKind::Related && !add {
-            let store = self.load()?;
-            let authored_at_target = store.files.iter().any(|file| {
-                file.header.as_ref().is_some_and(|header| {
-                    header.id == target && header.related.iter().any(|id| id == source)
-                })
-            });
-            let authored_at_source = store.files.iter().any(|file| {
-                file.header.as_ref().is_some_and(|header| {
-                    header.id == source && header.related.iter().any(|id| id == target)
-                })
-            });
-            if !authored_at_source && authored_at_target {
-                return self.relate(target, kind, source, false);
+            if !valid_id(source) {
+                return Err(OperationError::InvalidArgument(
+                    "source must be a full UUIDv4 ID".into(),
+                ));
             }
+            return self.mutate_selected_with_hook(
+                |store| {
+                    let authored_at = |id: &str, other: &str| {
+                        store.files.iter().any(|file| {
+                            file.header.as_ref().is_some_and(|header| {
+                                header.id == id && header.related.iter().any(|edge| edge == other)
+                            })
+                        })
+                    };
+                    if authored_at(source, target) {
+                        Ok(source.to_owned())
+                    } else if authored_at(target, source) {
+                        Ok(target.to_owned())
+                    } else {
+                        Err(OperationError::NotFound("edge".into()))
+                    }
+                },
+                |_, header| {
+                    let other = if header.id == source { target } else { source };
+                    let index = header
+                        .related
+                        .iter()
+                        .position(|edge| edge == other)
+                        .ok_or_else(|| OperationError::NotFound("edge".into()))?;
+                    header.related.remove(index);
+                    Ok(())
+                },
+                || Ok(()),
+            );
         }
         self.mutate(source, |store, header| {
             if source == target {
@@ -484,15 +505,25 @@ impl DurableOperations {
                 "source must be a full UUIDv4 ID".into(),
             ));
         }
+        self.mutate_selected_with_hook(|_| Ok(id.to_owned()), edit, before_publish)
+    }
+
+    fn mutate_selected_with_hook(
+        &self,
+        choose: impl FnOnce(&ItemStore) -> Result<String, OperationError>,
+        edit: impl FnOnce(&ItemStore, &mut ItemHeader) -> Result<(), OperationError>,
+        before_publish: impl FnOnce() -> Result<(), OperationError>,
+    ) -> Result<Inspection, OperationError> {
         let lock = self.lock()?;
         let items = self.items_dir(&lock)?;
         let store = self.load_from_dir(&items)?;
         require_valid(&store)?;
+        let id = choose(&store)?;
         let source = store
             .files
             .iter()
             .find(|f| f.header.as_ref().is_some_and(|h| h.id == id))
-            .ok_or_else(|| OperationError::NotFound(id.into()))?;
+            .ok_or_else(|| OperationError::NotFound(id.clone()))?;
         let mut header = source.header.clone().expect("valid store header");
         edit(&store, &mut header)?;
         let raw = serialize(&header, source.body.as_deref().expect("valid store body"));
@@ -521,7 +552,7 @@ impl DurableOperations {
             &self
                 .load_from_dir(&items)
                 .map_err(|error| with_recovery(error, &staged))?,
-            id,
+            &id,
         )
         .map_err(|error| with_recovery(error, &staged))?;
         result.recovery_path = Some(staged);
@@ -553,6 +584,17 @@ impl DurableOperations {
         lock: &OperationLock,
         items: &OwnedFd,
     ) -> Result<(), OperationError> {
+        let root = fs::symlink_metadata(&self.root)
+            .map_err(|_| OperationError::Conflict("checkout root changed on disk".into()))?;
+        let held_root = rustix::fs::fstat(&lock.root_dir).map_err(io::Error::from)?;
+        if !root.is_dir()
+            || root.dev() != held_root.st_dev as u64
+            || root.ino() != held_root.st_ino as u64
+        {
+            return Err(OperationError::Conflict(
+                "checkout root changed on disk".into(),
+            ));
+        }
         let work = fs::symlink_metadata(self.root.join(".work"))
             .map_err(|_| OperationError::Conflict("work directory changed on disk".into()))?;
         let held_work = rustix::fs::fstat(&lock.work_dir).map_err(io::Error::from)?;
@@ -562,6 +604,17 @@ impl DurableOperations {
         {
             return Err(OperationError::Conflict(
                 "work directory changed on disk".into(),
+            ));
+        }
+        let selected_lock = statat(&lock.work_dir, "operations.lock", AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| OperationError::Conflict("operation lock changed on disk".into()))?;
+        let held_lock = rustix::fs::fstat(&lock.file).map_err(io::Error::from)?;
+        if selected_lock.st_mode as u32 & 0o170000 != 0o100000
+            || selected_lock.st_dev != held_lock.st_dev
+            || selected_lock.st_ino != held_lock.st_ino
+        {
+            return Err(OperationError::Conflict(
+                "operation lock changed on disk".into(),
             ));
         }
         let selected = fs::symlink_metadata(self.root.join(".work/items"))
@@ -585,7 +638,7 @@ impl DurableOperations {
     ) -> Result<(), OperationError> {
         self.ensure_selected_dir(lock, items).map_err(|_| {
             OperationError::Conflict(format!(
-                "items directory changed after publication; recovery copy {} remains in the originally opened items directory (former path {})",
+                "selected path or lock changed after publication; recovery copy {} remains in the originally opened items directory (former path {})",
                 entry_name(recovery).to_string_lossy(),
                 recovery.display()
             ))
@@ -736,13 +789,12 @@ impl DurableOperations {
         ))
     }
     fn lock(&self) -> Result<OperationLock, OperationError> {
-        let work_dir = openat(
-            CWD,
-            self.root.join(".work"),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io::Error::from)?;
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let root_dir =
+            openat(CWD, &self.root, directory_flags, Mode::empty()).map_err(io::Error::from)?;
+        let work_dir =
+            openat(&root_dir, ".work", directory_flags, Mode::empty()).map_err(io::Error::from)?;
         let file = File::from(
             openat(
                 &work_dir,
@@ -755,7 +807,8 @@ impl DurableOperations {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
         Ok(OperationLock {
-            _file: file,
+            file,
+            root_dir,
             work_dir,
         })
     }
@@ -1407,6 +1460,98 @@ mod tests {
             fs::read(held.join("items").join(format!("{id}.md"))).unwrap(),
             original
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replaced_lock_file_is_rejected_before_publication() {
+        let (root, id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let path = ops.item_path(&id);
+        let original = fs::read(&path).unwrap();
+        let lock_path = root.join(".work/operations.lock");
+        let result = ops.mutate_with_hook(
+            &id,
+            |_, header| {
+                header.title = "Changed".into();
+                Ok(())
+            },
+            || {
+                fs::rename(&lock_path, root.join(".work/old-lock"))?;
+                fs::write(&lock_path, b"")?;
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(OperationError::Conflict(_))));
+        assert_eq!(fs::read(path).unwrap(), original);
+        assert_eq!(staged_count(&root), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn symlink_checkout_root_is_rejected_for_reads_and_writes() {
+        let (root, _id) = fixture();
+        let alias = root.with_extension("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let ops = DurableOperations::new(&alias);
+        assert!(matches!(ops.list(), Err(OperationError::Io(_))));
+        assert!(matches!(
+            ops.create("New".into(), Vec::new(), MetadataChange::default()),
+            Err(OperationError::Io(_))
+        ));
+        fs::remove_file(alias).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn related_removal_chooses_author_after_acquiring_the_lock() {
+        let (root, first) = fixture();
+        let second = "e66b0ba51d2c4a7aa15de40cb3c9d507".to_string();
+        let ops = DurableOperations::new(&root);
+        let mut first_header = default_header(first.clone(), "First".into());
+        let mut second_header = default_header(second.clone(), "Second".into());
+        first_header.related.push(second.clone());
+        fs::write(
+            ops.item_path(&first),
+            serialize(&first_header, b"First body"),
+        )
+        .unwrap();
+        fs::write(
+            ops.item_path(&second),
+            serialize(&second_header, b"Second body"),
+        )
+        .unwrap();
+        let lock = ops.lock().unwrap();
+        let (ready, started) = std::sync::mpsc::channel();
+        let thread_root = root.clone();
+        let thread_first = first.clone();
+        let thread_second = second.clone();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            DurableOperations::new(thread_root).relation_remove(
+                &thread_second,
+                RelationKind::Related,
+                &thread_first,
+            )
+        });
+        started.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        first_header.related.clear();
+        second_header.related.push(first.clone());
+        fs::write(
+            ops.item_path(&first),
+            serialize(&first_header, b"First body"),
+        )
+        .unwrap();
+        fs::write(
+            ops.item_path(&second),
+            serialize(&second_header, b"Second body"),
+        )
+        .unwrap();
+        drop(lock);
+        let result = worker.join().unwrap().unwrap();
+        assert_eq!(result.file.header.unwrap().id, second);
+        assert!(ops.inspect(&second).unwrap().relations.related.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
