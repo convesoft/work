@@ -30,7 +30,7 @@ def main() -> None:
                 directory.mode = 0o755
                 directory.mtime = 0
                 archive.addfile(directory)
-                for name in ("LICENSE", "README.md", "work"):
+                for name in ("LICENSE", "LICENSE-MIT", "LICENSE-APACHE", "README.md", "work"):
                     add_file(archive, source / name, f"{source.name}/{name}")
 
 

@@ -31,7 +31,7 @@ async function destination(output, name) {
   const directory = path.join(path.resolve(output), name.replace("@convesoft/", ""));
   await rm(directory, { recursive: true, force: true });
   await mkdir(path.join(directory, "bin"), { recursive: true });
-  await Promise.all(["README.md", "LICENSE"].map((file) => copyFile(path.join(root, file), path.join(directory, file))));
+  await Promise.all(["README.md", "LICENSE", "LICENSE-MIT", "LICENSE-APACHE"].map((file) => copyFile(path.join(root, file), path.join(directory, file))));
   return directory;
 }
 
@@ -51,7 +51,7 @@ if (command === "main" && args.length === 1) {
     bin: { work: "bin/work.cjs" },
     engines: { node: ">=18" },
     optionalDependencies: Object.fromEntries([...targets.values()].map(({ name }) => [name, version])),
-    files: ["bin/work.cjs", "README.md", "LICENSE"],
+    files: ["bin/work.cjs", "README.md", "LICENSE", "LICENSE-MIT", "LICENSE-APACHE"],
   });
 } else if (command === "platform" && args.length === 3) {
   const [target, binary, output] = args;
@@ -64,7 +64,7 @@ if (command === "main" && args.length === 1) {
     ...manifest(config.name, `Work native binary for ${target}`),
     os: config.os, cpu: config.cpu,
     ...(config.libc ? { libc: config.libc } : {}),
-    files: ["bin/work", "README.md", "LICENSE"],
+    files: ["bin/work", "README.md", "LICENSE", "LICENSE-MIT", "LICENSE-APACHE"],
   });
 } else {
   console.error("usage: package-npm.mjs main <output-dir> | platform <target> <binary> <output-dir>");

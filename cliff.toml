@@ -1,0 +1,36 @@
+[changelog]
+body = """
+{% if version %}## [{{ version | trim_start_matches(pat="v") }}]
+{% else %}## [unreleased]
+{% endif %}
+{% if version == "v0.1.0-alpha.1" %}
+This alpha delivers the durable Work item graph through the CLI and MCP server. It supports item creation, inspection, updates, relationships, readiness, and closure in Git worktrees.
+
+Claims, templates, temporary runs, sessions, workspaces, handoffs, and run finalization are planned for later candidates.
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{{ commit.message | upper_first }}
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+postprocessors = [
+  { pattern = "\\n{3,}", replace = "\n\n" },
+  { pattern = "\\n{2,}$", replace = "\n" },
+]
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+commit_parsers = [
+  { message = "^chore\\(release\\):", skip = true },
+  { message = "^(chore|docs)\\(items\\):", skip = true },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Testing" },
+  { message = "^chore|^ci", group = "Maintenance" },
+  { message = ".*", group = "Other" },
+]
+sort_commits = "oldest"
