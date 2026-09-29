@@ -31,6 +31,7 @@ pub enum OperationError {
     Published {
         id: String,
         path: PathBuf,
+        previous_source_path: Option<PathBuf>,
         cause: Box<OperationError>,
     },
 }
@@ -55,6 +56,16 @@ impl OperationError {
             _ => None,
         }
     }
+
+    pub fn previous_source_path(&self) -> Option<&Path> {
+        match self {
+            Self::Published {
+                previous_source_path: Some(path),
+                ..
+            } => Some(path),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for OperationError {
@@ -68,12 +79,21 @@ impl fmt::Display for OperationError {
                 write!(f, "{}: {} diagnostic(s)", self.code(), diagnostics.len())
             }
             Self::Io(error) => write!(f, "io: {error}"),
-            Self::Published { id, path, cause } => {
+            Self::Published {
+                id,
+                path,
+                previous_source_path,
+                cause,
+            } => {
                 write!(
                     f,
                     "{cause}; item {id} may have been published at {}",
                     path.display()
-                )
+                )?;
+                if let Some(previous) = previous_source_path {
+                    write!(f, "; previous source path was {}", previous.display())?;
+                }
+                Ok(())
             }
         }
     }
@@ -170,6 +190,15 @@ impl DurableOperations {
     /// Explicitly replace one malformed source document. Residual graph errors may
     /// remain while a caller repairs other documents in later steps.
     pub fn repair(&self, id: &str, raw: Vec<u8>) -> Result<RawInspection, OperationError> {
+        self.repair_with_hook(id, raw, || Ok(()))
+    }
+
+    fn repair_with_hook(
+        &self,
+        id: &str,
+        raw: Vec<u8>,
+        after_canonical_publish: impl FnOnce() -> Result<(), OperationError>,
+    ) -> Result<RawInspection, OperationError> {
         if !valid_id(id) {
             return Err(OperationError::InvalidArgument(
                 "item must be a full UUIDv4 ID".into(),
@@ -228,7 +257,7 @@ impl DurableOperations {
                 shadow_recovery = Some(recovery);
             }
         }
-        let result = self.repair_loaded(&lock, &items, id, &raw, &store);
+        let result = self.repair_loaded(&lock, &items, id, &raw, &store, after_canonical_publish);
         match shadow_recovery {
             Some(recovery) => result
                 .map(|mut inspection| {
@@ -247,6 +276,7 @@ impl DurableOperations {
         id: &str,
         raw: &[u8],
         store: &ItemStore,
+        after_canonical_publish: impl FnOnce() -> Result<(), OperationError>,
     ) -> Result<RawInspection, OperationError> {
         let original = self.raw_source(store, id)?;
         if let Some(header) = &original.header
@@ -321,29 +351,32 @@ impl DurableOperations {
                     return Err(OperationError::Io(io::Error::from(error)));
                 }
             }
-            self.sync_items(items)
-                .map_err(|error| with_recovery(error, &original.path))?;
-            rename_in_dir(items, &original.path, &staged, RenameFlags::NOREPLACE).map_err(
-                |error| {
-                    OperationError::Io(io::Error::other(format!(
-                        "canonical item published but old path could not be retained: {error}"
-                    )))
-                },
-            )?;
-            self.sync_items(items)
-                .map_err(|error| with_recovery(error, &staged))?;
-            if !archive_matches(items, original, &staged) {
-                return Err(OperationError::Conflict(format!(
-                    "source changed during filename repair; recovery copy retained at {}",
-                    staged.display()
-                )));
-            }
-            self.ensure_selected_dir_after_publication(lock, items, &staged)?;
-            let mut result = self
-                .inspect_raw_from_dir(items, id)
-                .map_err(|error| with_recovery(error, &staged))?;
-            result.recovery_path = Some(staged);
-            return Ok(result);
+            return (|| {
+                after_canonical_publish()?;
+                self.sync_items(items)?;
+                rename_in_dir(items, &original.path, &staged, RenameFlags::NOREPLACE)
+                    .map_err(|error| OperationError::Io(io::Error::from(error)))?;
+                self.sync_items(items)
+                    .map_err(|error| with_recovery(error, &staged))?;
+                if !archive_matches(items, original, &staged) {
+                    return Err(OperationError::Conflict(format!(
+                        "source changed during filename repair; recovery copy retained at {}",
+                        staged.display()
+                    )));
+                }
+                self.ensure_selected_dir_after_publication(lock, items, &staged)?;
+                let mut result = self
+                    .inspect_raw_from_dir(items, id)
+                    .map_err(|error| with_recovery(error, &staged))?;
+                result.recovery_path = Some(staged);
+                Ok(result)
+            })()
+            .map_err(|cause| OperationError::Published {
+                id: id.to_owned(),
+                path: target_path,
+                previous_source_path: Some(original.path.clone()),
+                cause: Box::new(cause),
+            });
         }
         let published = fingerprint_at(items, &staged)?;
         if let Err(error) = rename_in_dir(items, &staged, &original.path, RenameFlags::EXCHANGE) {
@@ -435,6 +468,7 @@ impl DurableOperations {
                     .map_err(|cause| OperationError::Published {
                         id,
                         path,
+                        previous_source_path: None,
                         cause: Box::new(cause),
                     });
                 }
@@ -1420,6 +1454,17 @@ fn exchange_error(error: rustix::io::Errno) -> OperationError {
 fn with_recovery(error: OperationError, path: &Path) -> OperationError {
     let context = format!("; recovery copy retained at {}", path.display());
     match error {
+        OperationError::Published {
+            id,
+            path: published_path,
+            previous_source_path,
+            cause,
+        } => OperationError::Published {
+            id,
+            path: published_path,
+            previous_source_path,
+            cause: Box::new(with_recovery(*cause, path)),
+        },
         OperationError::Io(inner) => {
             OperationError::Io(io::Error::other(format!("{inner}{context}")))
         }
@@ -1930,6 +1975,31 @@ mod tests {
             Some(&b"Body"[..])
         );
         assert!(error.to_string().contains(published_id));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_filename_repair_identifies_both_source_paths() {
+        let (root, id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let canonical = ops.item_path(&id);
+        let old_path = root.join(".work/items/wrong.md");
+        fs::rename(&canonical, &old_path).unwrap();
+        let replacement = serialize(&default_header(id.clone(), "Replacement".into()), b"New");
+        let error = ops
+            .repair_with_hook(&id, replacement.clone(), || {
+                fs::remove_file(&old_path)?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "io");
+        assert_eq!(
+            error.published_item(),
+            Some((id.as_str(), canonical.as_path()))
+        );
+        assert_eq!(error.previous_source_path(), Some(old_path.as_path()));
+        assert!(error.to_string().contains(old_path.to_str().unwrap()));
+        assert_eq!(fs::read(&canonical).unwrap(), replacement);
         fs::remove_dir_all(root).unwrap();
     }
 
