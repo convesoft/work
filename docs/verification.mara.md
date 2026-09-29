@@ -1,6 +1,6 @@
 # Verification definitions
 
-These are planned acceptance checks. No check has been executed against a Work implementation and no passing implementation evidence is asserted.
+These are repeatable acceptance definitions, not execution results. The implemented durable-item slice has automated checks in `tests/`, including copied-backlog adoption in `tests/bootstrap_adoption.rs`; consult actual test runs for passing evidence and limitations. Checks for later slices remain planned.
 
 :::mara verification VER-DURABLE-ROUNDTRIP
 :mid: 01M3KARN7CQA58Z2TFCT9BHMYM
@@ -304,5 +304,5 @@ Create durable and temporary items and verify UUIDv4 canonical identities use 32
 :verifies: REQ-BOOTSTRAP-COMPATIBILITY
 :verifies: DES-ITEM-FORMAT
 
-Copy the real .work/items backlog into a disposable initialized Git checkout. Load it without importing to a database or changing IDs/body bytes. Confirm aggregate items omit recorded state, manual items have valid state, and every full-ID relationship resolves. Exercise creation, inspection, readiness, relationships, close, and reopen through CLI and MCP on equivalent fixtures, preserving original files and comparing semantics. Verify the expected initial ready item and the next ready item after prerequisite completion. Cover LF/CRLF bodies, ambiguous YAML strings, duplicate keys, unknown fields/versions, invalid IDs, filename mismatches, aggregate stored state, unresolved edges, reciprocal related assertions, and mixed lifecycle deadlocks. Rejected writes must preserve files. These are future implementation checks, not evidence that the bootstrap files already have a working executable.
+Copy the real .work/items backlog into a disposable initialized Git checkout. Load it without importing to a database or changing IDs/body bytes. Confirm aggregate items omit recorded state, manual items have valid state, and every full-ID relationship resolves. Exercise creation, inspection, readiness, relationships, close, and reopen through CLI and MCP on equivalent fixtures, preserving original files and comparing semantics. Verify the expected initial ready item and the next ready item after prerequisite completion. Cover LF/CRLF bodies, ambiguous YAML strings, duplicate keys, unknown fields/versions, invalid IDs, filename mismatches, aggregate stored state, unresolved edges, reciprocal related assertions, and mixed lifecycle deadlocks. Rejected writes must preserve files. The delivered durable-item slice has automated coverage in `tests/bootstrap_adoption.rs` and other integration tests in `tests/`. This definition records the repeatable check, not a passing result; consult actual test runs for execution evidence.
 :::

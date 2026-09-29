@@ -158,6 +158,9 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
         return Ok(json!({"version":env!("CARGO_PKG_VERSION")}));
     }
     if command == "discover" {
+        if at + 2 == args.len() && args[at + 1] == "--help" {
+            return Ok(json!({"help":DISCOVER_HELP}));
+        }
         if at + 2 < args.len() {
             return Err(usage("work discover [PATH]"));
         }
@@ -174,6 +177,9 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
                 .ok_or_else(|| CliError::new("invalid_argument", "command arguments must be UTF-8"))
         })
         .collect::<Result<_, _>>()?;
+    if let Some(help) = command_help(&words) {
+        return Ok(json!({"help":help}));
+    }
     validate_command_shape(&words)?;
     let project = discover(selected)?;
     let ops = DurableOperations::new(&project.worktree_root);
@@ -183,6 +189,56 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
             relation_command(&project, &ops, verb, tail)
         }
         _ => Err(usage("expected item or relation command")),
+    }
+}
+
+fn command_help(words: &[String]) -> Option<&'static str> {
+    let words: Vec<_> = words.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["discover", "--help"] => Some(DISCOVER_HELP),
+        ["mcp", "--help"] => Some(
+            "Usage: work mcp\nServe durable item operations as MCP tools over stdio. Tools accept an optional worktree path; otherwise they use the server's checkout.",
+        ),
+        ["item", "--help"] => Some(
+            "Usage: work [--json] [--worktree PATH] item COMMAND\nCommands: create, list, inspect, diagnose, ready, update, close, reopen, repair. Run work item COMMAND --help for details.",
+        ),
+        ["item", "create", "--help"] => Some(
+            "Usage: work item create --title TEXT [--body TEXT|-] [METADATA OPTIONS]\nCreate a durable item with a generated full ID; completion is manual by default. Body text is opaque; --body - reads stdin. Metadata: --completion manual|children, --priority 0..4, --parent ID, --label TEXT (repeatable), --model TEXT, --thinking TEXT.",
+        ),
+        ["item", "list", "--help"] => Some(
+            "Usage: work item list\nList valid durable items in canonical ID order, including recorded state, graph state, relations, and blockers. Use item diagnose for malformed files.",
+        ),
+        ["item", "inspect", "--help"] => Some(
+            "Usage: work item inspect ID [--raw]\nInspect an item by full ID or unique lowercase prefix, optionally prefixed with w-. --raw requires a full ID and exposes original source bytes and diagnostics.",
+        ),
+        ["item", "diagnose", "--help"] => Some(
+            "Usage: work item diagnose\nReport source and graph diagnostics for the selected checkout. Invalid graphs can still be inspected, but refuse readiness and structured mutations.",
+        ),
+        ["item", "ready", "--help"] => Some(
+            "Usage: work item ready\nList open executable manual items whose lifecycle prerequisites are resolved, ordered by priority then ID. This reports eligibility, not ownership or execution.",
+        ),
+        ["item", "update", "--help"] => Some(
+            "Usage: work item update ID OPTIONS\nEdit supplied header fields only; preserve the existing body. Options: --title TEXT, --completion manual|children, --priority 0..4, --parent ID, --clear-parent, --label TEXT (repeatable), --clear-labels, --model TEXT, --clear-model, --thinking TEXT, --clear-thinking.",
+        ),
+        ["item", "close", "--help"] => Some(
+            "Usage: work item close ID [--reason TEXT]\nRecord a manual item as done with an optional opaque reason. Closing resolves its obligation; it does not close other manual items.",
+        ),
+        ["item", "reopen", "--help"] => Some(
+            "Usage: work item reopen ID\nRecord a manual item as open and remove its close reason. Graph state is recomputed without reopening other manual items.",
+        ),
+        ["item", "repair", "--help"] => Some(
+            "Usage: work item repair FULL_ID --source -\nReplace a diagnosed invalid source with complete version-1 item bytes from stdin. Inspect and diagnose first; repair rejects a healthy item.",
+        ),
+        ["relation", "--help"] => Some(
+            "Usage: work relation add|remove KIND SOURCE TARGET\nKinds: parent (child to parent), depends_on (dependent to prerequisite), related (symmetric context), discovered_from (provenance). Run work relation add --help or remove --help for details.",
+        ),
+        ["relation", "add", "--help"] => Some(
+            "Usage: work relation add KIND SOURCE TARGET\nAdd one full-ID edge. For parent, the edge points from child to parent; for depends_on, from dependent to prerequisite. related and discovered_from are informational and do not change readiness.",
+        ),
+        ["relation", "remove", "--help"] => Some(
+            "Usage: work relation remove KIND SOURCE TARGET\nRemove an existing edge. SOURCE is the child for parent and the dependent for depends_on. related may be removed from either endpoint.",
+        ),
+        _ => None,
     }
 }
 
@@ -669,7 +725,8 @@ fn print_human(value: &Value) {
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
 Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove; mcp starts a stdio server\n\
-Use --json for one structured result or error object. Run item create --title TEXT [--body TEXT|-]; item update ID with --title, --completion, --priority, --parent, --label, --model, or --thinking. Use item repair FULL_ID --source - for malformed source.";
+Use --json for one structured result or error object. Run work item --help or work relation --help for command details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
+const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
 pub(super) fn encode_path(path: &Path) -> String {
     let mut encoded = String::new();

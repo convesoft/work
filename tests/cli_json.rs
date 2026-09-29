@@ -111,6 +111,31 @@ fn human(cwd: &Path, args: &[&str]) -> (i32, String, String) {
 }
 
 #[test]
+fn command_help_explains_operations_without_a_git_checkout() {
+    let outside = std::env::temp_dir();
+    for (args, detail) in [
+        (vec!["item", "--help"], "item COMMAND"),
+        (
+            vec!["item", "ready", "--help"],
+            "eligibility, not ownership",
+        ),
+        (vec!["item", "create", "--help"], "generated full ID"),
+        (
+            vec!["relation", "add", "--help"],
+            "dependent to prerequisite",
+        ),
+        (vec!["discover", "--help"], "Git working checkout"),
+        (vec!["mcp", "--help"], "MCP tools over stdio"),
+    ] {
+        let help = ok(call(&outside, &args, None))["help"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(help.contains(detail), "{help}");
+    }
+}
+
+#[test]
 fn durable_loop_and_machine_readable_errors() {
     let f = Fixture::new();
     let help = ok(f.call(&["--help"]));

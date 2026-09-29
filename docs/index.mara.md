@@ -18,7 +18,7 @@ Mara items describe the Work product. They are not Work's own issue records: Mar
 | [Design](design.mara.md) | Persistence boundaries, layouts, lifecycle proposals, and shared interfaces |
 | [Item format](item-format.mara.md) | Version-1 item file contract and frontmatter schema |
 | [Decisions](decisions.mara.md) | Rationale for the graph, storage model, and initial scope |
-| [Verification](verification.mara.md) | Repeatable future acceptance checks |
+| [Verification](verification.mara.md) | Repeatable acceptance checks for delivered and planned slices |
 | [Remaining details](open-questions.mara.md) | Engineering contracts, small interface conventions, and material design risks |
 | [Delivery](delivery.mara.md) | Ownership of knowledge and tasks, baseline, branches, and release preparation |
 
@@ -58,4 +58,4 @@ The current corpus-preparation conversation on 2026-09-28 clarified three decisi
 
 ## Implementation evidence
 
-The repository baseline contains agent instructions, Mara knowledge, a version-1 item schema, and implementation item files, but no Cargo manifest or Rust implementation. The first feature branch establishes the Rust foundation and initial CI/release workflows. A separate release-preparation item follows the first usable CLI/MCP milestone and owns the generated changelog and publication evidence. Verification definitions describe future checks, not recorded implementation test results.
+The current checkout contains the Cargo workspace, Rust CLI and MCP durable-item operations, and automated integration tests. `tests/bootstrap_adoption.rs` exercises both interfaces on isolated copies of the authored backlog; [the usage guide](using-work.md) describes the supported commands and current limits. Claims, templates, runs, and other later slices remain planned. A separate release-preparation item owns the generated changelog and publication evidence. Verification definitions describe repeatable checks, not recorded implementation test results; consult actual test runs for passing evidence.

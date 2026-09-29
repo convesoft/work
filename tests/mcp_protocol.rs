@@ -180,6 +180,24 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
     ] {
         assert!(tools.iter().any(|tool| tool["name"] == name));
     }
+    assert!(
+        tools
+            .iter()
+            .find(|tool| tool["name"] == "item_ready")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .contains("does not claim")
+    );
+    assert!(
+        tools
+            .iter()
+            .find(|tool| tool["name"] == "relation_add")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .contains("informational")
+    );
     assert_eq!(
         client.ok("item_ready", json!({"worktree":f.0}))["items"],
         json!([])
