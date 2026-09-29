@@ -611,7 +611,7 @@ fn interrupted_recreation_cannot_silently_initialize_and_can_be_resumed() {
 
     assert!(matches!(
         Storage::inspect(&project).unwrap().status,
-        StorageStatus::Corrupt(detail) if detail.contains("recreation was interrupted")
+        StorageStatus::Corrupt(detail) if detail.contains("recovery was interrupted")
     ));
     assert!(matches!(
         Storage::open(&project),
@@ -682,6 +682,328 @@ fn explicit_backup_restore_clears_interrupted_recreation_marker() {
             )
             .unwrap(),
         "backup-token"
+    );
+}
+
+#[test]
+fn missing_identity_restores_from_matching_active_database_evidence() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let identity = fs::read(project.work_store_identity_path()).unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'backup-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    drop(connection);
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'later-claim', 'actor', 'later', 'later')", [SECOND]).unwrap();
+    drop(connection);
+    fs::remove_file(project.work_store_identity_path()).unwrap();
+    assert_eq!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::MissingIdentity
+    );
+
+    let restored = Storage::restore_backup(&project, &backup).unwrap();
+    assert!(!restored.lost_coordination);
+    assert!(restored.coordination_may_be_stale);
+    assert_eq!(
+        fs::read(project.work_store_identity_path()).unwrap(),
+        identity
+    );
+    assert!(
+        !project
+            .work_storage_dir()
+            .join("recovery.in_progress")
+            .exists()
+    );
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+    let current = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        current
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "backup-claim"
+    );
+    assert_eq!(
+        current
+            .query_row::<i64, _, _>("SELECT count(*) FROM claims", [], |row| row.get(0))
+            .unwrap(),
+        1
+    );
+    assert!(restored.retained_paths.iter().any(|path| {
+        path.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("work.db.retained-")
+    }));
+}
+
+#[test]
+fn missing_identity_can_restore_schema_zero_backup_then_migrate() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'schema-zero-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection.execute_batch("PRAGMA user_version=0").unwrap();
+    drop(connection);
+    let migrated = Storage::migrate(&project).unwrap();
+    fs::remove_file(project.work_store_identity_path()).unwrap();
+
+    let restored = Storage::restore_backup(&project, &migrated.backup_path).unwrap();
+    assert!(restored.requires_migration);
+    assert_eq!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::UnsupportedSchema(0)
+    );
+    Storage::migrate(&project).unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "schema-zero-claim"
+    );
+}
+
+#[test]
+fn missing_identity_rejects_backup_only_and_foreign_active_backup() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    fs::remove_file(project.work_store_identity_path()).unwrap();
+    fs::remove_file(project.work_database_path()).unwrap();
+    assert!(matches!(
+        Storage::restore_backup(&project, &backup),
+        Err(StorageError::Status(StorageStatus::MissingIdentity))
+    ));
+    assert!(!project.work_store_identity_path().exists());
+    assert!(!project.work_database_path().exists());
+    let marker = project.work_storage_dir().join("recovery.in_progress");
+    fs::write(&marker, b"recovery in progress\n").unwrap();
+    let lone_identity = project.work_storage_dir().join("store.id.retained-orphan");
+    fs::write(&lone_identity, b"00000000000000000000000000000000\n").unwrap();
+    assert!(matches!(
+        Storage::restore_backup(&project, &backup),
+        Err(StorageError::Status(StorageStatus::Corrupt(detail))) if detail.contains("pair")
+    ));
+    assert!(!project.work_store_identity_path().exists());
+    assert!(!project.work_database_path().exists());
+
+    let other = Fixture::new();
+    let other_project = other.project(&other.checkout);
+    drop(Storage::open(&other_project).unwrap());
+    fs::remove_file(other_project.work_store_identity_path()).unwrap();
+    // The intact active database supplies independent evidence and rejects a
+    // backup from a different repository before publication begins.
+    assert!(matches!(
+        Storage::restore_backup(&other_project, &backup),
+        Err(StorageError::Status(StorageStatus::IdentityMismatch))
+    ));
+    assert!(!other_project.work_store_identity_path().exists());
+    assert!(other_project.work_database_path().exists());
+}
+
+#[test]
+fn interrupted_recreation_restores_from_one_retained_pair() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'retained-backup-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    drop(connection);
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    let marker = project.work_storage_dir().join("recovery.in_progress");
+    let retained_database = project
+        .work_storage_dir()
+        .join("work.db.retained-interrupted");
+    let retained_identity = project
+        .work_storage_dir()
+        .join("store.id.retained-interrupted");
+    fs::write(&marker, b"recreate in progress\n").unwrap();
+    fs::rename(project.work_database_path(), &retained_database).unwrap();
+    fs::rename(project.work_store_identity_path(), &retained_identity).unwrap();
+
+    let restored = Storage::restore_backup(&project, &backup).unwrap();
+    assert!(!restored.lost_coordination);
+    assert!(restored.retained_paths.contains(&retained_database));
+    assert!(restored.retained_paths.contains(&retained_identity));
+    assert!(!marker.exists());
+    assert_eq!(
+        fs::read(project.work_store_identity_path()).unwrap(),
+        fs::read(&retained_identity).unwrap()
+    );
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "retained-backup-claim"
+    );
+}
+
+#[test]
+fn retained_pair_validation_includes_wal_only_identity_and_claim() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let new_identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap(),
+        "wal"
+    );
+    connection
+        .execute_batch("PRAGMA wal_autocheckpoint=0")
+        .unwrap();
+    connection
+        .execute("UPDATE store_meta SET store_id = ?1", [new_identity])
+        .unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'wal-retained-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    let backup = project.work_storage_dir().join("wal-identity-backup.db");
+    connection.backup(rusqlite::MAIN_DB, &backup, None).unwrap();
+    fs::write(
+        project.work_store_identity_path(),
+        format!("{new_identity}\n"),
+    )
+    .unwrap();
+    let marker = project.work_storage_dir().join("recovery.in_progress");
+    fs::write(&marker, b"recovery in progress\n").unwrap();
+    let retained_database = project.work_storage_dir().join("work.db.retained-wal");
+    let retained_wal = project.work_storage_dir().join("work.db-wal.retained-wal");
+    let retained_identity = project.work_storage_dir().join("store.id.retained-wal");
+    fs::copy(project.work_database_path(), &retained_database).unwrap();
+    fs::copy(
+        project.work_database_path().with_extension("db-wal"),
+        &retained_wal,
+    )
+    .unwrap();
+    fs::rename(project.work_store_identity_path(), &retained_identity).unwrap();
+    drop(connection);
+    fs::remove_file(project.work_database_path()).unwrap();
+
+    Storage::restore_backup(&project, &backup).unwrap();
+    assert!(!marker.exists());
+    let restored = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        restored
+            .query_row::<String, _, _>("SELECT store_id FROM store_meta", [], |row| row.get(0))
+            .unwrap(),
+        new_identity
+    );
+    assert_eq!(
+        restored
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "wal-retained-claim"
+    );
+}
+
+#[test]
+fn ambiguous_or_mismatched_retained_identity_cannot_replace_a_missing_store() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    let marker = project.work_storage_dir().join("recovery.in_progress");
+    let retained_database = project.work_storage_dir().join("work.db.retained-first");
+    let retained_identity = project.work_storage_dir().join("store.id.retained-first");
+    fs::write(&marker, b"recreate in progress\n").unwrap();
+    fs::rename(project.work_database_path(), &retained_database).unwrap();
+    fs::rename(project.work_store_identity_path(), &retained_identity).unwrap();
+    let second_database = project.work_storage_dir().join("work.db.retained-second");
+    let second_identity = project.work_storage_dir().join("store.id.retained-second");
+    fs::copy(&retained_database, &second_database).unwrap();
+    fs::copy(&retained_identity, &second_identity).unwrap();
+    assert!(matches!(
+        Storage::restore_backup(&project, &backup),
+        Err(StorageError::Status(StorageStatus::Corrupt(detail))) if detail.contains("ambiguous")
+    ));
+    fs::remove_file(&second_database).unwrap();
+    fs::remove_file(&second_identity).unwrap();
+    let other = Fixture::new();
+    let other_project = other.project(&other.checkout);
+    let other_storage = Storage::open(&other_project).unwrap();
+    let foreign_backup = other_storage.backup(&other_project).unwrap();
+    drop(other_storage);
+    assert!(matches!(
+        Storage::restore_backup(&project, &foreign_backup),
+        Err(StorageError::Status(StorageStatus::IdentityMismatch))
+    ));
+    fs::write(&retained_identity, b"00000000000000000000000000000000\n").unwrap();
+    assert!(matches!(
+        Storage::restore_backup(&project, &backup),
+        Err(StorageError::Status(StorageStatus::IdentityMismatch))
+    ));
+    assert!(!project.work_database_path().exists());
+    assert!(!project.work_store_identity_path().exists());
+    assert!(marker.exists());
+}
+
+#[test]
+fn interrupted_restore_after_identity_publication_remains_diagnosed_and_retryable() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'retry-claim', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    drop(connection);
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    fs::write(
+        project.work_storage_dir().join("recovery.in_progress"),
+        b"recreate in progress\n",
+    )
+    .unwrap();
+    let retained_database = project.work_storage_dir().join("work.db.retained-partial");
+    fs::rename(project.work_database_path(), &retained_database).unwrap();
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(_)
+    ));
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    let restored = Storage::restore_backup(&project, &backup).unwrap();
+    assert!(restored.retained_paths.contains(&retained_database));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "retry-claim"
     );
 }
 
@@ -832,6 +1154,43 @@ fn missing_derived_foreign_key_is_reported_as_corrupt() {
     assert!(matches!(
         Storage::inspect(&project).unwrap().status,
         StorageStatus::Corrupt(detail) if detail.contains("foreign key for source_files")
+    ));
+}
+
+#[test]
+fn extra_check_constraint_is_rejected_before_ready_or_reconciliation() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let mut storage = Storage::open(&project).unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE source_files;
+             CREATE TABLE source_files (
+                 view_root BLOB NOT NULL, path BLOB NOT NULL CHECK(length(path) = 0),
+                 source_digest BLOB NOT NULL, PRIMARY KEY(view_root, path),
+                 FOREIGN KEY(view_root) REFERENCES views(root) ON DELETE CASCADE
+             );",
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>("PRAGMA quick_check", [], |row| row.get(0))
+            .unwrap(),
+        "ok"
+    );
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail) if detail.contains("noncanonical constraints")
+    ));
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    assert!(matches!(
+        storage.reconcile(&project, &fixture.store(&fixture.checkout)),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
     ));
 }
 

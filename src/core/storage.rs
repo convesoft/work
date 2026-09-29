@@ -5,12 +5,13 @@
 //! to the graph evaluator.
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{
@@ -27,6 +28,34 @@ use super::project::Project;
 
 const SCHEMA_VERSION: i64 = 1;
 const RECOVERY_MARKER: &str = "recovery.in_progress";
+const SCHEMA_V1_SQL: &str = "CREATE TABLE IF NOT EXISTS store_meta (store_id TEXT NOT NULL PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS views (root BLOB PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS source_files (
+            view_root BLOB NOT NULL, path BLOB NOT NULL, source_digest BLOB NOT NULL,
+            PRIMARY KEY(view_root, path),
+            FOREIGN KEY(view_root) REFERENCES views(root) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS items (
+            view_root BLOB NOT NULL, id TEXT NOT NULL, source_path BLOB NOT NULL,
+            title TEXT NOT NULL, completion TEXT NOT NULL, state TEXT,
+            priority INTEGER NOT NULL, PRIMARY KEY(view_root, id),
+            FOREIGN KEY(view_root, source_path) REFERENCES source_files(view_root, path) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS edges (
+            view_root BLOB NOT NULL, source_id TEXT NOT NULL, relation TEXT NOT NULL,
+            target_id TEXT NOT NULL, PRIMARY KEY(view_root, source_id, relation, target_id),
+            FOREIGN KEY(view_root, source_id) REFERENCES items(view_root, id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS ephemeral_sources (path BLOB PRIMARY KEY, source_digest BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS claims (
+            item_id TEXT PRIMARY KEY, owner_token TEXT NOT NULL UNIQUE,
+            actor_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            run_id TEXT, session_id TEXT, workspace_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS runtime_records (
+            kind TEXT NOT NULL, record_key TEXT NOT NULL, value BLOB NOT NULL,
+            PRIMARY KEY(kind, record_key)
+        );";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageStatus {
@@ -203,7 +232,7 @@ impl Storage {
             }
             if recovery_marker_exists(project)? {
                 return Ok(StorageStatus::Corrupt(
-                    "storage recreation was interrupted; inspect retained files and recover explicitly"
+                    "storage recovery was interrupted; inspect retained files and recover explicitly"
                         .into(),
                 ));
             }
@@ -298,7 +327,7 @@ impl Storage {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_no_triggers(&tx).map_err(|error| StorageError::Status(inspection_error(error)))?;
+        validate_schema_v1(&tx).map_err(|error| StorageError::Status(inspection_error(error)))?;
         tx.execute(
             "INSERT OR IGNORE INTO views(root, generation) VALUES (?1, 0)",
             params![root],
@@ -482,7 +511,14 @@ impl Storage {
         } else {
             Vec::new()
         };
-        let identity = read_identity(&project.work_store_identity_path())?;
+        let identity_path = project.work_store_identity_path();
+        let missing_identity = !regular_file_or_absent(&identity_path)?;
+        let identity = if missing_identity {
+            restore_identity_evidence(project, interrupted)?
+        } else {
+            read_identity(&identity_path)
+                .map_err(|error| StorageError::Status(inspection_error(error)))?
+        };
         match inspect_database(backup, &identity) {
             StorageStatus::Ready { .. } | StorageStatus::UnsupportedSchema(0) => {}
             status => return Err(StorageError::Status(status)),
@@ -491,6 +527,9 @@ impl Storage {
         let staged = project
             .work_storage_dir()
             .join(format!(".work.db.restore-{suffix}"));
+        let staged_identity = project
+            .work_storage_dir()
+            .join(format!(".store.id.restore-{suffix}"));
         let source = Connection::open_with_flags(
             backup,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -502,12 +541,41 @@ impl Storage {
             status => return Err(StorageError::Status(status)),
         };
         File::open(&staged)?.sync_all()?;
-        retained_paths.extend(quarantine_database(project, &suffix)?);
-        fs::rename(&staged, project.work_database_path())?;
-        sync_dir(&project.work_storage_dir())?;
-        if interrupted {
-            remove_recovery_marker(project)?;
+        if missing_identity {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged_identity)?;
+            writeln!(file, "{identity}")?;
+            file.sync_all()?;
         }
+        sync_dir(&project.work_storage_dir())?;
+        let publication = (|| -> Result<(), StorageError> {
+            create_recovery_marker(project)?;
+            if missing_identity {
+                fs::hard_link(&staged_identity, &identity_path)?;
+                sync_dir(&project.work_storage_dir())?;
+            } else if read_identity(&identity_path)? != identity {
+                return Err(StorageError::Status(StorageStatus::IdentityMismatch));
+            }
+            retained_paths.extend(quarantine_database(project, &suffix)?);
+            fs::hard_link(&staged, project.work_database_path())?;
+            sync_dir(&project.work_storage_dir())?;
+            let status = inspect_database(&project.work_database_path(), &identity);
+            if !matches!(
+                status,
+                StorageStatus::Ready { .. } | StorageStatus::UnsupportedSchema(0)
+            ) {
+                return Err(StorageError::Status(status));
+            }
+            remove_recovery_marker(project)?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(&staged);
+        if missing_identity {
+            let _ = fs::remove_file(&staged_identity);
+        }
+        publication?;
         Ok(RecoveryReport {
             database_path: project.work_database_path(),
             retained_paths,
@@ -577,34 +645,7 @@ fn schema(connection: &Connection, store_id: &str) -> Result<(), StorageError> {
 }
 
 fn create_schema_v1(tx: &Transaction<'_>) -> Result<(), StorageError> {
-    tx.execute_batch("CREATE TABLE IF NOT EXISTS store_meta (store_id TEXT NOT NULL PRIMARY KEY);
-        CREATE TABLE IF NOT EXISTS views (root BLOB PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS source_files (
-            view_root BLOB NOT NULL, path BLOB NOT NULL, source_digest BLOB NOT NULL,
-            PRIMARY KEY(view_root, path),
-            FOREIGN KEY(view_root) REFERENCES views(root) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS items (
-            view_root BLOB NOT NULL, id TEXT NOT NULL, source_path BLOB NOT NULL,
-            title TEXT NOT NULL, completion TEXT NOT NULL, state TEXT,
-            priority INTEGER NOT NULL, PRIMARY KEY(view_root, id),
-            FOREIGN KEY(view_root, source_path) REFERENCES source_files(view_root, path) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS edges (
-            view_root BLOB NOT NULL, source_id TEXT NOT NULL, relation TEXT NOT NULL,
-            target_id TEXT NOT NULL, PRIMARY KEY(view_root, source_id, relation, target_id),
-            FOREIGN KEY(view_root, source_id) REFERENCES items(view_root, id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS ephemeral_sources (path BLOB PRIMARY KEY, source_digest BLOB NOT NULL);
-        CREATE TABLE IF NOT EXISTS claims (
-            item_id TEXT PRIMARY KEY, owner_token TEXT NOT NULL UNIQUE,
-            actor_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-            run_id TEXT, session_id TEXT, workspace_id TEXT
-        );
-        CREATE TABLE IF NOT EXISTS runtime_records (
-            kind TEXT NOT NULL, record_key TEXT NOT NULL, value BLOB NOT NULL,
-            PRIMARY KEY(kind, record_key)
-        );")?;
+    tx.execute_batch(SCHEMA_V1_SQL)?;
     Ok(())
 }
 
@@ -716,6 +757,42 @@ fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
     if violations != 0 {
         return Err(StorageError::InvalidArgument(format!(
             "schema contains {violations} foreign key violation(s)"
+        )));
+    }
+    validate_canonical_v1_tables(connection)?;
+    Ok(())
+}
+
+fn validate_canonical_v1_tables(connection: &Connection) -> Result<(), StorageError> {
+    // SQLite table_info omits CHECK clauses, defaults, collations, and other
+    // constraints that can make a seemingly ready store reject normal writes.
+    let canonical = Connection::open_in_memory()?;
+    canonical.execute_batch(SCHEMA_V1_SQL)?;
+    const TABLES: &str = "'store_meta','views','source_files','items','edges','ephemeral_sources','claims','runtime_records'";
+    let query = format!(
+        "SELECT name, sql FROM sqlite_schema WHERE type='table' AND name IN ({TABLES}) ORDER BY name"
+    );
+    let definitions = |db: &Connection| -> Result<Vec<(String, String)>, StorageError> {
+        let mut statement = db.prepare(&query)?;
+        Ok(statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    if definitions(connection)? != definitions(&canonical)? {
+        return Err(StorageError::InvalidArgument(
+            "version 1 table definitions contain noncanonical constraints".into(),
+        ));
+    }
+    let extra_index: Option<String> = connection
+        .query_row(
+            &format!("SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name IN ({TABLES}) AND sql IS NOT NULL LIMIT 1"),
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(name) = extra_index {
+        return Err(StorageError::InvalidArgument(format!(
+            "version 1 table has unexpected index {name}"
         )));
     }
     Ok(())
@@ -896,6 +973,136 @@ fn inspect_existing(database: &Path, identity: &Path) -> StorageStatus {
     inspect_database(database, &marker)
 }
 
+fn restore_identity_evidence(project: &Project, interrupted: bool) -> Result<String, StorageError> {
+    let database = project.work_database_path();
+    if regular_file_or_absent(&database)? {
+        match validated_database_identity(&database) {
+            Ok(identity) => return Ok(identity),
+            Err(
+                error @ StorageError::Status(StorageStatus::Busy | StorageStatus::Unavailable(_)),
+            ) => return Err(error),
+            Err(error) if !interrupted => return Err(error),
+            Err(_) => {}
+        }
+    }
+    if !interrupted {
+        return Err(StorageError::Status(StorageStatus::MissingIdentity));
+    }
+    retained_pair_identity(project)
+}
+
+fn validated_database_identity(database: &Path) -> Result<String, StorageError> {
+    let connection = Connection::open_with_flags(
+        database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
+    let identities: Vec<String> = connection
+        .prepare("SELECT store_id FROM store_meta")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()
+        })
+        .map_err(|error| StorageError::Status(inspection_error(error.into())))?;
+    let [identity] = identities.as_slice() else {
+        return Err(StorageError::Status(StorageStatus::Corrupt(
+            "store_meta must contain exactly one identity".into(),
+        )));
+    };
+    if !valid_store_id(identity) {
+        return Err(StorageError::Status(StorageStatus::Corrupt(
+            "store_meta identity is malformed".into(),
+        )));
+    }
+    match inspect_database(database, identity) {
+        StorageStatus::Ready { .. } | StorageStatus::UnsupportedSchema(0) => Ok(identity.clone()),
+        status => Err(StorageError::Status(status)),
+    }
+}
+
+fn retained_pair_identity(project: &Project) -> Result<String, StorageError> {
+    let mut identities = BTreeMap::new();
+    let mut databases = BTreeMap::new();
+    for entry in fs::read_dir(project.work_storage_dir())? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.as_os_str().as_bytes();
+        for (prefix, entries) in [
+            (b"store.id.retained-".as_slice(), &mut identities),
+            (b"work.db.retained-".as_slice(), &mut databases),
+        ] {
+            if let Some(suffix) = name.strip_prefix(prefix) {
+                if suffix.is_empty() || !entry.file_type()?.is_file() {
+                    return Err(StorageError::Status(StorageStatus::Corrupt(
+                        "retained recovery identity or database is not a regular file".into(),
+                    )));
+                }
+                entries.insert(suffix.to_vec(), entry.path());
+            }
+        }
+    }
+    if identities.len() != 1 || databases.len() != 1 {
+        return Err(StorageError::Status(StorageStatus::Corrupt(
+            "missing or ambiguous retained identity/database pair".into(),
+        )));
+    }
+    let (identity_suffix, identity_path) = identities.into_iter().next().unwrap();
+    let (database_suffix, _) = databases.into_iter().next().unwrap();
+    if identity_suffix != database_suffix {
+        return Err(StorageError::Status(StorageStatus::Corrupt(
+            "retained identity and database suffixes do not match".into(),
+        )));
+    }
+    let identity = read_identity(&identity_path)
+        .map_err(|error| StorageError::Status(inspection_error(error)))?;
+    let scratch = project
+        .work_storage_dir()
+        .join(format!(".retained-check-{}", random_id()?));
+    fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+    let checked = (|| -> Result<String, StorageError> {
+        for (source_prefix, destination_name) in [
+            ("work.db.retained-", "work.db"),
+            ("work.db-wal.retained-", "work.db-wal"),
+        ] {
+            let mut source_name = OsString::from(source_prefix);
+            source_name.push(OsStr::from_bytes(&identity_suffix));
+            let source = project.work_storage_dir().join(source_name);
+            if regular_file_or_absent(&source)? {
+                let mut source = File::from(
+                    openat(
+                        CWD,
+                        &source,
+                        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(io::Error::from)?,
+                );
+                if !source.metadata()?.is_file() {
+                    return Err(StorageError::Status(StorageStatus::Corrupt(
+                        "retained database component is not a regular file".into(),
+                    )));
+                }
+                let mut target = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(scratch.join(destination_name))?;
+                io::copy(&mut source, &mut target)?;
+            }
+        }
+        validated_database_identity(&scratch.join("work.db"))
+    })();
+    let _ = fs::remove_dir_all(&scratch);
+    let database_identity = checked?;
+    if database_identity != identity {
+        return Err(StorageError::Status(StorageStatus::IdentityMismatch));
+    }
+    Ok(identity)
+}
+
 fn inspect_database(database: &Path, marker: &str) -> StorageStatus {
     let connection = match Connection::open_with_flags(
         database,
@@ -1029,7 +1236,7 @@ fn create_recovery_marker(project: &Project) -> Result<(), StorageError> {
     let path = recovery_marker_path(project);
     match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
-            file.write_all(b"recreate in progress\n")?;
+            file.write_all(b"recovery in progress\n")?;
             file.sync_all()?;
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -1148,16 +1355,19 @@ fn read_identity(path: &Path) -> Result<String, StorageError> {
     let mut value = String::new();
     file.read_to_string(&mut value)?;
     let value = value.strip_suffix('\n').unwrap_or(&value);
-    if value.len() != 32
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
+    if !valid_store_id(value) {
         return Err(StorageError::InvalidArgument(
             "store identity is malformed".into(),
         ));
     }
     Ok(value.to_owned())
+}
+
+fn valid_store_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn random_id() -> Result<String, StorageError> {
