@@ -188,6 +188,14 @@ fn rejects_schema_tokens_and_references_before_preview() {
         (base.replace("{{change}}", "{{change"), "unmatched"),
         (base.replace("{{change}}", "plain"), "unused parameter"),
         (
+            "format_version: 1\nname: bad\nparameters: [change]\ndefaults:\n  model: '{{change}}'\nitems:\n  - key: task\n    title: Task\n    model: explicit\n".into(),
+            "unused parameter",
+        ),
+        (
+            "format_version: 1\nname: bad\nparameters: [change]\ndefaults:\n  thinking: '{{change}}'\nitems:\n  - key: task\n    title: Task\n    thinking: explicit\n".into(),
+            "unused parameter",
+        ),
+        (
             format!(
                 "{base}edges:\n  - {{from: \"local:task\", kind: depends_on, to: \"local:missing\"}}\n"
             ),

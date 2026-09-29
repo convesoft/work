@@ -759,9 +759,24 @@ fn decode_template(node: Node, file_stem: &str) -> Result<TemplateDefinition, St
     no_extra(&fields, "template")?;
     let mut used = BTreeSet::new();
     let declared: BTreeSet<_> = parameters.iter().map(String::as_str).collect();
-    for text in defaults.model.iter().chain(&defaults.thinking) {
-        validate_template_line(text, "hint default")?;
-        scan_tokens(text, &declared, &mut used)?;
+    for (default, inherited) in [
+        (
+            &defaults.model,
+            items.iter().any(|item| item.model.is_none()),
+        ),
+        (
+            &defaults.thinking,
+            items.iter().any(|item| item.thinking.is_none()),
+        ),
+    ] {
+        if let Some(text) = default {
+            validate_template_line(text, "hint default")?;
+            let mut default_uses = BTreeSet::new();
+            scan_tokens(text, &declared, &mut default_uses)?;
+            if inherited {
+                used.extend(default_uses);
+            }
+        }
     }
     for item in &items {
         validate_template_line(&item.title, "title")?;
