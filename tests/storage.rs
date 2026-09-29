@@ -736,6 +736,62 @@ fn missing_derived_foreign_key_is_reported_as_corrupt() {
 }
 
 #[test]
+fn unexpected_derived_trigger_cannot_delete_claims_during_reconciliation() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let mut storage = Storage::open(&project).unwrap();
+    storage
+        .reconcile(&project, &fixture.store(&fixture.checkout))
+        .unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'trigger-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection.execute_batch("CREATE TRIGGER erase_claims AFTER DELETE ON source_files BEGIN DELETE FROM claims; END;").unwrap();
+    drop(connection);
+    write_item(&fixture.checkout, FIRST, "Changed", "done", None);
+
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail) if detail.contains("unexpected trigger erase_claims")
+    ));
+    assert!(matches!(
+        storage.reconcile(&project, &fixture.store(&fixture.checkout)),
+        Err(StorageError::Status(StorageStatus::Corrupt(detail)))
+            if detail.contains("unexpected trigger erase_claims")
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "trigger-token"
+    );
+    assert_eq!(indexed_state(&connection, &project, FIRST).0, "Original");
+    connection
+        .execute_batch("DROP TRIGGER erase_claims")
+        .unwrap();
+    drop(connection);
+    storage
+        .reconcile(&project, &fixture.store(&fixture.checkout))
+        .unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(indexed_state(&connection, &project, FIRST).0, "Changed");
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "trigger-token"
+    );
+}
+
+#[test]
 fn restore_includes_claim_committed_only_to_backup_wal() {
     let fixture = Fixture::new();
     let project = fixture.project(&fixture.checkout);
@@ -983,6 +1039,64 @@ fn migration_retains_backup_and_rolls_back_failed_schema_change() {
             .query_row::<i64, _, _>("SELECT count(*) FROM source_files", [], |row| row.get(0))
             .unwrap(),
         old_source_count
+    );
+}
+
+#[test]
+fn schema_zero_migration_drops_derived_trigger_without_deleting_claims() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let mut storage = Storage::open(&project).unwrap();
+    storage
+        .reconcile(&project, &fixture.store(&fixture.checkout))
+        .unwrap();
+    drop(storage);
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'migration-trigger-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    connection.execute_batch("CREATE TRIGGER erase_claims_on_drop AFTER DELETE ON source_files BEGIN DELETE FROM claims; END; PRAGMA user_version=0").unwrap();
+    drop(connection);
+    assert_eq!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::UnsupportedSchema(0)
+    );
+
+    let migrated = Storage::migrate(&project).unwrap();
+    assert!(migrated.backup_path.exists());
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "migration-trigger-token"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    let backup = Connection::open(migrated.backup_path).unwrap();
+    assert_eq!(
+        backup
+            .query_row::<i64, _, _>(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
     );
 }
 

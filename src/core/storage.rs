@@ -275,6 +275,7 @@ impl Storage {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_no_triggers(&tx).map_err(|error| StorageError::Status(inspection_error(error)))?;
         tx.execute(
             "INSERT OR IGNORE INTO views(root, generation) VALUES (?1, 0)",
             params![root],
@@ -599,6 +600,7 @@ fn drop_derived_tables(tx: &Transaction<'_>) -> Result<(), StorageError> {
 
 fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
     validate_coordination_schema(connection)?;
+    validate_no_triggers(connection)?;
     const VIEWS: &[(&str, &str, bool, i64)] = &[
         ("root", "BLOB", false, 1),
         ("generation", "INTEGER", true, 0),
@@ -691,6 +693,22 @@ fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
     if violations != 0 {
         return Err(StorageError::InvalidArgument(format!(
             "schema contains {violations} foreign key violation(s)"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_no_triggers(connection: &Connection) -> Result<(), StorageError> {
+    let trigger: Option<String> = connection
+        .query_row(
+            "SELECT name FROM sqlite_schema WHERE type = 'trigger' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(name) = trigger {
+        return Err(StorageError::InvalidArgument(format!(
+            "schema contains unexpected trigger {name}"
         )));
     }
     Ok(())
