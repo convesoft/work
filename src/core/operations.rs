@@ -147,6 +147,9 @@ impl DurableOperations {
             )));
         }
         let target_path = self.item_path(id);
+        if original.path != target_path && store.files.iter().any(|file| file.path == target_path) {
+            return self.resume_filename_repair(id, &raw, &store, original);
+        }
         let graph_before = ItemGraph::from_store(&store);
         if original.is_valid()
             && !graph_before
@@ -215,19 +218,7 @@ impl DurableOperations {
                 },
             )?;
             self.sync_items()?;
-            let archived = FileFingerprint::capture(&staged);
-            let archived_matches = archived.as_ref().is_ok_and(|current| {
-                original
-                    .fingerprint
-                    .as_ref()
-                    .is_some_and(|prior| prior.same_identity_and_mode(current))
-                    && if current.mode & 0o170000 != 0o100000 {
-                        true
-                    } else {
-                        fs::read(&staged).is_ok_and(|bytes| bytes == original.raw)
-                    }
-            });
-            if !archived_matches {
+            if !archive_matches(original, &staged) {
                 return Err(OperationError::Conflict(format!(
                     "source changed during filename repair; recovery copy retained at {}",
                     staged.display()
@@ -510,6 +501,9 @@ impl DurableOperations {
         store: &'a ItemStore,
         id: &str,
     ) -> Result<&'a ItemFile, OperationError> {
+        if let Some(file) = self.interrupted_filename_source(store, id) {
+            return Ok(file);
+        }
         if let Some(file) = store.files.iter().find(|f| f.path == self.item_path(id)) {
             return Ok(file);
         }
@@ -525,6 +519,102 @@ impl DurableOperations {
                 "multiple source files claim item {id}"
             ))),
         }
+    }
+    fn interrupted_filename_source<'a>(
+        &self,
+        store: &'a ItemStore,
+        id: &str,
+    ) -> Option<&'a ItemFile> {
+        let matching: Vec<_> = store
+            .files
+            .iter()
+            .filter(|file| file.header.as_ref().is_some_and(|header| header.id == id))
+            .collect();
+        let [first, second] = matching.as_slice() else {
+            return None;
+        };
+        let target = self.item_path(id);
+        let (canonical, old) = if first.path == target {
+            (*first, *second)
+        } else if second.path == target {
+            (*second, *first)
+        } else {
+            return None;
+        };
+        if canonical
+            .diagnostics
+            .iter()
+            .all(|d| d.message == format!("duplicate item ID {id}"))
+            && old.path != target
+            && old
+                .diagnostics
+                .iter()
+                .any(|d| d.message == format!("filename must be {id}.md"))
+        {
+            Some(old)
+        } else {
+            None
+        }
+    }
+    fn resume_filename_repair(
+        &self,
+        id: &str,
+        raw: &[u8],
+        store: &ItemStore,
+        old: &ItemFile,
+    ) -> Result<RawInspection, OperationError> {
+        let canonical = store
+            .files
+            .iter()
+            .find(|file| file.path == self.item_path(id))
+            .ok_or_else(|| OperationError::Conflict("canonical item disappeared".into()))?;
+        if raw != canonical.raw {
+            return Err(OperationError::Conflict(
+                "retry source differs from the already published canonical item".into(),
+            ));
+        }
+        let before = ItemGraph::from_store(store);
+        let candidate = ItemStore::from_candidate_files(
+            store
+                .files
+                .iter()
+                .filter(|file| file.path != old.path)
+                .cloned()
+                .collect(),
+        );
+        let new_diagnostics: Vec<_> = ItemGraph::from_store(&candidate)
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| !before.diagnostics().contains(diagnostic))
+            .cloned()
+            .collect();
+        if !new_diagnostics.is_empty() {
+            return Err(OperationError::InvalidCandidate(new_diagnostics));
+        }
+        self.check_snapshot(store)?;
+        for _ in 0..16 {
+            let recovery = self
+                .root
+                .join(".work/items")
+                .join(format!(".operation-{}", new_id()?));
+            match renameat_with(CWD, &old.path, CWD, &recovery, RenameFlags::NOREPLACE) {
+                Ok(()) => {
+                    self.sync_items()?;
+                    if !archive_matches(old, &recovery) {
+                        return Err(OperationError::Conflict(format!(
+                            "source changed during filename repair; recovery copy retained at {}",
+                            recovery.display()
+                        )));
+                    }
+                    return self.inspect_raw(id);
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(error) => return Err(OperationError::Io(io::Error::from(error))),
+            }
+        }
+        Err(OperationError::Conflict(
+            "could not reserve filename repair recovery path".into(),
+        ))
     }
     fn lock(&self) -> Result<File, OperationError> {
         let work_dir = openat(
@@ -914,6 +1004,19 @@ fn source_mode(file: &ItemFile) -> Result<u32, OperationError> {
         fingerprint.mode & 0o7777
     } else {
         0o600
+    })
+}
+fn archive_matches(original: &ItemFile, archived_path: &Path) -> bool {
+    FileFingerprint::capture(archived_path).is_ok_and(|current| {
+        original
+            .fingerprint
+            .as_ref()
+            .is_some_and(|prior| prior.same_identity_and_mode(&current))
+            && if current.mode & 0o170000 != 0o100000 {
+                true
+            } else {
+                fs::read(archived_path).is_ok_and(|bytes| bytes == original.raw)
+            }
     })
 }
 fn new_id() -> Result<String, OperationError> {

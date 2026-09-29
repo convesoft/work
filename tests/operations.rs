@@ -331,6 +331,33 @@ fn repair_canonicalizes_a_misnamed_item_without_discarding_source() {
 }
 
 #[test]
+fn interrupted_filename_repair_can_be_inspected_and_resumed() {
+    let f = Fixture::new();
+    f.write(1, "", b"Old body");
+    let wrong = f.0.join(".work/items/wrong.md");
+    fs::rename(f.path(&id(1)), &wrong).unwrap();
+    let canonical = format!(
+        "---\nformat_version: 1\nid: \"{}\"\ntitle: Repaired\nstate: open\n---\nNew body",
+        id(1)
+    )
+    .into_bytes();
+    fs::write(f.path(&id(1)), &canonical).unwrap();
+    let ops = f.ops();
+    assert_eq!(ops.inspect_raw(&id(1)).unwrap().file.path, wrong);
+    assert!(matches!(
+        ops.repair(&id(1), fs::read(&wrong).unwrap()),
+        Err(OperationError::Conflict(_))
+    ));
+    assert!(wrong.exists());
+    let result = ops.repair(&id(1), canonical.clone()).unwrap();
+    assert_eq!(result.file.path, f.path(&id(1)));
+    assert!(result.graph_diagnostics.is_empty());
+    assert_eq!(fs::read(f.path(&id(1))).unwrap(), canonical);
+    assert!(!wrong.exists());
+    assert!(ItemStore::load_from_root(&f.0).unwrap().is_valid());
+}
+
+#[test]
 fn repair_rejects_identity_rewrite_with_another_claim() {
     let f = Fixture::new();
     f.write(1, "", b"Body one");
