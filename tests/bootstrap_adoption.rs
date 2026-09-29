@@ -1,5 +1,6 @@
 //! Adoption checks against disposable Git copies of the authored bootstrap backlog.
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,28 @@ fn git(root: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+fn canonical_item_name(name: &OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_suffix(".md"))
+        .is_some_and(|id| {
+            let bytes = id.as_bytes();
+            bytes.len() == 32
+                && bytes[12] == b'4'
+                && matches!(bytes[16], b'8' | b'9' | b'a' | b'b')
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+fn copy_backlog_items(source: &Path, destination: &Path) {
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        if !canonical_item_name(&entry.file_name()) {
+            continue;
+        }
+        fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
+    }
+}
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -46,16 +69,10 @@ impl Fixture {
         fs::create_dir(&root).unwrap();
         git(&root, &["init", "--initial-branch=main"]);
         fs::create_dir_all(root.join(".work/items")).unwrap();
-        for entry in
-            fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/items")).unwrap()
-        {
-            let entry = entry.unwrap();
-            fs::copy(
-                entry.path(),
-                root.join(".work/items").join(entry.file_name()),
-            )
-            .unwrap();
-        }
+        copy_backlog_items(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/items"),
+            &root.join(".work/items"),
+        );
         // Model the handoff to item 7 independently of live backlog progress.
         for (index, id) in STEPS.iter().enumerate() {
             let path = root.join(".work/items").join(format!("{id}.md"));
@@ -100,6 +117,30 @@ impl Fixture {
             })
             .collect()
     }
+}
+
+#[test]
+fn copied_backlog_ignores_recovery_entries() {
+    let root = std::env::temp_dir().join(format!(
+        "work-backlog-copy-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let source = root.join("source");
+    let destination = root.join("destination");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir(&destination).unwrap();
+    let canonical = format!("{}.md", STEPS[6]);
+    fs::write(source.join(&canonical), b"canonical item").unwrap();
+    fs::write(source.join(".operation-recovery"), b"recovery copy").unwrap();
+    fs::write(source.join("notes.md"), b"notes").unwrap();
+    copy_backlog_items(&source, &destination);
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
+    assert_eq!(
+        fs::read(destination.join(canonical)).unwrap(),
+        b"canonical item"
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn with_fixture_state(source: &str, state: &str) -> String {
