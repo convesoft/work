@@ -58,7 +58,7 @@ Two agents in linked worktrees attempt to claim the same repository work item. E
 :::mara scenario SCN-REBUILD-INDEX
 :mid: 01M3KAQ0RDPQANNG3VGK9CKKCN
 :title: Recover derived state from durable files
-:status: draft
+:status: accepted
 :contributes_to: GOAL-QUIET-HISTORY
 :involves: ACT-OPERATOR
 

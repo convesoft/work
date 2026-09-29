@@ -124,6 +124,12 @@ const TOOL_NAMES: &[&str] = &[
     "item_repair",
     "relation_add",
     "relation_remove",
+    "storage_inspect",
+    "storage_rebuild",
+    "storage_backup",
+    "storage_migrate",
+    "storage_restore",
+    "storage_recreate",
 ];
 
 fn tool(name: &str, properties: Value, required: &[&str], description: &str) -> Value {
@@ -185,7 +191,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "item_ready",
-            common,
+            common.clone(),
             &[],
             "List open executable manual items whose lifecycle prerequisites are resolved. Readiness does not claim or execute work.",
         ),
@@ -224,6 +230,42 @@ fn tools() -> Vec<Value> {
             json!({"worktree":s,"source":s,"kind":{"type":"string","enum":["parent","depends_on","related","discovered_from"]},"target":s}),
             &["source", "kind", "target"],
             "Remove an existing relation. Parent and depends_on use the authored child or dependent as source; related may be removed from either endpoint.",
+        ),
+        tool(
+            "storage_inspect",
+            common.clone(),
+            &[],
+            "Inspect shared coordination storage without creating or changing it.",
+        ),
+        tool(
+            "storage_rebuild",
+            common.clone(),
+            &[],
+            "Rebuild derived indexes for the selected checkout without changing claims or runtime records.",
+        ),
+        tool(
+            "storage_backup",
+            common.clone(),
+            &[],
+            "Retain a consistent backup of shared coordination storage.",
+        ),
+        tool(
+            "storage_migrate",
+            common.clone(),
+            &[],
+            "Back up and transactionally migrate a recognized older shared storage schema.",
+        ),
+        tool(
+            "storage_restore",
+            json!({"worktree":s,"backup_path":s}),
+            &["backup_path"],
+            "Explicitly restore a verified storage backup with active execution stopped.",
+        ),
+        tool(
+            "storage_recreate",
+            common,
+            &[],
+            "Explicitly recreate a diagnosed faulty store with active execution stopped; lost claims cannot be reconstructed.",
         ),
     ]
 }
@@ -378,7 +420,20 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
             json!({"worktree_root":cli::encode_path(&project.worktree_root),"git_common_dir":cli::encode_path(&project.git_common_dir)}),
         ),
         "item_list" => Ok(json!({"items":cli::items_value(&project,&ops.list()?)?})),
-        "item_ready" => Ok(json!({"items":cli::items_value(&project,&ops.ready()?)?})),
+        "item_ready" => cli::ready_value(&project, &ops),
+        "storage_inspect" => cli::storage_command(&project, "inspect", &[]),
+        "storage_rebuild" => cli::storage_command(&project, "rebuild", &[]),
+        "storage_backup" => cli::storage_command(&project, "backup", &[]),
+        "storage_migrate" => cli::storage_command(&project, "migrate", &[]),
+        "storage_recreate" => cli::storage_command(&project, "recreate", &[]),
+        "storage_restore" => cli::storage_command(
+            &project,
+            "restore",
+            &[
+                "--backup".to_owned(),
+                required(args, "backup_path").to_owned(),
+            ],
+        ),
         "item_diagnose" => {
             let store =
                 ItemStore::load(&project).map_err(|e| CliError::new("io", e.to_string()))?;

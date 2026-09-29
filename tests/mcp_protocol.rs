@@ -170,13 +170,19 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 19);
     for name in [
         "item_create",
         "item_ready",
         "relation_add",
         "item_close",
         "item_repair",
+        "storage_inspect",
+        "storage_rebuild",
+        "storage_backup",
+        "storage_migrate",
+        "storage_restore",
+        "storage_recreate",
     ] {
         assert!(tools.iter().any(|tool| tool["name"] == name));
     }
@@ -519,5 +525,47 @@ fn explicit_worktree_selects_other_durable_view() {
     git(
         &control.0,
         &["worktree", "remove", "--force", selected.to_str().unwrap()],
+    );
+}
+
+#[test]
+fn storage_recovery_warning_and_rebuild_match_cli_and_mcp() {
+    let fixture = Fixture::new();
+    let id = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+    fixture.write(id, "");
+    let mut client = Client::new(&fixture.0);
+    assert_eq!(
+        client.ok("storage_inspect", json!({}))["storage"]["status"],
+        "uninitialized"
+    );
+    assert_eq!(
+        client.ok("item_ready", json!({})),
+        fixture.cli(&["item", "ready"])["result"]
+    );
+    let inspection = client.ok("storage_inspect", json!({}));
+    assert_eq!(inspection["storage"]["status"], "ready");
+    let database = PathBuf::from(inspection["storage"]["database_path"].as_str().unwrap());
+    let rebuilt = client.ok("storage_rebuild", json!({}));
+    let cli_rebuilt = fixture.cli(&["storage", "rebuild"])["result"].clone();
+    assert_eq!(rebuilt["view_root"], cli_rebuilt["view_root"]);
+    assert_eq!(rebuilt["changed_files"], cli_rebuilt["changed_files"]);
+    fs::remove_file(&database).unwrap();
+    assert_eq!(
+        client.ok("storage_inspect", json!({}))["storage"]["status"],
+        "missing_database"
+    );
+    let ready = client.ok("item_ready", json!({}));
+    assert_eq!(ready, fixture.cli(&["item", "ready"])["result"]);
+    assert_eq!(ready["items"][0]["id"], id);
+    assert_eq!(ready["storage_warning"]["code"], "missing_database");
+    assert_eq!(
+        client.ok("storage_recreate", json!({}))["lost_coordination"],
+        true
+    );
+    assert!(
+        client
+            .ok("item_ready", json!({}))
+            .get("storage_warning")
+            .is_none()
     );
 }

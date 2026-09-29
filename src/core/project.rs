@@ -13,6 +13,21 @@ pub struct Project {
     pub git_common_dir: PathBuf,
 }
 
+impl Project {
+    /// Unversioned storage shared by every linked worktree of this repository.
+    pub fn work_storage_dir(&self) -> PathBuf {
+        self.git_common_dir.join("work")
+    }
+
+    pub fn work_database_path(&self) -> PathBuf {
+        self.work_storage_dir().join("work.db")
+    }
+
+    pub fn work_store_identity_path(&self) -> PathBuf {
+        self.work_storage_dir().join("store.id")
+    }
+}
+
 #[derive(Debug)]
 pub enum DiscoveryError {
     UnsupportedProject(PathBuf),

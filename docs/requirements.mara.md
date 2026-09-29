@@ -109,7 +109,7 @@ Claims shall expose their owner and recorded timestamps. The initial version sha
 :::mara requirement REQ-INDEX-REBUILD
 :mid: 01M3KAQ0TWGHT4CWF6D8ZMZ166
 :title: Rebuild derived indexes without destroying runtime state
-:status: draft
+:status: accepted
 :kind: quality
 :derives_from: SCN-REBUILD-INDEX
 
