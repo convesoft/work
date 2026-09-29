@@ -385,19 +385,20 @@ impl DurableOperations {
         body: Vec<u8>,
         change: MetadataChange,
     ) -> Result<Inspection, OperationError> {
-        self.create_with_hook(title, body, change, || Ok(()))
+        self.create_with_hooks(title, body, change, |_| Ok(()), || Ok(()))
     }
 
-    fn create_with_hook(
+    fn create_with_hooks(
         &self,
         title: String,
         body: Vec<u8>,
         change: MetadataChange,
+        before_publish: impl Fn(&str) -> Result<(), OperationError>,
         after_publish: impl Fn() -> Result<(), OperationError>,
     ) -> Result<Inspection, OperationError> {
         let lock = self.lock()?;
         let items = self.items_dir(&lock)?;
-        let store = self.load_from_dir(&items)?;
+        let mut store = self.load_from_dir(&items)?;
         require_valid(&store)?;
         if std::str::from_utf8(&body).is_err() {
             return Err(OperationError::InvalidArgument("body must be UTF-8".into()));
@@ -418,6 +419,10 @@ impl DurableOperations {
                 remove_stage(&items, &staged);
                 return Err(error);
             }
+            if let Err(error) = before_publish(&id) {
+                remove_stage(&items, &staged);
+                return Err(error);
+            }
             let path = self.item_path(&id);
             match rename_in_dir(&items, &staged, &path, RenameFlags::NOREPLACE) {
                 Ok(()) => {
@@ -425,7 +430,7 @@ impl DurableOperations {
                         after_publish()?;
                         self.sync_items(&items)?;
                         self.ensure_selected_dir(&lock, &items)?;
-                        inspect_store(&self.load_from_dir(&items)?, &id)
+                        self.inspect_valid_from_dir(&items, &id)
                     })()
                     .map_err(|cause| OperationError::Published {
                         id,
@@ -435,6 +440,8 @@ impl DurableOperations {
                 }
                 Err(error) if error == rustix::io::Errno::EXIST => {
                     remove_stage(&items, &staged);
+                    store = self.load_from_dir(&items)?;
+                    require_valid(&store)?;
                     continue;
                 }
                 Err(error) => {
@@ -661,13 +668,9 @@ impl DurableOperations {
         self.sync_items(&items)
             .map_err(|error| with_recovery(error, &staged))?;
         self.ensure_selected_dir_after_publication(&lock, &items, &staged)?;
-        let mut result = inspect_store(
-            &self
-                .load_from_dir(&items)
-                .map_err(|error| with_recovery(error, &staged))?,
-            &id,
-        )
-        .map_err(|error| with_recovery(error, &staged))?;
+        let mut result = self
+            .inspect_valid_from_dir(&items, &id)
+            .map_err(|error| with_recovery(error, &staged))?;
         result.recovery_path = Some(staged);
         Ok(result)
     }
@@ -770,6 +773,15 @@ impl DurableOperations {
             recovery_path: None,
             additional_recovery_paths: Vec::new(),
         })
+    }
+    fn inspect_valid_from_dir(
+        &self,
+        items: &OwnedFd,
+        id: &str,
+    ) -> Result<Inspection, OperationError> {
+        let store = self.load_from_dir(items)?;
+        require_valid(&store)?;
+        inspect_store(&store, id)
     }
     fn archive_shadow(
         &self,
@@ -1898,10 +1910,11 @@ mod tests {
         let (root, _id) = fixture();
         let ops = DurableOperations::new(&root);
         let error = ops
-            .create_with_hook(
+            .create_with_hooks(
                 "New item".into(),
                 b"Body".to_vec(),
                 MetadataChange::default(),
+                |_| Ok(()),
                 || {
                     Err(OperationError::Io(io::Error::other(
                         "injected sync failure",
@@ -1917,6 +1930,57 @@ mod tests {
             Some(&b"Body"[..])
         );
         assert!(error.to_string().contains(published_id));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_reloads_store_after_id_collision() {
+        let (root, _id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let collided = std::sync::atomic::AtomicBool::new(false);
+        let created = ops
+            .create_with_hooks(
+                "New item".into(),
+                b"Body".to_vec(),
+                MetadataChange::default(),
+                |id| {
+                    if !collided.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        fs::write(
+                            ops.item_path(id),
+                            serialize(&default_header(id.into(), "Competing".into()), b"Other"),
+                        )?;
+                    }
+                    Ok(())
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert!(collided.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(created.file.body.as_deref(), Some(&b"Body"[..]));
+        assert_eq!(ops.list().unwrap().len(), 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_reports_invalid_graph_after_publication() {
+        let (root, existing_id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let error = ops
+            .create_with_hooks(
+                "New item".into(),
+                b"Body".to_vec(),
+                MetadataChange::default(),
+                |_| Ok(()),
+                || {
+                    fs::write(ops.item_path(&existing_id), b"broken")?;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_source");
+        let (published_id, path) = error.published_item().unwrap();
+        assert_eq!(path, ops.item_path(published_id));
+        assert!(path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
