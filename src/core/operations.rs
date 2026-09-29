@@ -289,7 +289,14 @@ impl DurableOperations {
         }
         let target_path = self.item_path(id);
         if original.path != target_path && store.files.iter().any(|file| file.path == target_path) {
-            return self.resume_filename_repair(lock, items, id, raw, store, original);
+            return self.resume_filename_repair(
+                lock,
+                items,
+                id,
+                raw,
+                (store, original),
+                after_canonical_publish,
+            );
         }
         let graph_before = ItemGraph::from_store(store);
         if original.is_valid()
@@ -918,9 +925,10 @@ impl DurableOperations {
         items: &OwnedFd,
         id: &str,
         raw: &[u8],
-        store: &ItemStore,
-        old: &ItemFile,
+        source: (&ItemStore, &ItemFile),
+        before_archive: impl FnOnce() -> Result<(), OperationError>,
     ) -> Result<RawInspection, OperationError> {
+        let (store, old) = source;
         let canonical = store
             .files
             .iter()
@@ -931,54 +939,63 @@ impl DurableOperations {
                 "retry source differs from the already published canonical item".into(),
             ));
         }
-        let before = ItemGraph::from_store(store);
-        let candidate = ItemStore::from_candidate_files(
-            store
-                .files
+        (|| {
+            let before = ItemGraph::from_store(store);
+            let candidate = ItemStore::from_candidate_files(
+                store
+                    .files
+                    .iter()
+                    .filter(|file| file.path != old.path)
+                    .cloned()
+                    .collect(),
+            );
+            let new_diagnostics: Vec<_> = ItemGraph::from_store(&candidate)
+                .diagnostics()
                 .iter()
-                .filter(|file| file.path != old.path)
+                .filter(|diagnostic| !before.diagnostics().contains(diagnostic))
                 .cloned()
-                .collect(),
-        );
-        let new_diagnostics: Vec<_> = ItemGraph::from_store(&candidate)
-            .diagnostics()
-            .iter()
-            .filter(|diagnostic| !before.diagnostics().contains(diagnostic))
-            .cloned()
-            .collect();
-        if !new_diagnostics.is_empty() {
-            return Err(OperationError::InvalidCandidate(new_diagnostics));
-        }
-        self.check_snapshot(lock, items, store)?;
-        for _ in 0..16 {
-            let recovery = self
-                .root
-                .join(".work/items")
-                .join(format!(".operation-{}", new_id()?));
-            match rename_in_dir(items, &old.path, &recovery, RenameFlags::NOREPLACE) {
-                Ok(()) => {
-                    self.sync_items(items)
-                        .map_err(|error| with_recovery(error, &recovery))?;
-                    if !archive_matches(items, old, &recovery) {
-                        return Err(OperationError::Conflict(format!(
-                            "source changed during filename repair; recovery copy retained at {}",
-                            recovery.display()
-                        )));
-                    }
-                    self.ensure_selected_dir_after_publication(lock, items, &recovery)?;
-                    let mut result = self
-                        .inspect_raw_from_dir(items, id)
-                        .map_err(|error| with_recovery(error, &recovery))?;
-                    result.recovery_path = Some(recovery);
-                    return Ok(result);
-                }
-                Err(rustix::io::Errno::EXIST) => continue,
-                Err(error) => return Err(OperationError::Io(io::Error::from(error))),
+                .collect();
+            if !new_diagnostics.is_empty() {
+                return Err(OperationError::InvalidCandidate(new_diagnostics));
             }
-        }
-        Err(OperationError::Conflict(
-            "could not reserve filename repair recovery path".into(),
-        ))
+            self.check_snapshot(lock, items, store)?;
+            before_archive()?;
+            for _ in 0..16 {
+                let recovery = self
+                    .root
+                    .join(".work/items")
+                    .join(format!(".operation-{}", new_id()?));
+                match rename_in_dir(items, &old.path, &recovery, RenameFlags::NOREPLACE) {
+                    Ok(()) => {
+                        self.sync_items(items)
+                            .map_err(|error| with_recovery(error, &recovery))?;
+                        if !archive_matches(items, old, &recovery) {
+                            return Err(OperationError::Conflict(format!(
+                                "source changed during filename repair; recovery copy retained at {}",
+                                recovery.display()
+                            )));
+                        }
+                        self.ensure_selected_dir_after_publication(lock, items, &recovery)?;
+                        let mut result = self
+                            .inspect_raw_from_dir(items, id)
+                            .map_err(|error| with_recovery(error, &recovery))?;
+                        result.recovery_path = Some(recovery);
+                        return Ok(result);
+                    }
+                    Err(rustix::io::Errno::EXIST) => continue,
+                    Err(error) => return Err(OperationError::Io(io::Error::from(error))),
+                }
+            }
+            Err(OperationError::Conflict(
+                "could not reserve filename repair recovery path".into(),
+            ))
+        })()
+        .map_err(|cause| OperationError::Published {
+            id: id.to_owned(),
+            path: canonical.path.clone(),
+            previous_source_path: Some(old.path.clone()),
+            cause: Box::new(cause),
+        })
     }
     fn lock(&self) -> Result<OperationLock, OperationError> {
         let directory_flags =
@@ -1999,6 +2016,30 @@ mod tests {
         );
         assert_eq!(error.previous_source_path(), Some(old_path.as_path()));
         assert!(error.to_string().contains(old_path.to_str().unwrap()));
+        assert_eq!(fs::read(&canonical).unwrap(), replacement);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_filename_repair_retry_identifies_both_source_paths() {
+        let (root, id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let canonical = ops.item_path(&id);
+        let old_path = root.join(".work/items/wrong.md");
+        fs::copy(&canonical, &old_path).unwrap();
+        let replacement = fs::read(&canonical).unwrap();
+        let error = ops
+            .repair_with_hook(&id, replacement.clone(), || {
+                fs::remove_file(&old_path)?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "io");
+        assert_eq!(
+            error.published_item(),
+            Some((id.as_str(), canonical.as_path()))
+        );
+        assert_eq!(error.previous_source_path(), Some(old_path.as_path()));
         assert_eq!(fs::read(&canonical).unwrap(), replacement);
         fs::remove_dir_all(root).unwrap();
     }
