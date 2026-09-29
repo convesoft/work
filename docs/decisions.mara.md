@@ -77,7 +77,7 @@ Consequences: readiness must distinguish inherited explicit prerequisites from i
 :status: accepted
 :justifies: DES-INTERFACE-ADAPTERS
 
-Use @convesoft/work as the npm dispatcher and @convesoft/work-linux-x64-gnu, @convesoft/work-linux-arm64-gnu, and @convesoft/work-darwin-arm64 as native packages. Support x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, and aarch64-apple-darwin, matching Mara’s supported target platforms. npm trusted publishing identifies the convesoft/work GitHub repository and release.yml workflow without an npm environment-name restriction. GitHub release-environment protection is a separate required setting. Package identity and host choices are settled; the first release version, license, registry trust configuration, and GitHub environment configuration still require explicit confirmation before publication.
+Use @convesoft/work as the npm dispatcher and @convesoft/work-linux-x64-gnu, @convesoft/work-linux-arm64-gnu, and @convesoft/work-darwin-arm64 as native packages. Support x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, and aarch64-apple-darwin, matching Mara’s supported target platforms. The first candidate is 0.1.0-alpha.1 and is dual-licensed under MIT OR Apache-2.0. npm trusted publishing identifies the convesoft/work GitHub repository and release.yml workflow without an npm environment-name restriction. GitHub release-environment protection is a separate required setting. Registry trust configuration and GitHub environment protection require verification as actual server-side settings before publication.
 :::
 
 :::mara decision ADR-PETGRAPH
