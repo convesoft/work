@@ -6,6 +6,8 @@ completion: manual
 state: open
 priority: 2
 parent: "fba5815b224f4c74a194ec2be6dd5d90"
+model: "gpt-6-sol"
+thinking: "high"
 ---
 
 ## Scope
