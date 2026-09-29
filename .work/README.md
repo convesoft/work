@@ -7,10 +7,10 @@ These Git-tracked Work items coordinate delivery for this repository. Mara owns 
 | Scope | Item | Status and purpose |
 | --- | --- | --- |
 | Repository delivery | [w-ee7bf41f](items/ee7bf41fb2e64323b9283a1716411e41.md) | Root aggregate for version scopes |
-| `0.1.0-alpha.1` | [w-ce11f17d](items/ce11f17d361343b9bd1a9a6059aeb76d.md) | First usable CLI/MCP loop complete; release preparation open |
-| `0.1.0-beta.1` | [w-abf475b5](items/abf475b5d09948deb3928341404d4fcb.md) | Remaining accepted initial capabilities and a separate beta release item |
+| `0.1.0-alpha.1` | [w-ce11f17d](items/ce11f17d361343b9bd1a9a6059aeb76d.md) | First usable CLI/MCP loop delivered and alpha published |
+| `0.1.0-beta.1` | [w-abf475b5](items/abf475b5d09948deb3928341404d4fcb.md) | Remaining accepted initial capabilities; implementation work is ready |
 
-The version labels are planning targets. Each release item selects the actual publication version. Beta depends on the completed alpha scope, so the next globally ready item is alpha release preparation. Aggregate items have `completion: children` and derive their status from their children; they are not claims or executor sessions.
+The alpha was published as `0.1.0-alpha.1`; beta remains a planning target until its release item selects the actual version. Beta depends on the now-complete alpha scope. Aggregate items have `completion: children` and derive their status from their children; they are not claims or executor sessions.
 
 ### First alpha
 
@@ -26,7 +26,7 @@ The version labels are planning targets. Each release item selects the actual pu
 | 7 | [w-e1121992](items/e1121992e0574b4b9b163b85e17ec601.md) | Verify bootstrap adoption and document the first usable loop |
 | Release | [w-74c22e40](items/74c22e40cbc249229f86e355a663a942.md) | Prepare and verify the first alpha after the aggregate completes |
 
-The seven implementation items are done after their merged PRs. The alpha release item remains open and depends on the implementation aggregate. See [delivery conventions](../docs/delivery.mara.md) for its evidence and publication requirements.
+The seven implementation items are done after their merged PRs. The alpha release item is done with [publication evidence](items/74c22e40cbc249229f86e355a663a942.md). See [delivery conventions](../docs/delivery.mara.md) for the release process.
 
 ### First beta
 
