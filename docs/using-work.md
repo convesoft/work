@@ -2,7 +2,9 @@
 
 Work reads version-1 files directly from `.work/items/<full-id>.md` in the selected Git checkout. Existing authored files need no import or ID migration. Their Markdown bodies are opaque: metadata edits, relation changes, close, and reopen preserve the body bytes. Work may normalize the YAML header and retain hidden recovery copies when replacing a file. Keep `.work/items/` under Git and review intended item changes before committing them.
 
-Build the current checkout with `cargo build --locked`; run `target/debug/work` in the commands below (or substitute `cargo run --locked --`). No package is published yet. Run `work --help` or `work --json --help` for the installed executable's command list.
+The commands below are examples for this repository's backlog. Consumers can model their own items and dependencies, or use independent items without a workflow. The [Work skill](../skills/work/SKILL.md) gives agents the same basic operation guidance.
+
+Build the current checkout with `cargo build --locked`; run `target/debug/work` in the commands below (or substitute `cargo run --locked --`). No package is published yet. Run `work --help` for the command list, then `work item --help` or `work item COMMAND --help` for detail. `--json` returns the same help inside a structured result.
 
 ## Inspect and advance the backlog
 
