@@ -163,7 +163,7 @@ impl DurableOperations {
         }
         let target_path = self.item_path(id);
         if original.path != target_path && store.files.iter().any(|file| file.path == target_path) {
-            return self.resume_filename_repair(&items, id, &raw, &store, original);
+            return self.resume_filename_repair(&lock, &items, id, &raw, &store, original);
         }
         let graph_before = ItemGraph::from_store(&store);
         if original.is_valid()
@@ -207,7 +207,7 @@ impl DurableOperations {
             return Err(OperationError::InvalidCandidate(new_diagnostics));
         }
         let staged = self.stage_with_mode(&items, &raw, Some(source_mode(original)?))?;
-        if let Err(error) = self.check_snapshot(&items, &store) {
+        if let Err(error) = self.check_snapshot(&lock, &items, &store) {
             remove_stage(&items, &staged);
             return Err(error);
         }
@@ -225,7 +225,8 @@ impl DurableOperations {
                     return Err(OperationError::Io(io::Error::from(error)));
                 }
             }
-            self.sync_items(&items)?;
+            self.sync_items(&items)
+                .map_err(|error| with_recovery(error, &original.path))?;
             rename_in_dir(&items, &original.path, &staged, RenameFlags::NOREPLACE).map_err(
                 |error| {
                     OperationError::Io(io::Error::other(format!(
@@ -233,27 +234,33 @@ impl DurableOperations {
                     )))
                 },
             )?;
-            self.sync_items(&items)?;
+            self.sync_items(&items)
+                .map_err(|error| with_recovery(error, &staged))?;
             if !archive_matches(&items, original, &staged) {
                 return Err(OperationError::Conflict(format!(
                     "source changed during filename repair; recovery copy retained at {}",
                     staged.display()
                 )));
             }
-            self.ensure_selected_dir_after_publication(&items, &staged)?;
-            let mut result = self.inspect_raw_from_dir(&items, id)?;
+            self.ensure_selected_dir_after_publication(&lock, &items, &staged)?;
+            let mut result = self
+                .inspect_raw_from_dir(&items, id)
+                .map_err(|error| with_recovery(error, &staged))?;
             result.recovery_path = Some(staged);
             return Ok(result);
         }
         let published = fingerprint_at(&items, &staged)?;
         if let Err(error) = rename_in_dir(&items, &staged, &original.path, RenameFlags::EXCHANGE) {
             remove_stage(&items, &staged);
-            return Err(OperationError::Io(io::Error::from(error)));
+            return Err(exchange_error(error));
         }
         self.verify_exchange(&items, &store, original, &staged, &raw, &published)?;
-        self.sync_items(&items)?;
-        self.ensure_selected_dir_after_publication(&items, &staged)?;
-        let mut result = self.inspect_raw_from_dir(&items, id)?;
+        self.sync_items(&items)
+            .map_err(|error| with_recovery(error, &staged))?;
+        self.ensure_selected_dir_after_publication(&lock, &items, &staged)?;
+        let mut result = self
+            .inspect_raw_from_dir(&items, id)
+            .map_err(|error| with_recovery(error, &staged))?;
         result.recovery_path = Some(staged);
         Ok(result)
     }
@@ -301,7 +308,7 @@ impl DurableOperations {
             let candidate = candidate_store(&store, &self.item_path(&id), raw.clone())?;
             require_candidate(&candidate)?;
             let staged = self.stage_with_mode(&items, &raw, None)?;
-            if let Err(error) = self.check_snapshot(&items, &store) {
+            if let Err(error) = self.check_snapshot(&lock, &items, &store) {
                 remove_stage(&items, &staged);
                 return Err(error);
             }
@@ -309,7 +316,7 @@ impl DurableOperations {
             match rename_in_dir(&items, &staged, &path, RenameFlags::NOREPLACE) {
                 Ok(()) => {
                     self.sync_items(&items)?;
-                    self.ensure_selected_dir(&items)?;
+                    self.ensure_selected_dir(&lock, &items)?;
                     return inspect_store(&self.load_from_dir(&items)?, &id);
                 }
                 Err(error) if error == rustix::io::Errno::EXIST => {
@@ -496,7 +503,7 @@ impl DurableOperations {
             remove_stage(&items, &staged);
             return Err(error);
         }
-        if let Err(error) = self.check_snapshot(&items, &store) {
+        if let Err(error) = self.check_snapshot(&lock, &items, &store) {
             remove_stage(&items, &staged);
             return Err(error);
         }
@@ -504,12 +511,19 @@ impl DurableOperations {
         let published = fingerprint_at(&items, &staged)?;
         if let Err(error) = rename_in_dir(&items, &staged, &source.path, RenameFlags::EXCHANGE) {
             remove_stage(&items, &staged);
-            return Err(OperationError::Io(io::Error::from(error)));
+            return Err(exchange_error(error));
         }
         self.verify_exchange(&items, &store, source, &staged, &raw, &published)?;
-        self.sync_items(&items)?;
-        self.ensure_selected_dir_after_publication(&items, &staged)?;
-        let mut result = inspect_store(&self.load_from_dir(&items)?, id)?;
+        self.sync_items(&items)
+            .map_err(|error| with_recovery(error, &staged))?;
+        self.ensure_selected_dir_after_publication(&lock, &items, &staged)?;
+        let mut result = inspect_store(
+            &self
+                .load_from_dir(&items)
+                .map_err(|error| with_recovery(error, &staged))?,
+            id,
+        )
+        .map_err(|error| with_recovery(error, &staged))?;
         result.recovery_path = Some(staged);
         Ok(result)
     }
@@ -525,7 +539,7 @@ impl DurableOperations {
             Mode::empty(),
         )
         .map_err(io::Error::from)?;
-        self.ensure_selected_dir(&items)?;
+        self.ensure_selected_dir(lock, &items)?;
         Ok(items)
     }
     fn load_from_dir(&self, items: &OwnedFd) -> Result<ItemStore, OperationError> {
@@ -534,10 +548,18 @@ impl DurableOperations {
             &self.root.join(".work/items"),
         )?)
     }
-    fn ensure_selected_dir(&self, items: &OwnedFd) -> Result<(), OperationError> {
+    fn ensure_selected_dir(
+        &self,
+        lock: &OperationLock,
+        items: &OwnedFd,
+    ) -> Result<(), OperationError> {
         let work = fs::symlink_metadata(self.root.join(".work"))
             .map_err(|_| OperationError::Conflict("work directory changed on disk".into()))?;
-        if !work.is_dir() {
+        let held_work = rustix::fs::fstat(&lock.work_dir).map_err(io::Error::from)?;
+        if !work.is_dir()
+            || work.dev() != held_work.st_dev as u64
+            || work.ino() != held_work.st_ino as u64
+        {
             return Err(OperationError::Conflict(
                 "work directory changed on disk".into(),
             ));
@@ -557,10 +579,11 @@ impl DurableOperations {
     }
     fn ensure_selected_dir_after_publication(
         &self,
+        lock: &OperationLock,
         items: &OwnedFd,
         recovery: &Path,
     ) -> Result<(), OperationError> {
-        self.ensure_selected_dir(items).map_err(|_| {
+        self.ensure_selected_dir(lock, items).map_err(|_| {
             OperationError::Conflict(format!(
                 "items directory changed after publication; recovery copy {} remains in the originally opened items directory (former path {})",
                 entry_name(recovery).to_string_lossy(),
@@ -646,6 +669,7 @@ impl DurableOperations {
     }
     fn resume_filename_repair(
         &self,
+        lock: &OperationLock,
         items: &OwnedFd,
         id: &str,
         raw: &[u8],
@@ -680,7 +704,7 @@ impl DurableOperations {
         if !new_diagnostics.is_empty() {
             return Err(OperationError::InvalidCandidate(new_diagnostics));
         }
-        self.check_snapshot(items, store)?;
+        self.check_snapshot(lock, items, store)?;
         for _ in 0..16 {
             let recovery = self
                 .root
@@ -688,15 +712,18 @@ impl DurableOperations {
                 .join(format!(".operation-{}", new_id()?));
             match rename_in_dir(items, &old.path, &recovery, RenameFlags::NOREPLACE) {
                 Ok(()) => {
-                    self.sync_items(items)?;
+                    self.sync_items(items)
+                        .map_err(|error| with_recovery(error, &recovery))?;
                     if !archive_matches(items, old, &recovery) {
                         return Err(OperationError::Conflict(format!(
                             "source changed during filename repair; recovery copy retained at {}",
                             recovery.display()
                         )));
                     }
-                    self.ensure_selected_dir_after_publication(items, &recovery)?;
-                    let mut result = self.inspect_raw_from_dir(items, id)?;
+                    self.ensure_selected_dir_after_publication(lock, items, &recovery)?;
+                    let mut result = self
+                        .inspect_raw_from_dir(items, id)
+                        .map_err(|error| with_recovery(error, &recovery))?;
                     result.recovery_path = Some(recovery);
                     return Ok(result);
                 }
@@ -780,10 +807,15 @@ impl DurableOperations {
             "could not reserve staging path".into(),
         ))
     }
-    fn check_snapshot(&self, items: &OwnedFd, store: &ItemStore) -> Result<(), OperationError> {
-        self.ensure_selected_dir(items)?;
+    fn check_snapshot(
+        &self,
+        lock: &OperationLock,
+        items: &OwnedFd,
+        store: &ItemStore,
+    ) -> Result<(), OperationError> {
+        self.ensure_selected_dir(lock, items)?;
         let current = self.load_from_dir(items)?;
-        self.ensure_selected_dir(items)?;
+        self.ensure_selected_dir(lock, items)?;
         if current.files.len() != store.files.len()
             || current
                 .files
@@ -1161,6 +1193,25 @@ fn rename_in_dir(
 fn remove_stage(items: &OwnedFd, path: &Path) {
     let _ = unlinkat(items, entry_name(path), AtFlags::empty());
 }
+fn exchange_error(error: rustix::io::Errno) -> OperationError {
+    if error == rustix::io::Errno::NOENT {
+        OperationError::Conflict("item changed during publication".into())
+    } else {
+        OperationError::Io(io::Error::from(error))
+    }
+}
+fn with_recovery(error: OperationError, path: &Path) -> OperationError {
+    let context = format!("; recovery copy retained at {}", path.display());
+    match error {
+        OperationError::Io(inner) => {
+            OperationError::Io(io::Error::other(format!("{inner}{context}")))
+        }
+        OperationError::Conflict(message) => {
+            OperationError::Conflict(format!("{message}{context}"))
+        }
+        other => OperationError::Conflict(format!("{other}{context}")),
+    }
+}
 fn new_id() -> Result<String, OperationError> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -1302,7 +1353,7 @@ mod tests {
             b"replacement"
         );
         let error = ops
-            .ensure_selected_dir_after_publication(&items, &staged)
+            .ensure_selected_dir_after_publication(&ops.lock().unwrap(), &items, &staged)
             .unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
         assert!(
@@ -1360,6 +1411,23 @@ mod tests {
     }
 
     #[test]
+    fn replacement_work_directory_cannot_reuse_the_held_items_inode() {
+        let (root, _id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let lock = ops.lock().unwrap();
+        let items = ops.items_dir(&lock).unwrap();
+        let held_work = root.join("held-work");
+        fs::rename(root.join(".work"), &held_work).unwrap();
+        fs::create_dir(root.join(".work")).unwrap();
+        fs::rename(held_work.join("items"), root.join(".work/items")).unwrap();
+        assert!(matches!(
+            ops.ensure_selected_dir(&lock, &items),
+            Err(OperationError::Conflict(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replaced_symlink_before_publication_returns_conflict() {
         let (root, id) = fixture();
         let ops = DurableOperations::new(&root);
@@ -1369,8 +1437,10 @@ mod tests {
         let before = ops.load().unwrap();
         fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink("missing-new", &path).unwrap();
+        let lock = ops.lock().unwrap();
+        let items = ops.items_dir(&lock).unwrap();
         assert!(matches!(
-            ops.check_snapshot(&ops.items_dir(&ops.lock().unwrap()).unwrap(), &before),
+            ops.check_snapshot(&lock, &items, &before),
             Err(OperationError::Conflict(_))
         ));
         assert_eq!(fs::read_link(path).unwrap(), Path::new("missing-new"));
@@ -1489,6 +1559,34 @@ mod tests {
             fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o7777,
             changed_mode
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vanished_exchange_target_is_a_conflict() {
+        let (root, id) = fixture();
+        let ops = DurableOperations::new(&root);
+        let lock = ops.lock().unwrap();
+        let items = ops.items_dir(&lock).unwrap();
+        let path = ops.item_path(&id);
+        let staged = ops.stage_with_mode(&items, b"replacement", None).unwrap();
+        fs::remove_file(&path).unwrap();
+        let error = rename_in_dir(&items, &staged, &path, RenameFlags::EXCHANGE).unwrap_err();
+        assert_eq!(exchange_error(error).code(), "conflict");
+        remove_stage(&items, &staged);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn post_publication_io_error_identifies_recovery_copy() {
+        let (root, _id) = fixture();
+        let recovery = root.join(".work/items/.operation-recovery");
+        let error = with_recovery(
+            OperationError::Io(io::Error::other("sync failed")),
+            &recovery,
+        );
+        assert_eq!(error.code(), "io");
+        assert!(error.to_string().contains(recovery.to_str().unwrap()));
         fs::remove_dir_all(root).unwrap();
     }
 
