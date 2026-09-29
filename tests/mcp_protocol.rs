@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -170,13 +171,19 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 19);
     for name in [
         "item_create",
         "item_ready",
         "relation_add",
         "item_close",
         "item_repair",
+        "storage_inspect",
+        "storage_rebuild",
+        "storage_backup",
+        "storage_migrate",
+        "storage_restore",
+        "storage_recreate",
     ] {
         assert!(tools.iter().any(|tool| tool["name"] == name));
     }
@@ -519,5 +526,133 @@ fn explicit_worktree_selects_other_durable_view() {
     git(
         &control.0,
         &["worktree", "remove", "--force", selected.to_str().unwrap()],
+    );
+}
+
+#[test]
+fn storage_recovery_warning_and_rebuild_match_cli_and_mcp() {
+    let fixture = Fixture::new();
+    let id = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+    fixture.write(id, "");
+    let mut client = Client::new(&fixture.0);
+    assert_eq!(
+        client.ok("storage_inspect", json!({}))["storage"]["status"],
+        "uninitialized"
+    );
+    assert_eq!(
+        client.ok("item_ready", json!({})),
+        fixture.cli(&["item", "ready"])["result"]
+    );
+    let inspection = client.ok("storage_inspect", json!({}));
+    assert_eq!(inspection["storage"]["status"], "ready");
+    let database = PathBuf::from(inspection["storage"]["database_path"].as_str().unwrap());
+    let rebuilt = client.ok("storage_rebuild", json!({}));
+    let cli_rebuilt = fixture.cli(&["storage", "rebuild"])["result"].clone();
+    assert_eq!(rebuilt["view_root"], cli_rebuilt["view_root"]);
+    assert_eq!(rebuilt["changed_files"], cli_rebuilt["changed_files"]);
+    fs::remove_file(&database).unwrap();
+    assert_eq!(
+        client.ok("storage_inspect", json!({}))["storage"]["status"],
+        "missing_database"
+    );
+    let ready = client.ok("item_ready", json!({}));
+    assert_eq!(ready, fixture.cli(&["item", "ready"])["result"]);
+    assert_eq!(ready["items"][0]["id"], id);
+    assert_eq!(ready["storage_warning"]["code"], "missing_database");
+    let human = Command::new(env!("CARGO_BIN_EXE_work"))
+        .current_dir(&fixture.0)
+        .args(["item", "ready"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Fixture"));
+    assert!(String::from_utf8_lossy(&human.stderr).contains("storage warning (missing_database)"));
+    for (tool, command) in [("item_list", "list"), ("item_inspect", "inspect")] {
+        let args = if tool == "item_inspect" {
+            json!({"id":id})
+        } else {
+            json!({})
+        };
+        let cli = if tool == "item_inspect" {
+            fixture.cli(&["item", command, id])
+        } else {
+            fixture.cli(&["item", command])
+        };
+        let result = client.ok(tool, args);
+        assert_eq!(result, cli["result"]);
+        assert_eq!(result["storage_warning"]["code"], "missing_database");
+    }
+    assert_eq!(
+        client.ok("storage_recreate", json!({}))["lost_coordination"],
+        true
+    );
+    assert!(
+        client
+            .ok("item_ready", json!({}))
+            .get("storage_warning")
+            .is_none()
+    );
+}
+
+#[test]
+fn invalid_graph_is_not_reported_as_a_storage_fault() {
+    let fixture = Fixture::new();
+    let id = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+    let missing = "bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb";
+    fixture.write(id, &format!("depends_on: [\"{missing}\"]\n"));
+    let mut client = Client::new(&fixture.0);
+    for (tool, command, args) in [
+        ("item_list", "list", json!({})),
+        ("item_inspect", "inspect", json!({"id":id})),
+    ] {
+        let cli = if command == "inspect" {
+            fixture.cli(&["item", command, id])
+        } else {
+            fixture.cli(&["item", command])
+        };
+        assert_eq!(cli["ok"], true);
+        assert!(cli["result"].get("storage_warning").is_none());
+        let mcp = client.ok(tool, args);
+        assert_eq!(mcp, cli["result"]);
+        assert!(mcp.get("storage_warning").is_none());
+    }
+    assert_eq!(
+        client.error("item_ready", json!({}), "invalid_source")["code"],
+        "invalid_source"
+    );
+}
+
+#[test]
+fn inaccessible_database_reports_repairable_status_in_cli_and_mcp() {
+    let fixture = Fixture::new();
+    let id = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+    fixture.write(id, "");
+    let mut client = Client::new(&fixture.0);
+    client.ok("item_ready", json!({}));
+    let database = fixture.0.join(".git/work/work.db");
+    let mode = fs::metadata(&database).unwrap().permissions().mode();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&database).is_ok() {
+        // Privileged runners may bypass file modes in this fixture.
+        fs::set_permissions(&database, fs::Permissions::from_mode(mode)).unwrap();
+        return;
+    }
+
+    let cli_inspection = fixture.cli(&["storage", "inspect"])["result"].clone();
+    let mcp_inspection = client.ok("storage_inspect", json!({}));
+    assert_eq!(mcp_inspection, cli_inspection);
+    assert_eq!(mcp_inspection["storage"]["status"], "storage_unavailable");
+    assert!(mcp_inspection["storage"]["detail"].is_string());
+    let cli_list = fixture.cli(&["item", "list"])["result"].clone();
+    let mcp_list = client.ok("item_list", json!({}));
+    assert_eq!(mcp_list, cli_list);
+    assert_eq!(mcp_list["storage_warning"]["code"], "storage_unavailable");
+
+    fs::set_permissions(&database, fs::Permissions::from_mode(mode)).unwrap();
+    assert!(
+        client
+            .ok("item_ready", json!({}))
+            .get("storage_warning")
+            .is_none()
     );
 }

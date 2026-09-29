@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ use work::core::operations::{
     DurableOperations, Inspection, MetadataChange, OperationError, RawInspection, RelationKind,
 };
 use work::core::project::{DiscoveryError, Project, discover};
+use work::core::storage::{Storage, StorageError, StorageInspection, StorageStatus};
 
 pub(super) struct CliError {
     code: &'static str,
@@ -86,6 +87,21 @@ impl From<DiscoveryError> for CliError {
             "io"
         };
         Self::new(code, error.to_string())
+    }
+}
+impl From<StorageError> for CliError {
+    fn from(error: StorageError) -> Self {
+        let diagnostics = match &error {
+            StorageError::InvalidSource(diagnostics) => diagnostics.clone(),
+            _ => vec![],
+        };
+        Self {
+            code: error.code(),
+            message: error.to_string(),
+            diagnostics,
+            published_item: None,
+            previous_source_path: None,
+        }
     }
 }
 
@@ -188,7 +204,8 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
         [noun, verb, tail @ ..] if noun == "relation" => {
             relation_command(&project, &ops, verb, tail)
         }
-        _ => Err(usage("expected item or relation command")),
+        [noun, verb, tail @ ..] if noun == "storage" => storage_command(&project, verb, tail),
+        _ => Err(usage("expected item, relation, or storage command")),
     }
 }
 
@@ -238,6 +255,27 @@ fn command_help(words: &[String]) -> Option<&'static str> {
         ["relation", "remove", "--help"] => Some(
             "Usage: work relation remove KIND SOURCE TARGET\nRemove an existing edge. SOURCE is the child for parent and the dependent for depends_on. related may be removed from either endpoint.",
         ),
+        ["storage", "--help"] => Some(
+            "Usage: work storage inspect|rebuild|backup|migrate|restore|recreate\nInspect shared coordination storage, rebuild derived indexes, back up, migrate, or explicitly recover after a diagnosed fault.",
+        ),
+        ["storage", "inspect", "--help"] => Some(
+            "Usage: work storage inspect\nRead storage status without creating or changing the database.",
+        ),
+        ["storage", "rebuild", "--help"] => Some(
+            "Usage: work storage rebuild\nRebuild the selected worktree's derived index while preserving coordination records.",
+        ),
+        ["storage", "backup", "--help"] => Some(
+            "Usage: work storage backup\nRetain a consistent copy of the coordination database.",
+        ),
+        ["storage", "migrate", "--help"] => Some(
+            "Usage: work storage migrate\nBack up and transactionally migrate a recognized older coordination schema.",
+        ),
+        ["storage", "restore", "--help"] => Some(
+            "Usage: work storage restore --backup PATH\nWith active execution stopped, explicitly restore a verified backup after inspecting a storage fault. A restored older schema requires an explicit storage migrate before coordination resumes.",
+        ),
+        ["storage", "recreate", "--help"] => Some(
+            "Usage: work storage recreate\nWith active execution stopped, explicitly recreate a diagnosed lost or corrupt database. Existing claims and observations cannot be recovered from files.",
+        ),
         _ => None,
     }
 }
@@ -261,7 +299,14 @@ fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
                 Err(usage("relation add|remove KIND SOURCE TARGET"))
             }
         }
-        _ => Err(usage("expected item or relation command")),
+        [noun, verb, tail @ ..] if noun == "storage" => match (verb.as_str(), tail) {
+            ("inspect" | "rebuild" | "backup" | "migrate" | "recreate", []) => Ok(()),
+            ("restore", [flag, _]) if flag == "--backup" => Ok(()),
+            _ => Err(usage(
+                "storage inspect|rebuild|backup|migrate|restore --backup PATH|recreate",
+            )),
+        },
+        _ => Err(usage("expected item, relation, or storage command")),
     }
 }
 
@@ -309,12 +354,13 @@ fn item_command(
     args: &[String],
 ) -> Result<Value, CliError> {
     match verb {
-        "list" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.list()?)?})),
-        "ready" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.ready()?)?})),
+        "list" if args.is_empty() => list_value(project, ops),
+        "ready" if args.is_empty() => ready_value(project, ops),
         "diagnose" if args.is_empty() => {
             let store = ItemStore::load(project).map_err(io_error)?;
             let graph = ItemGraph::from_store(&store);
-            Ok(
+            with_storage_warning(
+                project,
                 json!({"diagnostics":graph.diagnostics().iter().map(diagnostic).collect::<Vec<_>>()}),
             )
         }
@@ -330,11 +376,11 @@ fn item_command(
                 }
                 Err(error) => return Err(error),
             };
-            Ok(json!({"item":one_item_value(project,&ops.inspect(&id)?)?}))
+            inspect_value(project, ops, &id)
         }
         "inspect" if args.len() == 2 && args[1] == "--raw" => {
             let raw = ops.inspect_raw(&args[0])?;
-            Ok(json!({"source":source_value(&args[0],&raw)}))
+            with_storage_warning(project, json!({"source":source_value(&args[0],&raw)}))
         }
         "create" => {
             let input = parse_metadata(project, args, true, true)?;
@@ -372,6 +418,118 @@ fn item_command(
             Ok(json!({"source":source_value(&args[0],&raw)}))
         }
         _ => Err(usage("unknown item command or arguments")),
+    }
+}
+
+pub(super) fn ready_value(project: &Project, ops: &DurableOperations) -> Result<Value, CliError> {
+    let items = items_value(project, &ops.ready()?)?;
+    with_storage_warning(project, json!({"items":items}))
+}
+
+pub(super) fn list_value(project: &Project, ops: &DurableOperations) -> Result<Value, CliError> {
+    let items = items_value(project, &ops.list()?)?;
+    with_storage_warning(project, json!({"items":items}))
+}
+
+pub(super) fn inspect_value(
+    project: &Project,
+    ops: &DurableOperations,
+    id: &str,
+) -> Result<Value, CliError> {
+    let item = one_item_value(project, &ops.inspect(id)?)?;
+    with_storage_warning(project, json!({"item":item}))
+}
+
+pub(super) fn with_storage_warning(
+    project: &Project,
+    mut result: Value,
+) -> Result<Value, CliError> {
+    let store = ItemStore::load(project).map_err(io_error)?;
+    let warning = match Storage::open(project) {
+        Ok(mut storage) => match storage.reconcile(project, &store) {
+            Ok(_) | Err(StorageError::InvalidSource(_)) => None,
+            Err(error) => Some(error),
+        },
+        Err(error) => Some(error),
+    };
+    if let Some(error) = warning {
+        result["storage_warning"] = json!({"code":error.code(),"message":error.to_string()});
+    }
+    Ok(result)
+}
+
+fn storage_inspection_value(inspection: StorageInspection) -> Value {
+    let (store_id, schema_version, detail) = match &inspection.status {
+        StorageStatus::Ready {
+            store_id,
+            schema_version,
+        } => (Some(store_id.as_str()), Some(*schema_version), None),
+        StorageStatus::Corrupt(detail) | StorageStatus::Unavailable(detail) => {
+            (None, None, Some(detail.as_str()))
+        }
+        StorageStatus::UnsupportedSchema(version) => (None, Some(*version), None),
+        _ => (None, None, None),
+    };
+    json!({
+        "database_path":encode_path(&inspection.database_path),
+        "identity_path":encode_path(&inspection.identity_path),
+        "status":inspection.status.code(),
+        "store_id":store_id,
+        "schema_version":schema_version,
+        "detail":detail,
+    })
+}
+
+pub(super) fn storage_command(
+    project: &Project,
+    verb: &str,
+    args: &[String],
+) -> Result<Value, CliError> {
+    match (verb, args) {
+        ("inspect", []) => {
+            Ok(json!({"storage":storage_inspection_value(Storage::inspect(project)?)}))
+        }
+        ("rebuild", []) => {
+            let store = ItemStore::load(project).map_err(io_error)?;
+            let report = Storage::open(project)?.rebuild(project, &store)?;
+            Ok(json!({"view_root":encode_path(&report.view_root),
+                "changed_files":report.changed_files,"removed_files":report.removed_files,
+                "unchanged_files":report.unchanged_files,
+                "changed_ephemeral_files":report.changed_ephemeral_files,
+                "removed_ephemeral_files":report.removed_ephemeral_files,
+                "generation":report.generation}))
+        }
+        ("backup", []) => {
+            let storage = Storage::open(project)?;
+            Ok(json!({"backup_path":encode_path(&storage.backup(project)?)}))
+        }
+        ("migrate", []) => {
+            let report = Storage::migrate(project)?;
+            Ok(
+                json!({"from_version":report.from_version,"to_version":report.to_version,
+                "backup_path":encode_path(&report.backup_path)}),
+            )
+        }
+        ("restore", [flag, path]) if flag == "--backup" => {
+            let backup = decode_path(path)?;
+            let report = Storage::restore_backup(project, &backup)?;
+            Ok(json!({"database_path":encode_path(&report.database_path),
+                "retained_paths":report.retained_paths.iter().map(|path|encode_path(path)).collect::<Vec<_>>(),
+                "lost_coordination":report.lost_coordination,
+                "coordination_may_be_stale":report.coordination_may_be_stale,
+                "requires_migration":report.requires_migration}))
+        }
+        ("recreate", []) => {
+            let report = Storage::recreate(project)?;
+            Ok(json!({"database_path":encode_path(&report.database_path),
+                "retained_paths":report.retained_paths.iter().map(|path|encode_path(path)).collect::<Vec<_>>(),
+                "lost_coordination":report.lost_coordination,
+                "coordination_may_be_stale":report.coordination_may_be_stale,
+                "requires_migration":report.requires_migration}))
+        }
+        _ => Err(usage(
+            "storage inspect|rebuild|backup|migrate|restore --backup PATH|recreate",
+        )),
     }
 }
 pub(super) fn source_value(id: &str, raw: &RawInspection) -> Value {
@@ -694,6 +852,15 @@ fn usage(message: impl Into<String>) -> CliError {
     CliError::new("usage", message)
 }
 fn print_human(value: &Value) {
+    if let Some(warning) = value.get("storage_warning") {
+        eprintln!(
+            "work: storage warning ({}): {}",
+            warning["code"].as_str().unwrap_or("storage_io"),
+            warning["message"]
+                .as_str()
+                .unwrap_or("coordination storage needs inspection"),
+        );
+    }
     if let Some(help) = value.get("help").and_then(Value::as_str) {
         println!("{help}");
     } else if let Some(version) = value.get("version").and_then(Value::as_str) {
@@ -724,8 +891,8 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove; mcp starts a stdio server\n\
-Use --json for one structured result or error object. Run work item --help or work relation --help for command details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, storage inspect|rebuild|backup|migrate|restore|recreate; mcp starts a stdio server\n\
+Use --json for one structured result or error object. Run work item --help, work relation --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
 pub(super) fn encode_path(path: &Path) -> String {
@@ -738,4 +905,35 @@ pub(super) fn encode_path(path: &Path) -> String {
         }
     }
     encoded
+}
+
+fn decode_path(encoded: &str) -> Result<PathBuf, CliError> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = bytes.get(at + 1..at + 3).ok_or_else(|| {
+                CliError::new("invalid_argument", "invalid percent-encoded backup path")
+            })?;
+            let value = std::str::from_utf8(hex)
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+                .ok_or_else(|| {
+                    CliError::new("invalid_argument", "invalid percent-encoded backup path")
+                })?;
+            decoded.push(value);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    if decoded.contains(&0) {
+        return Err(CliError::new(
+            "invalid_argument",
+            "backup path contains a null byte",
+        ));
+    }
+    Ok(PathBuf::from(OsString::from_vec(decoded)))
 }
