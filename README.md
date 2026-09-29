@@ -4,7 +4,7 @@ A local, agent-first issue tracker, being built in Rust. Work will track work it
 
 ## Current state
 
-The `0.1.0-alpha.1` candidate supports durable item operations through the CLI and MCP stdio, with equivalent structured results from the shared core. Claims, templates, temporary runs, sessions, workspaces, handoffs, and run finalization are later work. No installation package has been published yet.
+The published `0.1.0-alpha.1` release supports durable item operations through the CLI and MCP stdio, with equivalent structured results from the shared core. Claims, templates, temporary runs, sessions, workspaces, handoffs, and run finalization are later work.
 
 - [Product knowledge](docs/index.mara.md): scope, requirements, design, and decisions.
 - [Implementation backlog](.work/README.md): actual Work items, maintained with the Work CLI.
@@ -37,12 +37,12 @@ Run `work mcp` from a Git working checkout to serve the same durable operations 
 
 ## Alpha distribution
 
-The candidate version is `0.1.0-alpha.1`. The npm dispatcher is `@convesoft/work`; native packages are `@convesoft/work-linux-x64-gnu`, `@convesoft/work-linux-arm64-gnu`, and `@convesoft/work-darwin-arm64`. The supported targets are `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and `aarch64-apple-darwin`. After publication, install with `npm install --global @convesoft/work@0.1.0-alpha.1` or run `npx --yes @convesoft/work@0.1.0-alpha.1 --version`. Start the MCP server with `work mcp` from a Git checkout. An unpublished candidate cannot yet be installed from npm.
+The first published version is [`0.1.0-alpha.1`](https://github.com/convesoft/work/releases/tag/v0.1.0-alpha.1). The npm dispatcher is `@convesoft/work`; native packages are `@convesoft/work-linux-x64-gnu`, `@convesoft/work-linux-arm64-gnu`, and `@convesoft/work-darwin-arm64`. The supported targets are `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and `aarch64-apple-darwin`. Install with `npm install --global @convesoft/work@0.1.0-alpha.1` or run `npx --yes @convesoft/work@0.1.0-alpha.1 --version`. Start the MCP server with `work mcp` from a Git checkout.
 
 Work is available under your choice of the [MIT license](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE), recorded as `MIT OR Apache-2.0` in Cargo and npm package metadata. Both full texts are included in native archives and npm packages.
 
 The `release.yml` pipeline captures one main commit, checks source and Mara knowledge, reproduces [the changelog](CHANGELOG.md) with git-cliff 2.13.1, builds native packages on all three hosts, and tests the installed native CLI/MCP binaries. Generate the changelog with `git-cliff --offline --tag v0.1.0-alpha.1 --output CHANGELOG.md`; `cliff.toml` holds the release note template. The protected publication job also tests the packaged dispatcher with the Linux native package before creating a tag or publishing.
 
-Publication requires the GitHub `release` environment and `WORK_RELEASE_READY=true`. Before enabling that variable, verify the environment protection and npm trusted publishing for all four packages against repository `convesoft/work` and workflow `release.yml`, without an npm environment-name restriction. Each trusted publisher must allow direct `npm publish`, which this workflow uses. The workflow file alone does not establish those server-side settings. Publication, the annotated tag, and public installation remain separate evidence for [the release item](.work/items/74c22e40cbc249229f86e355a663a942.md).
+Publication requires the GitHub `release` environment and `WORK_RELEASE_READY=true`; the variable was returned to `false` after the alpha published. Before a future publication, verify the environment protection and npm trusted publishing for all four packages against repository `convesoft/work` and workflow `release.yml`, without an npm environment-name restriction. Each trusted publisher must allow direct `npm publish`, which this workflow uses. The workflow file alone does not establish those server-side settings. Publication, the annotated tag, and public installation are recorded in [the release item](.work/items/74c22e40cbc249229f86e355a663a942.md).
 
 Accepted knowledge describes agreed obligations. It does not establish that a feature exists or that its checks have passed.
