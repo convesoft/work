@@ -50,7 +50,11 @@ fn handle(request: Value, initialized: &mut bool) -> Option<Value> {
     };
     let id = object.get("id").cloned();
     let Some(method) = object.get("method").and_then(Value::as_str) else {
-        return id.map(|id| rpc_error(id, -32600, "Invalid Request"));
+        return Some(rpc_error(
+            id.unwrap_or(Value::Null),
+            -32600,
+            "Invalid Request",
+        ));
     };
     if object.get("jsonrpc") != Some(&json!("2.0")) {
         return Some(rpc_error(
@@ -394,7 +398,14 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
         "item_update" => {
             let id = cli::resolve(&project, required(args, "id"))?;
             let change = metadata(&project, args)?;
-            if args.len() == usize::from(args.contains_key("worktree")) + 1 {
+            if change.title.is_none()
+                && change.completion.is_none()
+                && change.priority.is_none()
+                && change.parent.is_none()
+                && change.labels.is_none()
+                && change.model.is_none()
+                && change.thinking.is_none()
+            {
                 return Err(invalid("item update requires at least one metadata field"));
             }
             Ok(json!({"item":cli::mutation_item_value(&project,&ops.update(&id,change)?)?}))

@@ -321,6 +321,35 @@ fn protocol_schema_rejects_null_wrong_types_and_source_errors() {
 }
 
 #[test]
+fn malformed_rpc_and_noop_update_do_not_silently_succeed() {
+    let fixture = Fixture::new();
+    let id = "44444444444444448444444444444444";
+    fixture.write(id, "");
+    let path = fixture.0.join(".work/items").join(format!("{id}.md"));
+    let before = fs::read(&path).unwrap();
+    let entries = fs::read_dir(fixture.0.join(".work/items")).unwrap().count();
+    let mut client = Client::new(&fixture.0);
+    client.error(
+        "item_update",
+        json!({"id":id,"clear_parent":false,"clear_model":false}),
+        "invalid_argument",
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        fs::read_dir(fixture.0.join(".work/items")).unwrap().count(),
+        entries
+    );
+    writeln!(client.stdin, "{}", json!({"jsonrpc":"2.0"})).unwrap();
+    client.stdin.flush().unwrap();
+    let mut line = String::new();
+    client.stdout.read_line(&mut line).unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(client.request("ping", json!({}))["result"], json!({}));
+}
+
+#[test]
 fn equivalent_cli_and_mcp_mutations_publish_identical_sources() {
     let cli_fixture = Fixture::new();
     let mcp_fixture = Fixture::new();
