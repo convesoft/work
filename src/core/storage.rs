@@ -11,7 +11,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, MAIN_DB, OpenFlags, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, MAIN_DB, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use rustix::fs::{CWD, FlockOperation, Mode, OFlags, flock, openat};
 
 use super::graph::ItemGraph;
@@ -295,11 +297,10 @@ impl Storage {
         }
         let mut changed_ephemeral_files = 0;
         let mut removed_ephemeral_files = 0;
-        for (path, raw) in &ephemeral {
-            let source_digest = digest(raw);
+        for (path, source_digest) in &ephemeral {
             let same = previous_ephemeral
                 .get(path)
-                .is_some_and(|old_digest| *old_digest == source_digest);
+                .is_some_and(|old_digest| old_digest == source_digest);
             if !same || rebuild {
                 changed_ephemeral_files += 1;
                 tx.execute(
@@ -416,7 +417,15 @@ impl Storage {
         let staged = project
             .work_storage_dir()
             .join(format!(".work.db.restore-{suffix}"));
-        fs::copy(backup, &staged)?;
+        let source = Connection::open_with_flags(
+            backup,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        source.backup(MAIN_DB, &staged, None)?;
+        match inspect_database(&staged, &identity) {
+            StorageStatus::Ready { .. } => {}
+            status => return Err(StorageError::Status(status)),
+        }
         File::open(&staged)?.sync_all()?;
         let retained_paths = quarantine_database(project, &suffix)?;
         fs::rename(&staged, project.work_database_path())?;
@@ -510,19 +519,189 @@ fn create_schema_v1(tx: &Transaction<'_>) -> Result<(), StorageError> {
 }
 
 fn validate_schema_v1(connection: &Connection) -> Result<(), StorageError> {
-    for sql in [
-        "SELECT store_id FROM store_meta LIMIT 0",
-        "SELECT root, generation FROM views LIMIT 0",
-        "SELECT view_root, path, source_digest FROM source_files LIMIT 0",
-        "SELECT view_root, id, source_path, title, completion, state, priority FROM items LIMIT 0",
-        "SELECT view_root, source_id, relation, target_id FROM edges LIMIT 0",
-        "SELECT path, source_digest FROM ephemeral_sources LIMIT 0",
-        "SELECT item_id, owner_token, actor_id, created_at, updated_at, run_id, session_id, workspace_id FROM claims LIMIT 0",
-        "SELECT kind, record_key, value FROM runtime_records LIMIT 0",
+    const META: &[(&str, &str, bool, i64)] = &[("store_id", "TEXT", true, 1)];
+    const VIEWS: &[(&str, &str, bool, i64)] = &[
+        ("root", "BLOB", false, 1),
+        ("generation", "INTEGER", true, 0),
+    ];
+    const SOURCES: &[(&str, &str, bool, i64)] = &[
+        ("view_root", "BLOB", true, 1),
+        ("path", "BLOB", true, 2),
+        ("source_digest", "BLOB", true, 0),
+    ];
+    const ITEMS: &[(&str, &str, bool, i64)] = &[
+        ("view_root", "BLOB", true, 1),
+        ("id", "TEXT", true, 2),
+        ("source_path", "BLOB", true, 0),
+        ("title", "TEXT", true, 0),
+        ("completion", "TEXT", true, 0),
+        ("state", "TEXT", false, 0),
+        ("priority", "INTEGER", true, 0),
+    ];
+    const EDGES: &[(&str, &str, bool, i64)] = &[
+        ("view_root", "BLOB", true, 1),
+        ("source_id", "TEXT", true, 2),
+        ("relation", "TEXT", true, 3),
+        ("target_id", "TEXT", true, 4),
+    ];
+    const EPHEMERAL: &[(&str, &str, bool, i64)] = &[
+        ("path", "BLOB", false, 1),
+        ("source_digest", "BLOB", true, 0),
+    ];
+    const CLAIMS: &[(&str, &str, bool, i64)] = &[
+        ("item_id", "TEXT", false, 1),
+        ("owner_token", "TEXT", true, 0),
+        ("actor_id", "TEXT", true, 0),
+        ("created_at", "TEXT", true, 0),
+        ("updated_at", "TEXT", true, 0),
+        ("run_id", "TEXT", false, 0),
+        ("session_id", "TEXT", false, 0),
+        ("workspace_id", "TEXT", false, 0),
+    ];
+    const RECORDS: &[(&str, &str, bool, i64)] = &[
+        ("kind", "TEXT", true, 1),
+        ("record_key", "TEXT", true, 2),
+        ("value", "BLOB", true, 0),
+    ];
+    for (table, expected) in [
+        ("store_meta", META),
+        ("views", VIEWS),
+        ("source_files", SOURCES),
+        ("items", ITEMS),
+        ("edges", EDGES),
+        ("ephemeral_sources", EPHEMERAL),
+        ("claims", CLAIMS),
+        ("runtime_records", RECORDS),
     ] {
-        connection.prepare(sql)?;
+        let kind: Option<String> = connection
+            .query_row(
+                "SELECT type FROM sqlite_schema WHERE name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if kind.as_deref() != Some("table") {
+            return Err(StorageError::InvalidArgument(format!(
+                "schema table {table} is missing or is not a table"
+            )));
+        }
+        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+        let actual: Vec<(String, String, bool, i64)> = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        if actual.len() != expected.len()
+            || actual.iter().zip(expected).any(|(column, required)| {
+                column.0 != required.0
+                    || !column.1.eq_ignore_ascii_case(required.1)
+                    || column.2 != required.2
+                    || column.3 != required.3
+            })
+        {
+            return Err(StorageError::InvalidArgument(format!(
+                "schema table {table} does not match version 1"
+            )));
+        }
+    }
+    if !has_unique_column(connection, "claims", "owner_token")? {
+        return Err(StorageError::InvalidArgument(
+            "schema claims.owner_token must be unique".into(),
+        ));
+    }
+    for (table, expected) in [
+        (
+            "source_files",
+            &[(0, 0, "views", "view_root", "root", "CASCADE")][..],
+        ),
+        (
+            "items",
+            &[
+                (0, 0, "source_files", "view_root", "view_root", "CASCADE"),
+                (0, 1, "source_files", "source_path", "path", "CASCADE"),
+            ][..],
+        ),
+        (
+            "edges",
+            &[
+                (0, 0, "items", "view_root", "view_root", "CASCADE"),
+                (0, 1, "items", "source_id", "id", "CASCADE"),
+            ][..],
+        ),
+    ] {
+        let mut statement = connection.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+        let actual: Vec<(i64, i64, String, String, String, String)> = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        if actual.len() != expected.len()
+            || actual.iter().zip(expected).any(|(foreign, required)| {
+                foreign.0 != required.0
+                    || foreign.1 != required.1
+                    || foreign.2 != required.2
+                    || foreign.3 != required.3
+                    || foreign.4 != required.4
+                    || foreign.5 != required.5
+            })
+        {
+            return Err(StorageError::InvalidArgument(format!(
+                "schema foreign key for {table} does not match version 1"
+            )));
+        }
+    }
+    let violations: i64 =
+        connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if violations != 0 {
+        return Err(StorageError::InvalidArgument(format!(
+            "schema contains {violations} foreign key violation(s)"
+        )));
     }
     Ok(())
+}
+
+fn has_unique_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, StorageError> {
+    let mut statement = connection.prepare(&format!("PRAGMA index_list({table})"))?;
+    let indexes: Vec<(String, bool, bool)> = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(1)?,
+                row.get::<_, i64>(2)? != 0,
+                row.get::<_, i64>(4)? != 0,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (name, unique, partial) in indexes {
+        if !unique || partial {
+            continue;
+        }
+        let mut statement = connection.prepare("SELECT name FROM pragma_index_info(?1)")?;
+        let columns: Vec<String> = statement
+            .query_map([name], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if columns == [column] {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn retain_backup(connection: &Connection, project: &Project) -> Result<PathBuf, StorageError> {
@@ -817,7 +996,10 @@ fn scan_ephemeral(root: &Path) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StorageErro
                 pending.push(path);
             } else if metadata.is_file() {
                 let relative = path.strip_prefix(root).expect("walked beneath run root");
-                result.insert(relative.as_os_str().as_bytes().to_vec(), fs::read(path)?);
+                result.insert(
+                    relative.as_os_str().as_bytes().to_vec(),
+                    digest_file(&path)?,
+                );
             } else {
                 return Err(StorageError::InvalidArgument(format!(
                     "ephemeral source is not a regular file: {}",
@@ -831,30 +1013,106 @@ fn scan_ephemeral(root: &Path) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StorageErro
 
 /// SHA-256 source digest for derived file indexes.
 fn digest(raw: &[u8]) -> Vec<u8> {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let mut state: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let bit_len = (raw.len() as u64).wrapping_mul(8);
-    let mut padded = raw.to_vec();
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
+    let mut hasher = Sha256::new();
+    hasher.update(raw);
+    hasher.finish()
+}
+
+fn digest_file(path: &Path) -> Result<Vec<u8>, StorageError> {
+    let mut file = File::from(
+        openat(
+            CWD,
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?,
+    );
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
     }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-    for block in padded.chunks_exact(64) {
+    Ok(hasher.finish())
+}
+
+struct Sha256 {
+    state: [u32; 8],
+    block: [u8; 64],
+    used: usize,
+    byte_len: u64,
+}
+
+impl Sha256 {
+    fn new() -> Self {
+        Self {
+            state: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            block: [0; 64],
+            used: 0,
+            byte_len: 0,
+        }
+    }
+
+    fn update(&mut self, mut input: &[u8]) {
+        self.byte_len = self.byte_len.wrapping_add(input.len() as u64);
+        if self.used != 0 {
+            let take = (64 - self.used).min(input.len());
+            self.block[self.used..self.used + take].copy_from_slice(&input[..take]);
+            self.used += take;
+            input = &input[take..];
+            if self.used < 64 {
+                return;
+            }
+            let block = self.block;
+            self.compress(&block);
+            self.used = 0;
+        }
+        while input.len() >= 64 {
+            let block: &[u8; 64] = input[..64].try_into().expect("64-byte block");
+            self.compress(block);
+            input = &input[64..];
+        }
+        self.block[..input.len()].copy_from_slice(input);
+        self.used = input.len();
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        let bit_len = self.byte_len.wrapping_mul(8);
+        self.block[self.used] = 0x80;
+        self.used += 1;
+        if self.used > 56 {
+            self.block[self.used..].fill(0);
+            let block = self.block;
+            self.compress(&block);
+            self.used = 0;
+        }
+        self.block[self.used..56].fill(0);
+        self.block[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        let block = self.block;
+        self.compress(&block);
+        self.state.into_iter().flat_map(u32::to_be_bytes).collect()
+    }
+
+    fn compress(&mut self, block: &[u8; 64]) {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
+        ];
         let mut words = [0_u32; 64];
         for (index, chunk) in block.chunks_exact(4).enumerate() {
             words[index] = u32::from_be_bytes(chunk.try_into().expect("four-byte word"));
@@ -871,7 +1129,7 @@ fn digest(raw: &[u8]) -> Vec<u8> {
                 .wrapping_add(words[index - 7])
                 .wrapping_add(b);
         }
-        let mut working = state;
+        let mut working = self.state;
         for index in 0..64 {
             let choose = (working[4] & working[5]) ^ (!working[4] & working[6]);
             let majority =
@@ -899,9 +1157,8 @@ fn digest(raw: &[u8]) -> Vec<u8> {
                 working[6],
             ];
         }
-        for (value, updated) in state.iter_mut().zip(working) {
+        for (value, updated) in self.state.iter_mut().zip(working) {
             *value = value.wrapping_add(updated);
         }
     }
-    state.into_iter().flat_map(u32::to_be_bytes).collect()
 }

@@ -558,6 +558,14 @@ fn storage_recovery_warning_and_rebuild_match_cli_and_mcp() {
     assert_eq!(ready, fixture.cli(&["item", "ready"])["result"]);
     assert_eq!(ready["items"][0]["id"], id);
     assert_eq!(ready["storage_warning"]["code"], "missing_database");
+    let human = Command::new(env!("CARGO_BIN_EXE_work"))
+        .current_dir(&fixture.0)
+        .args(["item", "ready"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Fixture"));
+    assert!(String::from_utf8_lossy(&human.stderr).contains("storage warning (missing_database)"));
     for (tool, command) in [("item_list", "list"), ("item_inspect", "inspect")] {
         let args = if tool == "item_inspect" {
             json!({"id":id})

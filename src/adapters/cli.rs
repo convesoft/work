@@ -845,6 +845,15 @@ fn usage(message: impl Into<String>) -> CliError {
     CliError::new("usage", message)
 }
 fn print_human(value: &Value) {
+    if let Some(warning) = value.get("storage_warning") {
+        eprintln!(
+            "work: storage warning ({}): {}",
+            warning["code"].as_str().unwrap_or("storage_io"),
+            warning["message"]
+                .as_str()
+                .unwrap_or("coordination storage needs inspection"),
+        );
+    }
     if let Some(help) = value.get("help").and_then(Value::as_str) {
         println!("{help}");
     } else if let Some(version) = value.get("version").and_then(Value::as_str) {

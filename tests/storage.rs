@@ -357,6 +357,161 @@ fn missing_required_table_is_reported_as_corrupt() {
 }
 
 #[test]
+fn missing_claim_uniqueness_is_reported_as_corrupt() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE claims;
+        CREATE TABLE claims (
+            item_id TEXT PRIMARY KEY, owner_token TEXT NOT NULL,
+            actor_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            run_id TEXT, session_id TEXT, workspace_id TEXT
+        );",
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail) if detail.contains("owner_token must be unique")
+    ));
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection
+        .execute_batch("CREATE UNIQUE INDEX only_some_tokens ON claims(owner_token) WHERE owner_token != 'excluded'")
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail) if detail.contains("owner_token must be unique")
+    ));
+    assert!(
+        !ItemGraph::from_store(&fixture.store(&fixture.checkout))
+            .ready()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn missing_derived_foreign_key_is_reported_as_corrupt() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE source_files;
+        CREATE TABLE source_files (
+            view_root BLOB NOT NULL, path BLOB NOT NULL, source_digest BLOB NOT NULL,
+            PRIMARY KEY(view_root, path)
+        );",
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail) if detail.contains("foreign key for source_files")
+    ));
+}
+
+#[test]
+fn restore_includes_claim_committed_only_to_backup_wal() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    let wal_connection = Connection::open(&backup).unwrap();
+    let mode: String = wal_connection
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    wal_connection
+        .execute_batch("PRAGMA wal_autocheckpoint=0")
+        .unwrap();
+    wal_connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'wal-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    assert!(
+        backup
+            .with_file_name(format!(
+                "{}-wal",
+                backup.file_name().unwrap().to_string_lossy()
+            ))
+            .exists()
+    );
+    let main_only = project.work_storage_dir().join("main-only-copy.db");
+    fs::copy(&backup, &main_only).unwrap();
+    let main_connection = Connection::open(&main_only).unwrap();
+    assert_eq!(
+        main_connection
+            .query_row::<i64, _, _>("SELECT count(*) FROM claims", [], |row| row.get(0))
+            .unwrap(),
+        0
+    );
+    drop(main_connection);
+
+    Storage::restore_backup(&project, &backup).unwrap();
+    let restored = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        restored
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "wal-token"
+    );
+}
+
+#[test]
+fn large_run_file_is_indexed_by_streamed_sha256_digest() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let runs = project.work_storage_dir().join("runs/run-large");
+    let mut storage = Storage::open(&project).unwrap();
+    fs::create_dir_all(&runs).unwrap();
+    let path = runs.join("large.bin");
+    fs::write(&path, vec![b'a'; 1_000_000]).unwrap();
+    let report = storage
+        .reconcile(&project, &fixture.store(&fixture.checkout))
+        .unwrap();
+    assert_eq!(report.changed_ephemeral_files, 1);
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    let digest: String = connection
+        .query_row(
+            "SELECT hex(source_digest) FROM ephemeral_sources WHERE path = ?1",
+            [b"run-large/large.bin".as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        digest,
+        "CDC76E5C9914FB9281A1C7E284D73E67F1809A48A497200E046D39CCC7112CD0"
+    );
+    let columns: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('ephemeral_sources')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 2);
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    use std::io::Write as _;
+    file.write_all(b"b").unwrap();
+    let changed = storage
+        .reconcile(&project, &fixture.store(&fixture.checkout))
+        .unwrap();
+    assert_eq!(changed.changed_ephemeral_files, 1);
+}
+
+#[test]
 fn encoded_backup_path_round_trips_through_cli_restore() {
     let fixture = Fixture::new();
     let project = fixture.project(&fixture.checkout);
