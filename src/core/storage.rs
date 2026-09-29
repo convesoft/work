@@ -21,6 +21,7 @@ use super::items::{Completion, Diagnostic, ItemFile, ItemStore, ManualState};
 use super::project::Project;
 
 const SCHEMA_VERSION: i64 = 1;
+const RECOVERY_MARKER: &str = "recovery.in_progress";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageStatus {
@@ -157,13 +158,20 @@ impl Storage {
     pub fn inspect(project: &Project) -> Result<StorageInspection, StorageError> {
         let database_path = project.work_database_path();
         let identity_path = project.work_store_identity_path();
-        let db_exists = regular_file_or_absent(&database_path)?;
-        let identity_exists = regular_file_or_absent(&identity_path)?;
-        let status = match (db_exists, identity_exists) {
-            (false, false) => StorageStatus::Uninitialized,
-            (false, true) => StorageStatus::MissingDatabase,
-            (true, false) => StorageStatus::MissingIdentity,
-            (true, true) => inspect_existing(&database_path, &identity_path),
+        let status = if recovery_marker_exists(project)? {
+            StorageStatus::Corrupt(
+                "storage recreation was interrupted; inspect retained files and recover explicitly"
+                    .into(),
+            )
+        } else {
+            let db_exists = regular_file_or_absent(&database_path)?;
+            let identity_exists = regular_file_or_absent(&identity_path)?;
+            match (db_exists, identity_exists) {
+                (false, false) => StorageStatus::Uninitialized,
+                (false, true) => StorageStatus::MissingDatabase,
+                (true, false) => StorageStatus::MissingIdentity,
+                (true, true) => inspect_existing(&database_path, &identity_path),
+            }
         };
         Ok(StorageInspection {
             database_path,
@@ -413,6 +421,17 @@ impl Storage {
     ) -> Result<RecoveryReport, StorageError> {
         ensure_storage_dir(project)?;
         let _lock = storage_lock(project)?;
+        let interrupted = recovery_marker_exists(project)?;
+        let mut retained_paths = if interrupted {
+            if !regular_file_or_absent(&recovery_marker_path(project))? {
+                return Err(StorageError::InvalidArgument(
+                    "recovery marker disappeared before restore".into(),
+                ));
+            }
+            existing_retained_paths(project)?
+        } else {
+            Vec::new()
+        };
         let identity = read_identity(&project.work_store_identity_path())?;
         match inspect_database(backup, &identity) {
             StorageStatus::Ready { .. } | StorageStatus::UnsupportedSchema(0) => {}
@@ -433,9 +452,12 @@ impl Storage {
             status => return Err(StorageError::Status(status)),
         };
         File::open(&staged)?.sync_all()?;
-        let retained_paths = quarantine_database(project, &suffix)?;
+        retained_paths.extend(quarantine_database(project, &suffix)?);
         fs::rename(&staged, project.work_database_path())?;
         sync_dir(&project.work_storage_dir())?;
+        if interrupted {
+            remove_recovery_marker(project)?;
+        }
         Ok(RecoveryReport {
             database_path: project.work_database_path(),
             retained_paths,
@@ -460,8 +482,14 @@ impl Storage {
                 "recreation requires a diagnosed storage fault".into(),
             ));
         }
+        let mut retained_paths = if recovery_marker_exists(project)? {
+            existing_retained_paths(project)?
+        } else {
+            Vec::new()
+        };
+        create_recovery_marker(project)?;
         let suffix = random_id()?;
-        let mut retained_paths = quarantine_database(project, &suffix)?;
+        retained_paths.extend(quarantine_database(project, &suffix)?);
         let identity_path = project.work_store_identity_path();
         if identity_path.exists() {
             let retained = project
@@ -471,6 +499,7 @@ impl Storage {
             retained_paths.push(retained);
         }
         initialize(project)?;
+        remove_recovery_marker(project)?;
         Ok(RecoveryReport {
             database_path: project.work_database_path(),
             retained_paths,
@@ -778,6 +807,7 @@ fn initialize(project: &Project) -> Result<(), StorageError> {
     )?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     schema(&connection, &store_id)?;
+    File::open(project.work_database_path())?.sync_all()?;
     sync_dir(&project.work_storage_dir())?;
     Ok(())
 }
@@ -857,6 +887,73 @@ fn regular_file_or_absent(path: &Path) -> Result<bool, StorageError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
+}
+
+fn recovery_marker_path(project: &Project) -> PathBuf {
+    project.work_storage_dir().join(RECOVERY_MARKER)
+}
+
+fn recovery_marker_exists(project: &Project) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(recovery_marker_path(project)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn create_recovery_marker(project: &Project) -> Result<(), StorageError> {
+    let path = recovery_marker_path(project);
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            file.write_all(b"recreate in progress\n")?;
+            file.sync_all()?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if !regular_file_or_absent(&path)? {
+                return Err(StorageError::InvalidArgument(
+                    "recovery marker disappeared during recreation".into(),
+                ));
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    sync_dir(&project.work_storage_dir())?;
+    Ok(())
+}
+
+fn remove_recovery_marker(project: &Project) -> Result<(), StorageError> {
+    let path = recovery_marker_path(project);
+    if !regular_file_or_absent(&path)? {
+        return Err(StorageError::InvalidArgument(
+            "recovery marker disappeared before completion".into(),
+        ));
+    }
+    fs::remove_file(path)?;
+    sync_dir(&project.work_storage_dir())?;
+    Ok(())
+}
+
+fn existing_retained_paths(project: &Project) -> Result<Vec<PathBuf>, StorageError> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(project.work_storage_dir())? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if [
+            "work.db.retained-",
+            "work.db-wal.retained-",
+            "work.db-shm.retained-",
+            "store.id.retained-",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+            && entry.file_type()?.is_file()
+        {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 fn ensure_storage_dir(project: &Project) -> Result<(), StorageError> {

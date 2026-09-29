@@ -446,7 +446,10 @@ pub(super) fn with_storage_warning(
 ) -> Result<Value, CliError> {
     let store = ItemStore::load(project).map_err(io_error)?;
     let warning = match Storage::open(project) {
-        Ok(mut storage) => storage.reconcile(project, &store).err(),
+        Ok(mut storage) => match storage.reconcile(project, &store) {
+            Ok(_) | Err(StorageError::InvalidSource(_)) => None,
+            Err(error) => Some(error),
+        },
         Err(error) => Some(error),
     };
     if let Some(error) = warning {

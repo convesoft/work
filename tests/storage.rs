@@ -365,6 +365,101 @@ fn missing_and_corrupt_database_require_explicit_recovery() {
 }
 
 #[test]
+fn interrupted_recreation_cannot_silently_initialize_and_can_be_resumed() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    drop(Storage::open(&project).unwrap());
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'retained-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    drop(connection);
+    let marker = project.work_storage_dir().join("recovery.in_progress");
+    let retained_db = project
+        .work_storage_dir()
+        .join("work.db.retained-interrupted");
+    let retained_identity = project
+        .work_storage_dir()
+        .join("store.id.retained-interrupted");
+    fs::write(&marker, b"recreate in progress\n").unwrap();
+    fs::rename(project.work_database_path(), &retained_db).unwrap();
+    fs::rename(project.work_store_identity_path(), &retained_identity).unwrap();
+
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(detail) if detail.contains("recreation was interrupted")
+    ));
+    assert!(matches!(
+        Storage::open(&project),
+        Err(StorageError::Status(StorageStatus::Corrupt(_)))
+    ));
+    assert!(!project.work_database_path().exists());
+    assert!(!project.work_store_identity_path().exists());
+
+    let report = Storage::recreate(&project).unwrap();
+    assert!(report.lost_coordination);
+    assert!(report.retained_paths.contains(&retained_db));
+    assert!(report.retained_paths.contains(&retained_identity));
+    assert!(!marker.exists());
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+    let retained = Connection::open(&retained_db).unwrap();
+    assert_eq!(
+        retained
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "retained-token"
+    );
+}
+
+#[test]
+fn explicit_backup_restore_clears_interrupted_recreation_marker() {
+    let fixture = Fixture::new();
+    let project = fixture.project(&fixture.checkout);
+    let storage = Storage::open(&project).unwrap();
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    connection.execute("INSERT INTO claims(item_id, owner_token, actor_id, created_at, updated_at) VALUES (?1, 'backup-token', 'actor', 'now', 'now')", [FIRST]).unwrap();
+    drop(connection);
+    let backup = storage.backup(&project).unwrap();
+    drop(storage);
+    let marker = project.work_storage_dir().join("recovery.in_progress");
+    let retained_db = project
+        .work_storage_dir()
+        .join("work.db.retained-interrupted");
+    fs::write(&marker, b"recreate in progress\n").unwrap();
+    fs::rename(project.work_database_path(), &retained_db).unwrap();
+
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Corrupt(_)
+    ));
+    let restored = Storage::restore_backup(&project, &backup).unwrap();
+    assert!(!restored.lost_coordination);
+    assert!(restored.retained_paths.contains(&retained_db));
+    assert!(!marker.exists());
+    assert!(retained_db.exists());
+    assert!(matches!(
+        Storage::inspect(&project).unwrap().status,
+        StorageStatus::Ready { .. }
+    ));
+    let connection = Connection::open(project.work_database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT owner_token FROM claims WHERE item_id = ?1",
+                [FIRST],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "backup-token"
+    );
+}
+
+#[test]
 fn missing_required_table_is_reported_as_corrupt() {
     let fixture = Fixture::new();
     let project = fixture.project(&fixture.checkout);

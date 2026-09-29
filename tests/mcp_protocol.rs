@@ -592,3 +592,31 @@ fn storage_recovery_warning_and_rebuild_match_cli_and_mcp() {
             .is_none()
     );
 }
+
+#[test]
+fn invalid_graph_is_not_reported_as_a_storage_fault() {
+    let fixture = Fixture::new();
+    let id = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+    let missing = "bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb";
+    fixture.write(id, &format!("depends_on: [\"{missing}\"]\n"));
+    let mut client = Client::new(&fixture.0);
+    for (tool, command, args) in [
+        ("item_list", "list", json!({})),
+        ("item_inspect", "inspect", json!({"id":id})),
+    ] {
+        let cli = if command == "inspect" {
+            fixture.cli(&["item", command, id])
+        } else {
+            fixture.cli(&["item", command])
+        };
+        assert_eq!(cli["ok"], true);
+        assert!(cli["result"].get("storage_warning").is_none());
+        let mcp = client.ok(tool, args);
+        assert_eq!(mcp, cli["result"]);
+        assert!(mcp.get("storage_warning").is_none());
+    }
+    assert_eq!(
+        client.error("item_ready", json!({}), "invalid_source")["code"],
+        "invalid_source"
+    );
+}
