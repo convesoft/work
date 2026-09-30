@@ -7,7 +7,7 @@ description: Use Work to inspect and manage durable work items, relationships, c
 
 Work stores durable items as Git-tracked `.work/items/<full-id>.md` files. A consumer chooses its own items, bodies, and graph; Work does not require a particular workflow or interpret Markdown headings as structured acceptance fields. It tracks state and graph eligibility but does not execute work.
 
-This skill describes the currently implemented durable item slice. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
+This skill describes the durable item, template-preview and file-storage slices in this checkout. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
 
 ## Select the view
 
@@ -35,4 +35,12 @@ Existing item bodies are opaque bytes. Metadata and relation operations preserve
 
 If an operation fails, inspect `error.code` and any diagnostics. Invalid source or graph state can block `item_ready` and structured mutations while `item_list`, `item_inspect`, `item_diagnose`, and raw inspection remain available. Check reported paths and any recovery copy after a conflict or publication error before retrying. Test state-changing examples on disposable copies when the real items must remain intact.
 
-Current tools do not implement claims, templates, temporary runs, handoffs, sessions, workspaces, agent execution, Git worktree management, pull requests, or CI actions. Do not advertise or simulate those as Work operations.
+## Templates and shared storage
+
+When advertised by the selected binary, template_list/template_validate/template_preview match template list/validate/preview. Preview uses local keys and declared text variables without publishing items, runs or permanent IDs. See the tool schemas and template command help for bindings.
+
+Storage tools storage_inspect/storage_init/storage_recreate/storage_recover match storage inspect/init/recreate/recover. Inspect is read-only; fresh absence needs no warning and creates nothing. Init is explicit and healthy-state idempotent. Linked worktrees share the resolved Git common directory's work/ files; item and template content still comes from the selected checkout.
+
+Item reads expose storage and storage_warning without losing available durable data. coordination_available describes foundation structure only; it does not prove claim ownership. For detected damage, inspect the exact diagnostic and pending operation before choosing explicit recovery. Recreation discards live operational meaning, retains surviving bytes and uses a fresh generation. Require stopped-executor and loss acknowledgements, exact observed identity/generation, and all clients stopped if the root/lock was lost. Never silently recreate or erase the intact lock. Resume only a supported reported operation ID; post-publication errors require inspecting retained context before retry.
+
+Backup/restore, claims, template publication, temporary runs, handoffs, sessions, workspace management, agent execution, Git worktree management, pull requests and CI actions are not implemented. Do not advertise or simulate those as Work operations.

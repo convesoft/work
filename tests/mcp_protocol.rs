@@ -170,7 +170,7 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 20);
     for name in [
         "item_create",
         "item_ready",
@@ -603,4 +603,86 @@ edges:
         before
     );
     assert!(!fixture.0.join(".git/work/runs").exists());
+}
+
+#[test]
+fn storage_mcp_lifecycle_and_warning_payloads_match_cli() {
+    let f = Fixture::new();
+    let mut client = Client::new(&f.0);
+    let tools = client.request("tools/list", json!({}))["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for name in [
+        "storage_inspect",
+        "storage_init",
+        "storage_recreate",
+        "storage_recover",
+    ] {
+        assert!(tools.iter().any(|t| t["name"] == name));
+    }
+    assert!(
+        !tools
+            .iter()
+            .any(|t| t["name"] == "storage_restore" || t["name"] == "storage_backup")
+    );
+    let fresh = client.ok("storage_inspect", json!({}));
+    assert_eq!(fresh, f.cli(&["storage", "inspect"])["result"]);
+    assert!(!f.0.join(".git/work").exists());
+    let initialized = client.ok("storage_init", json!({}));
+    assert_eq!(initialized["storage"]["coordination_available"], true);
+    let healthy = client.ok("storage_inspect", json!({}));
+    assert_eq!(healthy, f.cli(&["storage", "inspect"])["result"]);
+    let metadata = healthy["storage"]["metadata"].clone();
+    let noop = client.ok("storage_init", json!({}));
+    assert_eq!(noop["changed"], false);
+    let recreated=client.ok("storage_recreate",json!({
+        "expected_store_id":metadata["store_id"],"expected_generation":metadata["recovery_generation"],
+        "executors_stopped":true,"acknowledge_loss":true
+    }));
+    assert_eq!(recreated["loss"]["coordination_reset"], true);
+    assert_ne!(
+        recreated["storage"]["metadata"]["recovery_generation"],
+        metadata["recovery_generation"]
+    );
+    client.error("storage_recreate",json!({"expected_store_id":metadata["store_id"],"expected_generation":metadata["recovery_generation"],"executors_stopped":true,"acknowledge_loss":true}),"conflict");
+    let recovery=client.ok("storage_recover",json!({"operation_id":recreated["operation_id"],"executors_stopped":true,"acknowledge_loss":true}));
+    assert_eq!(
+        recovery["storage"]["metadata"],
+        recreated["storage"]["metadata"]
+    );
+    fs::remove_file(f.0.join(".git/work/store.yaml")).unwrap();
+    let ready = client.ok("item_ready", json!({}));
+    assert_eq!(ready, f.cli(&["item", "ready"])["result"]);
+    assert_eq!(ready["storage_warning"]["code"], "storage_missing");
+    assert_eq!(ready["storage"]["coordination_available"], false);
+}
+
+#[test]
+fn storage_mcp_validates_requests_before_selecting_a_checkout() {
+    let f = Fixture::new();
+    let mut client = Client::new(&f.0);
+    for (name, args) in [
+        (
+            "storage_init",
+            json!({"worktree":"/nonexistent-work-test-checkout","extra":true}),
+        ),
+        ("storage_inspect", json!({"worktree":null})),
+        (
+            "storage_recreate",
+            json!({"worktree":"/nonexistent-work-test-checkout","executors_stopped":false,"acknowledge_loss":true}),
+        ),
+        (
+            "storage_recreate",
+            json!({"worktree":"/nonexistent-work-test-checkout","executors_stopped":true,"acknowledge_loss":true,"expected_store_id":"bad"}),
+        ),
+        (
+            "storage_recover",
+            json!({"worktree":"/nonexistent-work-test-checkout","operation_id":"../bad"}),
+        ),
+        ("storage_recover", json!({"operation_id":null})),
+    ] {
+        client.error(name, args, "invalid_argument");
+    }
+    assert!(!f.0.join(".git/work").exists());
 }

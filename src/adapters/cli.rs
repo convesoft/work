@@ -22,8 +22,9 @@ pub(super) struct CliError {
     code: &'static str,
     message: String,
     diagnostics: Vec<Diagnostic>,
-    published_item: Option<Value>,
+    published_item: Option<Box<Value>>,
     previous_source_path: Option<PathBuf>,
+    storage_details: Option<Box<Value>>,
 }
 
 impl CliError {
@@ -34,23 +35,41 @@ impl CliError {
             diagnostics: vec![],
             published_item: None,
             previous_source_path: None,
+            storage_details: None,
         }
+    }
+    pub(super) fn with_details(code: &'static str, message: String, details: Value) -> Self {
+        let mut error = Self::new(code, message);
+        error.storage_details = Some(Box::new(details));
+        error
+    }
+    pub(super) fn storage_failure(mut self) -> Self {
+        if self.storage_details.is_none() {
+            self.storage_details = Some(Box::new(json!({"publication":"not_published"})));
+        }
+        self
     }
     fn exit(&self) -> i32 {
         match self.code {
             "usage" | "invalid_argument" => 2,
             "not_found" | "ambiguous_id" => 3,
-            "invalid_source" | "invalid_candidate" => 4,
-            "conflict" | "already_exists" => 5,
+            "invalid_source" | "invalid_candidate" | "invalid_format" | "unsupported_format"
+            | "storage_missing" | "storage_corrupt" | "recovery_required" | "identity_mismatch" => {
+                4
+            }
+            "conflict" | "already_exists" | "storage_busy" | "unsafe_path" => 5,
             _ => 1,
         }
     }
     pub(super) fn value(&self) -> Value {
         let mut v = json!({"code":self.code,"message":self.message});
+        if let Some(details) = self.storage_details.as_deref().and_then(Value::as_object) {
+            v.as_object_mut().unwrap().extend(details.clone());
+        }
         if !self.diagnostics.is_empty() {
             v["diagnostics"] = json!(self.diagnostics.iter().map(diagnostic).collect::<Vec<_>>());
         }
-        if let Some(p) = &self.published_item {
+        if let Some(p) = self.published_item.as_deref() {
             v["published_item"] = p.clone();
         }
         if let Some(p) = &self.previous_source_path {
@@ -76,8 +95,9 @@ impl From<OperationError> for CliError {
             diagnostics,
             published_item: error
                 .published_item()
-                .map(|(id, path)| json!({"id":id,"path":encode_path(path)})),
+                .map(|(id, path)| Box::new(json!({"id":id,"path":encode_path(path)}))),
             previous_source_path: error.previous_source_path().map(Path::to_path_buf),
+            storage_details: None,
         }
     }
 }
@@ -99,6 +119,7 @@ impl From<TemplateError> for CliError {
             diagnostics: error.diagnostics().to_vec(),
             published_item: None,
             previous_source_path: None,
+            storage_details: None,
         }
     }
 }
@@ -145,10 +166,12 @@ fn leading_json_mode(args: &[OsString]) -> bool {
 fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
     let mut at = 0;
     let mut selected: Option<&Path> = None;
+    let mut duplicate_selector = false;
     while let Some(arg) = args.get(at) {
         if arg == "--json" {
             at += 1;
         } else if arg == "--worktree" {
+            duplicate_selector |= selected.is_some();
             selected = Some(Path::new(
                 args.get(at + 1)
                     .ok_or_else(|| usage("missing --worktree path"))?,
@@ -159,6 +182,20 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
         }
     }
     let command = args.get(at).ok_or_else(|| usage("missing command"))?;
+    if duplicate_selector {
+        let error = CliError::new("invalid_argument", "duplicate --worktree selector");
+        return Err(
+            if command == "storage"
+                && args
+                    .get(at + 1)
+                    .is_some_and(|verb| verb == "init" || verb == "recreate" || verb == "recover")
+            {
+                error.storage_failure()
+            } else {
+                error
+            },
+        );
+    }
     if command == "--help" || command == "help" {
         if at + 1 != args.len() || selected.is_some() {
             return Err(usage("work --help takes no arguments"));
@@ -183,6 +220,10 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
             json!({"worktree_root":encode_path(&project.worktree_root),"git_common_dir":encode_path(&project.git_common_dir)}),
         );
     }
+    let storage_mutation = command == "storage"
+        && args
+            .get(at + 1)
+            .is_some_and(|verb| verb == "init" || verb == "recreate" || verb == "recover");
     let words: Vec<String> = args[at..]
         .iter()
         .map(|a| {
@@ -190,20 +231,49 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
                 .map(str::to_owned)
                 .ok_or_else(|| CliError::new("invalid_argument", "command arguments must be UTF-8"))
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+        .map_err(|error| {
+            if storage_mutation {
+                error.storage_failure()
+            } else {
+                error
+            }
+        })?;
     if let Some(help) = command_help(&words) {
         return Ok(json!({"help":help}));
+    }
+    if words.first().is_some_and(|noun| noun == "storage") {
+        let result = (|| {
+            let request = super::storage::from_cli(&words[1..])?;
+            super::storage::execute(&discover(selected)?, request)
+        })();
+        return if words
+            .get(1)
+            .is_some_and(|verb| matches!(verb.as_str(), "init" | "recreate" | "recover"))
+        {
+            result.map_err(CliError::storage_failure)
+        } else {
+            result
+        };
     }
     validate_command_shape(&words)?;
     let project = discover(selected)?;
     let ops = DurableOperations::new(&project.worktree_root);
-    match words.as_slice() {
+    let result = match words.as_slice() {
         [noun, verb, tail @ ..] if noun == "item" => item_command(&project, &ops, verb, tail),
         [noun, verb, tail @ ..] if noun == "relation" => {
             relation_command(&project, &ops, verb, tail)
         }
         [noun, verb, tail @ ..] if noun == "template" => template_command(&project, verb, tail),
-        _ => Err(usage("expected item, relation, or template command")),
+        _ => Err(usage(
+            "expected item, relation, template, or storage command",
+        )),
+    }?;
+    if words[0] == "item" && matches!(words[1].as_str(), "list" | "ready" | "diagnose" | "inspect")
+    {
+        Ok(super::storage::attach_read(&project, result))
+    } else {
+        Ok(result)
     }
 }
 
@@ -211,6 +281,12 @@ fn command_help(words: &[String]) -> Option<&'static str> {
     let words: Vec<_> = words.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["discover", "--help"] => Some(DISCOVER_HELP),
+        ["storage", "--help"] => Some(super::storage::HELP),
+        [
+            "storage",
+            "inspect" | "init" | "recreate" | "recover",
+            "--help",
+        ] => Some(super::storage::HELP),
         ["mcp", "--help"] => Some(
             "Usage: work mcp\nServe durable item operations as MCP tools over stdio. Tools accept an optional worktree path; otherwise they use the server's checkout.",
         ),
@@ -817,6 +893,7 @@ pub(super) fn invalid_source(diagnostics: Vec<Diagnostic>) -> CliError {
         diagnostics,
         published_item: None,
         previous_source_path: None,
+        storage_details: None,
     }
 }
 pub(super) fn diagnostic(d: &Diagnostic) -> Value {
@@ -826,13 +903,14 @@ fn io_error(error: io::Error) -> CliError {
     CliError::new("io", error.to_string())
 }
 fn with_published_item(mut error: CliError, id: &str, path: &Path) -> CliError {
-    error.published_item = Some(json!({"id":id,"path":encode_path(path)}));
+    error.published_item = Some(Box::new(json!({"id":id,"path":encode_path(path)})));
     error
 }
 fn usage(message: impl Into<String>) -> CliError {
     CliError::new("usage", message)
 }
 fn print_human(value: &Value) {
+    super::storage::print_warning(value);
     if let Some(help) = value.get("help").and_then(Value::as_str) {
         println!("{help}");
     } else if let Some(version) = value.get("version").and_then(Value::as_str) {
@@ -863,8 +941,8 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview; mcp starts a stdio server\n\
-Use --json for one structured result or error object. Run work item --help, work relation --help, or work template --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
+Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
 pub(super) fn encode_path(path: &Path) -> String {

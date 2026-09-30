@@ -388,3 +388,169 @@ fn invalid_source_graph_and_ambiguous_prefix_are_distinct() {
             .is_empty()
     );
 }
+
+#[test]
+fn storage_reads_do_not_initialize_and_warnings_reach_human_output() {
+    let f = Fixture::new();
+    let id = "00000000000040008000000000000001";
+    f.write(id, "completion: manual\n");
+    let fresh = ok(f.call(&["storage", "inspect"]));
+    assert_eq!(fresh["storage"]["state"], "uninitialized");
+    assert_eq!(fresh["storage"]["coordination_available"], false);
+    assert!(fresh["storage"]["storage_warning"].is_null());
+    for args in [
+        vec!["item", "list"],
+        vec!["item", "ready"],
+        vec!["item", "diagnose"],
+        vec!["item", "inspect", id],
+        vec!["item", "inspect", id, "--raw"],
+    ] {
+        let read = ok(f.call(&args));
+        assert_eq!(read["storage"]["state"], "uninitialized");
+        assert!(read["storage_warning"].is_null());
+    }
+    assert!(!f.0.join(".git/work").exists());
+    assert!(!f.0.join(".git/work.identity.yaml").exists());
+    ok(f.call(&["storage", "init"]));
+    fs::remove_file(f.0.join(".git/work/store.yaml")).unwrap();
+    for args in [
+        vec!["item", "list"],
+        vec!["item", "ready"],
+        vec!["item", "diagnose"],
+        vec!["item", "inspect", id],
+        vec!["item", "inspect", id, "--raw"],
+    ] {
+        let read = ok(f.call(&args));
+        assert_eq!(read["storage"]["coordination_available"], false);
+        assert_eq!(read["storage_warning"]["code"], "storage_missing");
+        let (status, _, stderr) = human(&f.0, &args);
+        assert_eq!(status, 0);
+        assert!(stderr.contains("storage_missing"), "{stderr}");
+    }
+    assert!(!f.0.join(".git/work/store.yaml").exists());
+}
+
+#[test]
+fn storage_usage_rejects_invalid_inputs_before_discovery() {
+    let outside = std::env::temp_dir();
+    for args in [
+        vec!["storage", "recreate"],
+        vec![
+            "storage",
+            "recreate",
+            "--executors-stopped",
+            "--acknowledge-loss",
+            "--expected-generation",
+            "bad",
+        ],
+        vec![
+            "storage",
+            "recreate",
+            "--executors-stopped",
+            "--executors-stopped",
+            "--acknowledge-loss",
+        ],
+        vec!["storage", "recover", "../escape"],
+        vec!["storage", "inspect", "--acknowledge-loss"],
+        vec!["storage", "init", "unexpected"],
+    ] {
+        error(call(&outside, &args, None), 2, "invalid_argument");
+    }
+    error(call(&outside, &["storage", "restore"], None), 2, "usage");
+    let (status, stdout, stderr) = human(&outside, &["storage", "--help"]);
+    assert_eq!(status, 0);
+    assert!(stdout.contains("executors-stopped"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn storage_contention_is_distinct_and_does_not_hide_file_readiness() {
+    use rustix::fs::{FlockOperation, flock};
+    let f = Fixture::new();
+    f.write("00000000000040008000000000000001", "completion: manual\n");
+    ok(f.call(&["storage", "init"]));
+    let lock = fs::File::open(f.0.join(".git/work/coordination.lock")).unwrap();
+    flock(&lock, FlockOperation::NonBlockingLockExclusive).unwrap();
+    let ready = ok(f.call(&["item", "ready"]));
+    assert_eq!(ready["items"].as_array().unwrap().len(), 1);
+    assert_eq!(ready["storage_warning"]["code"], "storage_busy");
+    error(f.call(&["storage", "init"]), 5, "storage_busy");
+    drop(lock);
+    assert_eq!(
+        ok(f.call(&["storage", "inspect"]))["storage"]["coordination_available"],
+        true
+    );
+}
+
+#[test]
+fn duplicate_worktree_selectors_refuse_storage_mutations_before_discovery() {
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let absent = first.0.join("does-not-exist");
+    for selected in [&first.0, &absent] {
+        for command in [
+            vec!["storage", "init"],
+            vec![
+                "storage",
+                "recreate",
+                "--executors-stopped",
+                "--acknowledge-loss",
+            ],
+            vec!["storage", "recover", "00000000000040008000000000000001"],
+        ] {
+            let mut args = vec![
+                "--worktree",
+                selected.to_str().unwrap(),
+                "--worktree",
+                second.0.to_str().unwrap(),
+            ];
+            args.extend(command);
+            let (status, response) = first.call(&args);
+            assert_eq!(status, 2);
+            assert_eq!(response["error"]["code"], "invalid_argument");
+            assert_eq!(response["error"]["publication"], "not_published");
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("duplicate")
+            );
+            for checkout in [&first.0, &second.0] {
+                assert!(!checkout.join(".git/work").exists());
+                assert!(!checkout.join(".git/work.identity.yaml").exists());
+            }
+            assert!(!absent.exists());
+        }
+    }
+}
+
+#[test]
+fn non_utf8_storage_mutation_arguments_report_not_published_before_discovery() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let absent = fixture.0.join("absent-checkout");
+    for prefix in [
+        vec!["storage", "init"],
+        vec!["storage", "recover"],
+        vec!["storage", "recreate", "--expected-store-id"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_work"))
+            .current_dir(&fixture.0)
+            .args(["--json", "--worktree"])
+            .arg(&absent)
+            .args(prefix)
+            .arg(OsString::from_vec(vec![0xff]))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stderr.is_empty());
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "invalid_argument");
+        assert_eq!(response["error"]["publication"], "not_published");
+        assert!(!absent.exists());
+        assert!(!fixture.0.join(".git/work").exists());
+        assert!(!fixture.0.join(".git/work.identity.yaml").exists());
+    }
+}
