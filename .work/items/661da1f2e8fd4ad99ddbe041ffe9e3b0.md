@@ -3,7 +3,7 @@ format_version: 1
 id: "661da1f2e8fd4ad99ddbe041ffe9e3b0"
 title: "Build shared coordination storage and view reconciliation"
 completion: manual
-state: open
+state: done
 priority: 2
 parent: "fba5815b224f4c74a194ec2be6dd5d90"
 model: "gpt-6-sol"
@@ -28,3 +28,7 @@ Backup creation and restoring old backups are deferred. This foundation reports 
 ## Mara contracts
 
 `ADR-FILE-STATE`, `DES-SHARED-FILES`, `DES-ENTITY-LIFECYCLES`, `DES-FILE-COORDINATION`, `DES-STORE-FOUNDATION`, `DES-STORAGE-API`, `VER-FILE-COORDINATION`, `REQ-SIDE-STATE`, `REQ-WORKTREE-VIEWS`, `REQ-INDEX-REBUILD`, `RISK-DIVERGENT-VIEWS`. Resolve any unsettled operation or storage details in [open questions](../../docs/open-questions.mara.md) and update canonical Mara knowledge before implementation.
+
+## Completion evidence
+
+Merged in [PR #14](https://github.com/convesoft/work/pull/14) as `99f77f5edf73545d3a01f64f26a855ee3d919962`. Verified head `a972a098466608baf760ca06f4a89f4e5dda8321` passed 166 tests, build, formatting, strict Clippy and complete Mara schema/project validation; [CI run 62](https://github.com/convesoft/work/actions/runs/36723921489) passed. The combined lost-witness/interrupted-recreation P2 was explicitly accepted as [deferred follow-up](155dd1c73ef3412da9d2a44ec57dcfbc.md); the user waived fresh cloud review after the bot reported a usage limit. This is not a clean-review claim. Local Linux evidence does not establish Darwin runtime or power-loss behavior.
