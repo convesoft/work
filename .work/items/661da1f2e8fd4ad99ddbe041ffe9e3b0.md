@@ -27,4 +27,4 @@ Backup creation and restoring old backups are deferred. This foundation reports 
 
 ## Mara contracts
 
-`ADR-FILE-STATE`, `DES-SHARED-FILES`, `DES-ENTITY-LIFECYCLES`, `DES-FILE-COORDINATION`, `VER-FILE-COORDINATION`, `REQ-SIDE-STATE`, `REQ-WORKTREE-VIEWS`, `REQ-INDEX-REBUILD`, `RISK-DIVERGENT-VIEWS`. Resolve any unsettled operation or storage details in [open questions](../../docs/open-questions.mara.md) and update canonical Mara knowledge before implementation.
+`ADR-FILE-STATE`, `DES-SHARED-FILES`, `DES-ENTITY-LIFECYCLES`, `DES-FILE-COORDINATION`, `DES-STORE-FOUNDATION`, `DES-STORAGE-API`, `VER-FILE-COORDINATION`, `REQ-SIDE-STATE`, `REQ-WORKTREE-VIEWS`, `REQ-INDEX-REBUILD`, `RISK-DIVERGENT-VIEWS`. Resolve any unsettled operation or storage details in [open questions](../../docs/open-questions.mara.md) and update canonical Mara knowledge before implementation.
