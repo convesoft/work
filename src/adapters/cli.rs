@@ -220,6 +220,10 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
             json!({"worktree_root":encode_path(&project.worktree_root),"git_common_dir":encode_path(&project.git_common_dir)}),
         );
     }
+    let storage_mutation = command == "storage"
+        && args
+            .get(at + 1)
+            .is_some_and(|verb| verb == "init" || verb == "recreate" || verb == "recover");
     let words: Vec<String> = args[at..]
         .iter()
         .map(|a| {
@@ -227,7 +231,14 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
                 .map(str::to_owned)
                 .ok_or_else(|| CliError::new("invalid_argument", "command arguments must be UTF-8"))
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+        .map_err(|error| {
+            if storage_mutation {
+                error.storage_failure()
+            } else {
+                error
+            }
+        })?;
     if let Some(help) = command_help(&words) {
         return Ok(json!({"help":help}));
     }

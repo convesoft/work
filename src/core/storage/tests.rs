@@ -1927,3 +1927,115 @@ fn staged_retry_races_preserve_filesystem_categories_and_never_overwrite_new_tar
         }
     }
 }
+
+#[test]
+fn interrupted_partial_publication_stage_refuses_replay_but_allows_explicit_retained_reset() {
+    use std::os::unix::fs::MetadataExt;
+    for partial in [b"".as_slice(), b"{\"format_version\":".as_slice()] {
+        let f = Fixture::new();
+        let initial = f.storage.initialize().unwrap();
+        let initial_metadata = initial.storage.metadata.unwrap();
+        let root = f.storage.project.git_common_dir.join("work");
+        fs::write(root.join("claims/opaque"), b"retained prior claim bytes").unwrap();
+        let lock_before = fs::metadata(root.join("coordination.lock")).unwrap();
+        let mut failure = None;
+        let mut interrupted_write = None;
+        let error = f
+            .storage
+            .recreate_inner(f.request(), &mut |step| {
+                if step == "witness" {
+                    failure = Some(files::fail_next("stage_write"));
+                    if !partial.is_empty() {
+                        // Emulate a write reaching only a prefix before the actual
+                        // stage_write failure. The stage was created by storage.
+                        let id = fs::read_dir(root.join("operations"))
+                            .unwrap()
+                            .next()
+                            .unwrap()
+                            .unwrap()
+                            .file_name();
+                        let stage = root.join(format!(".storage-{}-store", id.to_str().unwrap()));
+                        let bytes = partial.to_vec();
+                        interrupted_write = Some(files::on_next("stage_write", move || {
+                            fs::write(stage, bytes).unwrap();
+                        }));
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        drop(failure);
+        drop(interrupted_write);
+        assert_eq!(error.code, StorageErrorCode::Io);
+        assert_eq!(error.errno, Some(5));
+        let old_id = error.operation_id.unwrap();
+        let stage = error.path.unwrap();
+        let stage_before = fs::metadata(&stage).unwrap();
+        assert_eq!(fs::read(&stage).unwrap(), partial);
+        let old_dir = root.join("operations").join(&old_id);
+        let receipt = fs::read(old_dir.join("operation.yaml")).unwrap();
+        let context = fs::read(old_dir.join("context.yaml")).unwrap();
+        let operation = format::operation(&receipt, &old_dir).unwrap();
+        assert_eq!(operation.phase, "archived");
+        let old_generation = operation.next_generation;
+        let old_claim = root
+            .join("recovery")
+            .join(&old_id)
+            .join("prior/claims/opaque");
+        assert_eq!(fs::read(&old_claim).unwrap(), b"retained prior claim bytes");
+        let replay = f
+            .storage
+            .recover(
+                &old_id,
+                RecoverRequest {
+                    executors_stopped: true,
+                    acknowledge_loss: true,
+                    all_clients_stopped: false,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(replay.code, StorageErrorCode::Conflict);
+        assert_eq!(replay.path, Some(stage.clone()));
+        assert_eq!(fs::read(&stage).unwrap(), partial);
+        assert_eq!(fs::read(old_dir.join("operation.yaml")).unwrap(), receipt);
+        assert_eq!(fs::read(old_dir.join("context.yaml")).unwrap(), context);
+        assert!(!f.storage.inspect().unwrap().coordination_available);
+        let outcome = f.storage.recreate(f.request()).unwrap();
+        let metadata = outcome.storage.metadata.unwrap();
+        assert!(outcome.storage.coordination_available);
+        assert_eq!(metadata.store_id, initial_metadata.store_id);
+        assert_ne!(
+            metadata.recovery_generation,
+            initial_metadata.recovery_generation
+        );
+        assert_ne!(metadata.recovery_generation, old_generation);
+        let loss = outcome.loss.unwrap();
+        assert!(loss.missing_or_damaged);
+        assert!(outcome.recovery_paths.contains(&stage));
+        let archived_operation = loss
+            .prior_state_path
+            .unwrap()
+            .join("operations")
+            .join(old_id);
+        assert_eq!(
+            fs::read(archived_operation.join("operation.yaml")).unwrap(),
+            receipt
+        );
+        assert_eq!(
+            fs::read(archived_operation.join("context.yaml")).unwrap(),
+            context
+        );
+        assert_eq!(fs::read(&stage).unwrap(), partial);
+        let stage_after = fs::metadata(&stage).unwrap();
+        assert_eq!(
+            (stage_after.dev(), stage_after.ino()),
+            (stage_before.dev(), stage_before.ino())
+        );
+        assert_eq!(fs::read(old_claim).unwrap(), b"retained prior claim bytes");
+        let lock_after = fs::metadata(root.join("coordination.lock")).unwrap();
+        assert_eq!(
+            (lock_after.dev(), lock_after.ino()),
+            (lock_before.dev(), lock_before.ino())
+        );
+    }
+}

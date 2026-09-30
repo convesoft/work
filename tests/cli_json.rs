@@ -523,3 +523,34 @@ fn duplicate_worktree_selectors_refuse_storage_mutations_before_discovery() {
         }
     }
 }
+
+#[test]
+fn non_utf8_storage_mutation_arguments_report_not_published_before_discovery() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let absent = fixture.0.join("absent-checkout");
+    for prefix in [
+        vec!["storage", "init"],
+        vec!["storage", "recover"],
+        vec!["storage", "recreate", "--expected-store-id"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_work"))
+            .current_dir(&fixture.0)
+            .args(["--json", "--worktree"])
+            .arg(&absent)
+            .args(prefix)
+            .arg(OsString::from_vec(vec![0xff]))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stderr.is_empty());
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "invalid_argument");
+        assert_eq!(response["error"]["publication"], "not_published");
+        assert!(!absent.exists());
+        assert!(!fixture.0.join(".git/work").exists());
+        assert!(!fixture.0.join(".git/work.identity.yaml").exists());
+    }
+}

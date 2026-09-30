@@ -642,6 +642,7 @@ impl Storage {
             }
         }
         let operations = locked.root.ensure("operations")?;
+        let mut unusable_stage_paths = Vec::new();
         for name in operations.names()? {
             let id = name
                 .to_str()
@@ -655,17 +656,22 @@ impl Storage {
                 })?;
             let dir = operations.child(id)?;
             match decode_intent(&dir, id) {
-                Ok((prior, _)) if prior.kind == "recreate" && prior.phase != "complete" => {
-                    // Fully supported pending recreation resumes by ID, except
-                    // terminal damage that requires an explicitly fresh generation.
-                    if prior.phase != "committed"
-                        || !terminal_structure_damaged(
-                            &locked.root,
-                            &locked.common,
-                            &dir,
-                            &prior,
-                            !lock_present,
-                        )?
+                Ok((prior, prior_context))
+                    if prior.kind == "recreate" && prior.phase != "complete" =>
+                {
+                    let unusable = unusable_publication_stages(&locked, &prior, &prior_context)?;
+                    // A partial publication stage is preserved, never restaged.
+                    // Explicit recreation can retain this unusable intent rather
+                    // than demand a same-ID retry that cannot finish.
+                    if unusable.is_empty()
+                        && (prior.phase != "committed"
+                            || !terminal_structure_damaged(
+                                &locked.root,
+                                &locked.common,
+                                &dir,
+                                &prior,
+                                !lock_present,
+                            )?)
                     {
                         return Err(StorageError::new(
                             StorageErrorCode::RecoveryRequired,
@@ -673,6 +679,7 @@ impl Storage {
                             Some(dir.path),
                         ));
                     }
+                    unusable_stage_paths.extend(unusable);
                 }
                 Ok(_) => {}
                 Err(error)
@@ -714,7 +721,10 @@ impl Storage {
                 &mut publication,
             )
         })();
-        operation_result(result, &operation, &dir.path, publication)
+        operation_result(result, &operation, &dir.path, publication).map(|mut outcome| {
+            outcome.recovery_paths.extend(unusable_stage_paths);
+            outcome
+        })
     }
     /// Resume only a strictly validated foundation intent; never replay a foreign generation.
     pub fn recover(
@@ -1309,6 +1319,68 @@ fn publish_source(
     }
     *publication = Publication::Published;
     Ok(())
+}
+// Only inspect the two fixed publication stages for this supported intent.
+// Partial bytes are retained by explicit reset; unsafe paths and unreadable
+// evidence propagate their existing refusal instead of authorizing recovery.
+fn unusable_publication_stages(
+    locked: &files::Locked,
+    operation: &format::Operation,
+    context: &format::Context,
+) -> Result<Vec<PathBuf>, StorageError> {
+    // This interrupted-write exception applies before publication commits.
+    // Committed damage retains the existing terminal-structure recovery rule.
+    if !matches!(operation.phase.as_str(), "prepared" | "archived") {
+        return Ok(Vec::new());
+    }
+    let store_raw = format::metadata_bytes(&operation.metadata());
+    let identity_raw = format::identity_bytes(&operation.store_id);
+    let sources = [
+        (
+            &locked.root,
+            "store.yaml",
+            "store",
+            &store_raw,
+            &context.store,
+        ),
+        (
+            &locked.common,
+            "work.identity.yaml",
+            "identity",
+            &identity_raw,
+            &context.identity,
+        ),
+    ];
+    let mut unusable = Vec::new();
+    for (directory, name, label, intended, prior) in sources {
+        let stage = format!(".storage-{}-{label}", operation.id);
+        if let Some(staged) = directory.optional(&stage)? {
+            let current = directory.optional(name)?;
+            // After exchange the stage holds the previous source, not the
+            // intended new bytes. That ordinary retained copy is usable.
+            let expected = if current.as_ref().is_some_and(|s| s.raw == *intended) {
+                prior.as_ref().map(|s| &s.raw).unwrap_or(intended)
+            } else {
+                intended
+            };
+            if staged.raw != *expected {
+                unusable.push(directory.path.join(stage));
+            }
+        }
+    }
+    if !unusable.is_empty() {
+        // A broken stage is not permission to bypass the live source's captured
+        // identity/generation preconditions.
+        for (directory, name, _, intended, prior) in sources {
+            validate_source(
+                &directory.optional(name)?,
+                prior,
+                intended,
+                &directory.path.join(name),
+            )?;
+        }
+    }
+    Ok(unusable)
 }
 // Read-only validation shared by completed replay and explicit recreation's
 // pending-operation guard. Permission/I/O uncertainty is not proof of damage.
