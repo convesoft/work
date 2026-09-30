@@ -62,7 +62,7 @@ Two agents in linked worktrees attempt to claim the same repository work item. E
 :contributes_to: GOAL-QUIET-HISTORY
 :involves: ACT-OPERATOR
 
-With agent execution stopped, an operator rebuilds derived indexes from valid durable and retained ephemeral files. Rebuilding indexes preserves existing coordination records when the database still exists. If the side database was lost, files can reconstruct work content and edges but cannot reconstruct lost claims or observations. Outcome: the tool distinguishes file-derived reconstruction from coordination recovery and does not invent ownership or runtime history.
+An operator rebuilds an in-memory graph/lookup view from valid durable, temporary and operational entity files. Existing claims, runs, sessions, workspace records and handoffs remain unchanged. After a detected authoritative-file loss or corruption, stop affected execution and use explicit recovery rather than treating it as disposable cache loss. Outcome: ordinary restart/rebuild preserves ownership and retained content; exceptional recovery reports what cannot be reconstructed and does not invent ownership or history.
 :::
 
 :::mara scenario SCN-NESTED-DELIVERY

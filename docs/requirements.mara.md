@@ -61,7 +61,7 @@ Work shall support temporary operational work items that participate in dependen
 :kind: constraint
 :derives_from: SCN-PLAN-WORK
 
-Durable project intent and retained outcomes shall be stored in inspectable YAML and Markdown suitable for version control. A side database shall not be the sole authoritative location of durable project information.
+Durable project intent and retained outcomes shall be stored in inspectable YAML and Markdown suitable for ordinary version control. Feature-level history through normal commits and squash merges is sufficient; Work shall not require a commit per operational transition or custom Git refs.
 :::
 
 :::mara requirement REQ-SIDE-STATE
@@ -71,7 +71,7 @@ Durable project intent and retained outcomes shall be stored in inspectable YAML
 :kind: constraint
 :derives_from: SCN-QUIET-EXECUTION
 
-Work shall support a side database for operational and maintenance state alongside durable YAML and Markdown. Routine operational changes shall not require changes to version-controlled durable content.
+Work shall persist operational and maintenance state in inspectable Markdown/YAML files, separately from version-controlled project content. Every entity shall have its own authoritative file in a location appropriate to its lifecycle; a single file containing all claims, runs, sessions and workspaces shall not replace those entities. No SQLite or other database shall be required. Routine operational changes shall not dirty durable project files, and process exit shall not discard active ownership or execution context.
 :::
 
 :::mara requirement REQ-CLAIM-EXCLUSION
@@ -103,17 +103,17 @@ The control session shall be able to inspect another worktree by selecting its f
 :kind: functional
 :derives_from: SCN-CONCURRENT-AGENTS
 
-Claims shall expose their owner and recorded timestamps. The initial version shall not automatically expire claims or require heartbeats. A claim persists until completion, explicit release, or explicit recovery/reassignment. The controller resolves an abandoned claim explicitly; an old owner's token shall no longer authorize owner operations after release or reassignment. Database-loss recovery is an explicit exceptional operation: stop existing executors, reconstruct file-derived state, and establish fresh claims rather than silently restoring or inferring ownership.
+Claims shall expose their owner and recorded timestamps. The initial version shall not automatically expire claims or require heartbeats. A claim persists until completion, explicit release, or explicit recovery/reassignment. The controller resolves an abandoned claim explicitly; an old owner's token shall no longer authorize owner operations after release or reassignment. Detected loss or corruption of authoritative ownership files is an explicit recovery condition. Report the uncertainty; retain available file-based inspection/readiness with a storage warning, but refuse claims whose exclusion cannot be established. Stop affected executors before explicit ownership recovery, validate any restored files, and invalidate former tokens before fresh ownership is established. Rebuilding a graph must never infer owners, silently recreate lost claims, or erase surviving execution files.
 :::
 
 :::mara requirement REQ-INDEX-REBUILD
 :mid: 01M3KAQ0TWGHT4CWF6D8ZMZ166
-:title: Rebuild derived indexes without destroying runtime state
+:title: Rebuild derived views without changing authoritative entities
 :status: draft
 :kind: quality
 :derives_from: SCN-REBUILD-INDEX
 
-Work shall rebuild derived graph and lookup data from durable and retained ephemeral files without rewriting those files or deleting existing claims and runtime records as an incidental side effect. Whole-database loss shall be reported as loss of operational state; it shall not discard surviving ephemeral files or describe lost coordination as a lossless cache refresh.
+Work shall rebuild disposable graph and lookup views from authoritative durable, temporary and operational files without rewriting or deleting those files. Restart or rebuilding a derived view shall preserve claims, session/workspace associations and retained execution content. Detected loss or corruption of an authoritative entity shall be reported as such, never described as a lossless cache refresh. Detailed recovery operations remain governed by the entity's lifecycle.
 :::
 
 :::mara requirement REQ-RUN-FINALIZATION
@@ -153,7 +153,7 @@ Core work operations shall be available through a CLI with structured JSON outpu
 :kind: quality
 :derives_from: SCN-REPEATABLE-REVIEW
 
-A template instantiation shall validate its inputs and graph before publishing its ephemeral item files as a complete runnable run. Invalid input or interruption before publication shall not expose a partial runnable process. Retried instantiation semantics and durable template expansion remain open. Because the files are authoritative, this requires a file publication and reconciliation protocol, not only a SQLite transaction.
+A template instantiation shall validate its inputs and graph before publishing its ephemeral item files as a complete runnable run. Invalid input or interruption before publication shall not expose a partial runnable process. Retried instantiation semantics and durable template expansion remain open. Because several entity files are authoritative, publication requires a committed visibility boundary and recoverable file protocol; a shared lock alone is insufficient.
 :::
 
 :::mara requirement REQ-GATE-CONTEXT
@@ -173,7 +173,7 @@ Retired proposal: Work would interpret structured external observations and enfo
 :kind: constraint
 :derives_from: SCN-QUIET-EXECUTION
 
-Ephemeral item content and its graph relationships shall be stored in inspectable filesystem documents until explicitly squashed or cleaned. SQLite may index these files and coordinate ownership, but it shall not be the sole authoritative representation of temporary work.
+Ephemeral item content and graph relationships, run metadata and template application provenance shall be stored in inspectable filesystem documents until explicitly finalized. Each entity shall have its own file and defined retention; a process restart, derived-view rebuild or feature-worktree removal shall not discard the shared execution files.
 :::
 
 :::mara requirement REQ-CLI-MCP-PARITY
