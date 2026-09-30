@@ -355,6 +355,22 @@ fn bootstrap_fixture_exposes_only_next_manual_child() {
     let operations_item = "cec96d7e174d47c1ab3117968b0bba0f";
     let cli_item = "393f86fafaf54449944d27da1af0a24b";
     let mcp_item = "04368710988a405d8e96f85d3bae6b01";
+    // Unrelated ready work must not change this bootstrap handoff scenario.
+    f.write(99, &manual("open", ""));
+    let bootstrap_items = [
+        foundation,
+        loader,
+        graph_item,
+        operations_item,
+        cli_item,
+        mcp_item,
+    ];
+    let bootstrap_ready = |graph: &ItemGraph| {
+        ready(graph)
+            .into_iter()
+            .filter(|id| bootstrap_items.contains(&id.as_str()))
+            .collect::<Vec<_>>()
+    };
     // Fixture starts at the item-2-to-item-3 handoff regardless of live progress.
     let loader_path = f.0.join(".work/items").join(format!("{loader}.md"));
     let graph_path = f.0.join(".work/items").join(format!("{graph_item}.md"));
@@ -371,11 +387,11 @@ fn bootstrap_fixture_exposes_only_next_manual_child() {
     set_fixture_state(&mcp_path, "open");
     let graph = f.graph();
     assert!(graph.is_valid(), "{:?}", graph.diagnostics());
-    assert_eq!(ready(&graph), vec![loader.to_owned()]);
+    assert_eq!(bootstrap_ready(&graph), vec![loader.to_owned()]);
     assert_eq!(
         graph.relations(foundation).unwrap().blocks,
         [loader.to_owned()]
     );
     set_fixture_state(&loader_path, "done");
-    assert_eq!(ready(&f.graph()), vec![graph_item.to_owned()]);
+    assert_eq!(bootstrap_ready(&f.graph()), vec![graph_item.to_owned()]);
 }
