@@ -23,7 +23,7 @@ Backup creation and restoring old backups are deferred. This foundation reports 
 - Linked worktrees resolve the same shared entity folders; branch switching or feature-worktree removal does not remove shared operational files or leak durable completion between checkout views. No database or all-entity snapshot is required.
 - A selected checkout reloads changed files and gives correct graph readiness; rebuilding a disposable view preserves authoritative entity files byte-for-byte.
 - Independent processes serialize mutations through the same stable lock inode; process exit releases the lock. Single-file publication and interrupted initialization/format changes retain explicit recovery context.
-- CLI/MCP distinguish contention, invalid formats, missing/corrupt state and permission/I/O failures. Available file inspection/readiness reports storage warnings while uncertain ownership blocks claims. Tests cover restart, divergent views, unsafe paths and recovery without silently resetting ownership.
+- CLI/MCP distinguish contention, invalid formats, missing/corrupt state and permission/I/O failures. Available file inspection/readiness reports storage warnings; storage inspection exposes coordination unavailable for uninitialized, damaged, unreadable or incomplete storage. Tests exercise this lower-level status without a claim command. Claim acquisition consumes and enforces the status in w-299765f4. Tests cover restart, divergent views, unsafe paths and recovery without silently resetting ownership.
 
 ## Mara contracts
 
