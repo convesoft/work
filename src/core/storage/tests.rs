@@ -1043,3 +1043,281 @@ fn pending_intent_guard_refuses_unreadable_or_unsafe_components_without_archival
         }
     }
 }
+
+#[test]
+fn completed_receipt_recovery_retries_file_and_operation_directory_sync_without_republication() {
+    use std::os::unix::fs::MetadataExt;
+    for kind in ["initialize", "recreate"] {
+        let f = Fixture::new();
+        if kind == "recreate" {
+            f.storage.initialize().unwrap();
+        }
+        let mut failure = None;
+        let mut stop = |step: &str| {
+            if step == "committed" {
+                failure = Some(files::fail_next("publication_sync"));
+            }
+            Ok(())
+        };
+        let error = if kind == "initialize" {
+            f.storage.initialize_inner(&mut stop).unwrap_err()
+        } else {
+            f.storage
+                .recreate_inner(f.request(), &mut stop)
+                .unwrap_err()
+        };
+        drop(failure);
+        let id = error.operation_id.as_deref().unwrap();
+        let root = f.storage.project.git_common_dir.join("work");
+        let dir = root.join("operations").join(id);
+        let path = dir.join("operation.yaml");
+        let receipt = fs::read(&path).unwrap();
+        assert_eq!(
+            format::operation(&receipt, &path).unwrap().phase,
+            "complete"
+        );
+        let inode = fs::metadata(&path).unwrap().ino();
+        let entries = fs::read_dir(&dir).unwrap().count();
+        let metadata = fs::read(root.join("store.yaml")).unwrap();
+        let request = || RecoverRequest {
+            executors_stopped: true,
+            acknowledge_loss: true,
+            all_clients_stopped: false,
+        };
+        for point in [
+            "receipt_file_sync",
+            "receipt_file_sync",
+            "receipt_directory_sync",
+            "receipt_directory_sync",
+        ] {
+            let _guard = files::fail_next(point);
+            let refusal = f.storage.recover(id, request()).unwrap_err();
+            assert_eq!(refusal.code, StorageErrorCode::Io, "{kind}/{point}");
+            assert_eq!(refusal.errno, Some(5));
+            assert_eq!(
+                refusal.path.as_ref(),
+                Some(if point == "receipt_file_sync" {
+                    &path
+                } else {
+                    &dir
+                })
+            );
+            assert_eq!(fs::read(&path).unwrap(), receipt);
+            assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), entries);
+            assert_eq!(fs::read(root.join("store.yaml")).unwrap(), metadata);
+        }
+        let result = f.storage.recover(id, request()).unwrap();
+        assert!(result.storage.coordination_available);
+        assert_eq!(result.operation_id.as_deref(), Some(id));
+        assert_eq!(fs::read(&path).unwrap(), receipt);
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(fs::read(root.join("store.yaml")).unwrap(), metadata);
+    }
+}
+
+#[test]
+fn storage_initializer_child() {
+    let Some(path) = std::env::var_os("WORK_INIT_RACE_CHECKOUT") else {
+        return;
+    };
+    use std::os::unix::fs::MetadataExt;
+    let path = PathBuf::from(path);
+    let storage = Storage::new(crate::core::project::discover(Some(&path)).unwrap());
+    let result = storage.initialize().unwrap();
+    assert!(result.changed);
+    let metadata = result.storage.metadata.unwrap();
+    let root = fs::metadata(&result.storage.path).unwrap();
+    let lock = fs::metadata(&result.storage.lock_path).unwrap();
+    fs::write(
+        path.join("winner-state.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "store_id":metadata.store_id,"generation":metadata.recovery_generation,
+            "root_dev":root.dev(),"root_ino":root.ino(),"lock_dev":lock.dev(),"lock_ino":lock.ino()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn independent_initializer_winning_absence_to_root_create_race_is_rechecked_under_existing_lock() {
+    use std::os::unix::fs::MetadataExt;
+    let mut f = Fixture::new();
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&f.root)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    f.storage = Storage::new(crate::core::project::discover(Some(&f.root)).unwrap());
+    let result = f
+        .storage
+        .initialize_inner(&mut |step| {
+            if step == "before_root_create" {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "core::storage::tests::storage_initializer_child",
+                        "--nocapture",
+                    ])
+                    .env("WORK_INIT_RACE_CHECKOUT", &f.root)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(!result.changed);
+    assert!(result.operation_id.is_none());
+    let expected: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.root.join("winner-state.json")).unwrap()).unwrap();
+    let metadata = result.storage.metadata.unwrap();
+    assert_eq!(expected["store_id"], metadata.store_id);
+    assert_eq!(expected["generation"], metadata.recovery_generation);
+    let root = fs::metadata(&result.storage.path).unwrap();
+    let lock = fs::metadata(&result.storage.lock_path).unwrap();
+    assert_eq!(expected["root_dev"], root.dev());
+    assert_eq!(expected["root_ino"], root.ino());
+    assert_eq!(expected["lock_dev"], lock.dev());
+    assert_eq!(expected["lock_ino"], lock.ino());
+    assert_eq!(
+        fs::read_dir(result.storage.path.join("operations"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn root_create_race_never_adopts_unlocked_remnants_or_unsafe_replacements() {
+    for kind in ["remnant", "symlink"] {
+        let f = Fixture::new();
+        let root = f.storage.project.git_common_dir.join("work");
+        let result = f
+            .storage
+            .initialize_inner(&mut |step| {
+                if step == "before_root_create" {
+                    if kind == "remnant" {
+                        fs::create_dir(&root).unwrap();
+                    } else {
+                        std::os::unix::fs::symlink(&f.root, &root).unwrap();
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(
+            result.code,
+            if kind == "remnant" {
+                StorageErrorCode::RecoveryRequired
+            } else {
+                StorageErrorCode::UnsafePath
+            }
+        );
+        assert!(!root.join("coordination.lock").exists());
+        assert!(
+            !f.storage
+                .project
+                .git_common_dir
+                .join("work.identity.yaml")
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn unchanged_intended_witness_rejects_same_bytes_with_changed_fingerprint_at_both_boundaries() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for point in ["prepared", "live_folders"] {
+        for change in ["rewrite", "inode", "mode"] {
+            let f = Fixture::new();
+            f.storage.initialize().unwrap();
+            let common = f.storage.project.git_common_dir.clone();
+            let witness = common.join("work.identity.yaml");
+            let raw = fs::read(&witness).unwrap();
+            let prior = files::Directory::open(&common)
+                .unwrap()
+                .read("work.identity.yaml")
+                .unwrap();
+            let metadata = fs::read(common.join("work/store.yaml")).unwrap();
+            let mut changed = None;
+            let error = f
+                .storage
+                .recreate_inner(f.request(), &mut |step| {
+                    if step == point {
+                        match change {
+                            "rewrite" => {
+                                fs::write(&witness, &raw).unwrap();
+                                // A known timestamp change makes this case independent
+                                // of timestamp resolution or scheduler timing.
+                                let times = rustix::fs::Timestamps {
+                                    last_access: rustix::fs::Timespec {
+                                        tv_sec: prior.mtime.0 - 1,
+                                        tv_nsec: 0,
+                                    },
+                                    last_modification: rustix::fs::Timespec {
+                                        tv_sec: prior.mtime.0 - 1,
+                                        tv_nsec: 0,
+                                    },
+                                };
+                                rustix::fs::utimensat(
+                                    rustix::fs::CWD,
+                                    &witness,
+                                    &times,
+                                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                                )
+                                .unwrap();
+                            }
+                            "inode" => {
+                                let replacement = common.join("replacement-witness");
+                                fs::write(&replacement, &raw).unwrap();
+                                fs::set_permissions(
+                                    &replacement,
+                                    fs::Permissions::from_mode(0o600),
+                                )
+                                .unwrap();
+                                fs::rename(&replacement, &witness).unwrap();
+                            }
+                            "mode" => {
+                                fs::set_permissions(&witness, fs::Permissions::from_mode(0o640))
+                                    .unwrap()
+                            }
+                            _ => unreachable!(),
+                        }
+                        changed = Some(
+                            files::Directory::open(&common)
+                                .unwrap()
+                                .read("work.identity.yaml")
+                                .unwrap(),
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
+            assert_eq!(error.code, StorageErrorCode::Conflict, "{point}/{change}");
+            assert_eq!(error.path.as_ref(), Some(&witness));
+            let unexpected = changed.unwrap();
+            assert_ne!(unexpected, prior);
+            assert_eq!(
+                files::Directory::open(&common)
+                    .unwrap()
+                    .read("work.identity.yaml")
+                    .unwrap(),
+                unexpected
+            );
+            assert_eq!(fs::read(&witness).unwrap(), raw);
+            assert_eq!(fs::read(common.join("work/store.yaml")).unwrap(), metadata);
+            if change == "inode" {
+                assert_ne!(fs::metadata(&witness).unwrap().ino(), prior.identity.ino);
+            }
+            assert!(!f.storage.inspect().unwrap().coordination_available);
+        }
+    }
+}

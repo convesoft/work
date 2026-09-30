@@ -403,19 +403,7 @@ impl Storage {
     ) -> Result<StorageOutcome, StorageError> {
         let common = files::Directory::open(&self.project.git_common_dir)?;
         if common.exists("work")? {
-            let locked = files::Locked::open(common, true, false)?;
-            let mut inspection = self.empty_inspection();
-            self.inspect_locked(&locked, &mut inspection);
-            if inspection.coordination_available {
-                return Ok(StorageOutcome {
-                    changed: false,
-                    storage: inspection,
-                    operation_id: None,
-                    recovery_paths: Vec::new(),
-                    loss: None,
-                });
-            }
-            return Err(inspection_error(&inspection));
+            return self.initialize_existing(common);
         }
         if common.exists("work.identity.yaml")? {
             // Refuse a future witness version even before creating a root.
@@ -427,7 +415,25 @@ impl Storage {
                 Some(common.path.join("work")),
             ));
         }
-        common.create("work")?;
+        checkpoint("before_root_create")?;
+        match common.create("work") {
+            Ok(_) => {}
+            Err(error)
+                if error.code == StorageErrorCode::Conflict
+                    && error.errno == Some(rustix::io::Errno::EXIST.raw_os_error()) =>
+            {
+                // Another initializer won this exact create race. Recheck under
+                // its existing lock; never create a lock or adopt root remnants.
+                return self.initialize_existing(common).map_err(|mut error| {
+                    if error.code == StorageErrorCode::StorageMissing {
+                        error.code = StorageErrorCode::RecoveryRequired;
+                        error.message = "concurrent initialization is incomplete; inspect before explicit recovery".into();
+                    }
+                    error
+                });
+            }
+            Err(error) => return Err(error),
+        }
         let locked = files::Locked::open(common, true, true)?;
         locked.verify()?;
         if locked.common.exists("work.identity.yaml")? {
@@ -464,6 +470,24 @@ impl Storage {
             )
         })();
         operation_result(result, &operation, &dir.path, publication)
+    }
+    fn initialize_existing(
+        &self,
+        common: files::Directory,
+    ) -> Result<StorageOutcome, StorageError> {
+        let locked = files::Locked::open(common, true, false)?;
+        let mut inspection = self.empty_inspection();
+        self.inspect_locked(&locked, &mut inspection);
+        if !inspection.coordination_available {
+            return Err(inspection_error(&inspection));
+        }
+        Ok(StorageOutcome {
+            changed: false,
+            storage: inspection,
+            operation_id: None,
+            recovery_paths: Vec::new(),
+            loss: None,
+        })
     }
     /// Retain surviving bytes before publishing an empty, fresh operational generation.
     pub fn recreate(&self, request: RecreateRequest) -> Result<StorageOutcome, StorageError> {
@@ -920,6 +944,18 @@ impl Storage {
             operation.phase = "complete".into();
             publish_phase(dir, operation)?;
             checkpoint("complete")?;
+        } else {
+            let receipt = dir.read("operation.yaml")?;
+            let decoded = format::operation(&receipt.raw, &dir.path.join("operation.yaml"))?;
+            if decoded.bytes() != operation.bytes() {
+                return Err(files::conflict(
+                    &dir.path.join("operation.yaml"),
+                    "completed receipt changed before sync retry",
+                ));
+            }
+            let _synced_receipt = dir.sync_source("operation.yaml", &receipt)?;
+            dir.sync_receipt_directory()?;
+            locked.verify()?;
         }
         let mut inspection = self.empty_inspection();
         self.inspect_locked(locked, &mut inspection);
@@ -1109,7 +1145,12 @@ fn validate_source(
     intended: &[u8],
     path: &std::path::Path,
 ) -> Result<(), StorageError> {
-    if current == prior || current.as_ref().is_some_and(|s| s.raw == intended) {
+    // Unchanged intended bytes were never a replacement publication: retain
+    // every captured fingerprint precondition rather than accepting raw equality.
+    let unchanged_intent = prior.as_ref().is_some_and(|source| source.raw == intended);
+    if current == prior
+        || (!unchanged_intent && current.as_ref().is_some_and(|s| s.raw == intended))
+    {
         Ok(())
     } else {
         Err(files::conflict(
@@ -1136,6 +1177,7 @@ fn publish_source(
     let stage_name = format!(".storage-{}-{label}", operation.id);
     let stage_path = dir.path.join(&stage_name);
     if current.as_ref().is_some_and(|s| s.raw == raw) {
+        validate_source(&current, prior, raw, &dir.path.join(name))?;
         // Even a completed retry re-syncs published objects before reporting success.
         let _synced_source =
             dir.sync_source(name, current.as_ref().expect("matching published source"))?;

@@ -103,8 +103,13 @@ impl Directory {
         valid_name(OsStr::new(name))?;
         self.verify()?;
         let path = self.path.join(name);
-        fs::mkdirat(&self.file, name, Mode::from_bits_truncate(0o700))
-            .map_err(|e| map(e, &path))?;
+        fs::mkdirat(&self.file, name, Mode::from_bits_truncate(0o700)).map_err(|e| {
+            let mut error = map(e, &path);
+            if e == rustix::io::Errno::EXIST {
+                error.errno = Some(e.raw_os_error());
+            }
+            error
+        })?;
         let before =
             fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| map(e, &path))?;
         if FileType::from_raw_mode(before.st_mode) != FileType::Directory {
@@ -306,7 +311,9 @@ impl Directory {
         }
         #[cfg(test)]
         inject(
-            if name.starts_with(".storage-") {
+            if name == "operation.yaml" {
+                "receipt_file_sync"
+            } else if name.starts_with(".storage-") {
                 "retry_stage_sync"
             } else {
                 "source_sync"
@@ -362,6 +369,12 @@ impl Directory {
     }
     pub fn sync(&self) -> Result<(), StorageError> {
         fs::fsync(&self.file).map_err(|e| map(e, &self.path))
+    }
+    pub fn sync_receipt_directory(&self) -> Result<(), StorageError> {
+        #[cfg(test)]
+        inject("receipt_directory_sync", &self.path)?;
+        self.sync()?;
+        self.verify()
     }
     pub fn stage(&self, name: &str, raw: &[u8]) -> Result<(), StorageError> {
         self.verify()?;

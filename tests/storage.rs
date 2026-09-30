@@ -1021,3 +1021,74 @@ fn real_callers_report_malformed_pending_intent_and_explicitly_retain_it_without
         assert_eq!(fs::read(archive.join("operation.yaml")).unwrap(), receipt);
     }
 }
+
+#[test]
+fn real_cli_and_mcp_retry_complete_receipts_without_rewriting_bytes_or_generation() {
+    for kind in ["initialize", "recreate"] {
+        let f = Fixture::new();
+        let (code, mut outcome) = f.cli(&["storage", "init"]);
+        assert_eq!(code, 0);
+        if kind == "recreate" {
+            let meta = &outcome["result"]["storage"]["metadata"];
+            let (code, recreated) = f.cli(&[
+                "storage",
+                "recreate",
+                "--expected-store-id",
+                meta["store_id"].as_str().unwrap(),
+                "--expected-generation",
+                meta["recovery_generation"].as_str().unwrap(),
+                "--executors-stopped",
+                "--acknowledge-loss",
+            ]);
+            assert_eq!(code, 0);
+            outcome = recreated;
+        }
+        let id = outcome["result"]["operation_id"].as_str().unwrap();
+        let dir = f.root().join("operations").join(id);
+        let receipt = dir.join("operation.yaml");
+        let parsed: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+        // Valid alternate formatting must be synced in place, not normalized.
+        let bytes = serde_json::to_vec(&parsed).unwrap();
+        fs::write(&receipt, &bytes).unwrap();
+        let before = fs::metadata(&receipt).unwrap();
+        let count = fs::read_dir(&dir).unwrap().count();
+        let meta = outcome["result"]["storage"]["metadata"].clone();
+        let (code, retry) = f.cli(&[
+            "storage",
+            "recover",
+            id,
+            "--executors-stopped",
+            "--acknowledge-loss",
+        ]);
+        assert_eq!(code, 0, "{retry}");
+        assert_eq!(retry["result"]["storage"]["metadata"], meta);
+        assert_eq!(retry["result"]["operation_id"], id);
+        let mut client = Mcp::new(&f.path);
+        let retry = client.call(
+            "storage_recover",
+            json!({"operation_id":id,"executors_stopped":true,"acknowledge_loss":true}),
+        );
+        assert_ne!(retry["isError"], true, "{retry}");
+        assert_eq!(retry["structuredContent"]["storage"]["metadata"], meta);
+        assert_eq!(retry["structuredContent"]["operation_id"], id);
+        let after = fs::metadata(&receipt).unwrap();
+        assert_eq!(
+            (
+                after.dev(),
+                after.ino(),
+                after.mode(),
+                after.mtime(),
+                after.mtime_nsec()
+            ),
+            (
+                before.dev(),
+                before.ino(),
+                before.mode(),
+                before.mtime(),
+                before.mtime_nsec()
+            )
+        );
+        assert_eq!(fs::read(&receipt).unwrap(), bytes);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), count);
+    }
+}
