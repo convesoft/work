@@ -4,6 +4,8 @@ use rustix::fs::{self, AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -103,14 +105,117 @@ impl Directory {
         let path = self.path.join(name);
         fs::mkdirat(&self.file, name, Mode::from_bits_truncate(0o700))
             .map_err(|e| map(e, &path))?;
-        let fd = fs::openat(&self.file, name, directory_flags(), Mode::empty())
-            .map_err(|e| map(e, &path))?;
-        fs::fchmod(&fd, Mode::from_bits_truncate(0o700)).map_err(|e| map(e, &path))?;
-        let result = Self::from_file(File::from(fd), path)?;
+        let before =
+            fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| map(e, &path))?;
+        if FileType::from_raw_mode(before.st_mode) != FileType::Directory {
+            return Err(unsafe_path(&path, "new directory was substituted"));
+        }
+        let expected = Identity {
+            dev: before.st_dev as u64,
+            ino: before.st_ino as u64,
+        };
+        // Retain a permission-recovery pin until the ordinary FD and pathname
+        // have both been validated, even across the normal reopen.
+        let mut _permission_pin = None;
+        let fd = match fs::openat(&self.file, name, directory_flags(), Mode::empty()) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::ACCESS) => {
+                _permission_pin = self.restore_new_directory_mode(name, &expected)?;
+                fs::openat(&self.file, name, directory_flags(), Mode::empty())
+                    .map_err(|e| map(e, &path))?
+            }
+            Err(error) => return Err(map(error, &path)),
+        };
+        let file = File::from(fd);
+        let opened = file
+            .metadata()
+            .map_err(|e| StorageError::io(e, path.clone()))?;
+        if !opened.is_dir() || Identity::metadata(&opened) != expected {
+            return Err(conflict(&path, "new directory changed while opening"));
+        }
+        fs::fchmod(&file, Mode::from_bits_truncate(0o700)).map_err(|e| map(e, &path))?;
+        let result = Self::from_file(file, path)?;
+        result.verify()?;
         result.sync()?;
         self.sync()?;
         self.verify()?;
         Ok(result)
+    }
+    // Only called for an inaccessible directory this attempt just created.
+    // Never follow the mutable storage entry to recover from a restrictive umask.
+    pub(super) fn restore_new_directory_mode(
+        &self,
+        name: &str,
+        expected: &Identity,
+    ) -> Result<Option<File>, StorageError> {
+        self.verify()?;
+        let path = self.path.join(name);
+        #[cfg(target_os = "linux")]
+        let held = {
+            let fd = fs::openat(
+                &self.file,
+                name,
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| map(e, &path))?;
+            let stat = fs::fstat(&fd).map_err(|e| map(e, &path))?;
+            if stat.st_dev as u64 != expected.dev || stat.st_ino as u64 != expected.ino {
+                return Err(conflict(
+                    &path,
+                    "new directory changed before permission recovery",
+                ));
+            }
+            // Linux fchmod cannot operate on O_PATH. The kernel's procfs FD
+            // reference pins this inode, as in glibc's nofollow fchmodat fallback.
+            // Without procfs fail closed: never chmod the storage pathname.
+            #[cfg(test)]
+            inject("directory_mode", &path)?;
+            let held_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+            fs::chmodat(
+                CWD,
+                held_path.as_str(),
+                Mode::from_bits_truncate(0o700),
+                AtFlags::empty(),
+            )
+            .map_err(|e| StorageError::io(std::io::Error::from(e), path.clone()))?;
+            Some(File::from(fd))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let held = {
+            let stat = fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|e| map(e, &path))?;
+            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+                || stat.st_dev as u64 != expected.dev
+                || stat.st_ino as u64 != expected.ino
+            {
+                return Err(conflict(
+                    &path,
+                    "new directory changed before permission recovery",
+                ));
+            }
+            fs::chmodat(
+                &self.file,
+                name,
+                Mode::from_bits_truncate(0o700),
+                AtFlags::SYMLINK_NOFOLLOW,
+            )
+            .map_err(|e| map(e, &path))?;
+            None
+        };
+        self.verify()?;
+        let stat =
+            fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| map(e, &path))?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+            || stat.st_dev as u64 != expected.dev
+            || stat.st_ino as u64 != expected.ino
+        {
+            return Err(conflict(
+                &path,
+                "new directory changed during permission recovery",
+            ));
+        }
+        Ok(held)
     }
     pub fn ensure(&self, name: &str) -> Result<Self, StorageError> {
         if self.exists(name)? {
@@ -137,6 +242,9 @@ impl Directory {
         }
     }
     pub fn read(&self, name: &str) -> Result<Source, StorageError> {
+        self.read_open(name).map(|(_, source)| source)
+    }
+    fn read_open(&self, name: &str) -> Result<(File, Source), StorageError> {
         valid_name(OsStr::new(name))?;
         self.verify()?;
         let path = self.path.join(name);
@@ -153,6 +261,8 @@ impl Directory {
                 Some(path),
             ));
         }
+        #[cfg(test)]
+        inject("source_open", &path)?;
         let fd = fs::openat(
             &self.file,
             name,
@@ -184,7 +294,34 @@ impl Directory {
             return Err(conflict(&path, "source changed while reading"));
         }
         self.verify()?;
-        Ok(source)
+        Ok((file, source))
+    }
+    /// Reopen without blocking on a substituted special file, validate the
+    /// captured source and sync that held inode before relying on its durability.
+    pub fn sync_source(&self, name: &str, expected: &Source) -> Result<File, StorageError> {
+        let (file, source) = self.read_open(name)?;
+        let path = self.path.join(name);
+        if &source != expected {
+            return Err(conflict(&path, "source changed before file sync"));
+        }
+        #[cfg(test)]
+        inject(
+            if name.starts_with(".storage-") {
+                "retry_stage_sync"
+            } else {
+                "source_sync"
+            },
+            &path,
+        )?;
+        fs::fsync(&file).map_err(|e| map(e, &path))?;
+        let after = file
+            .metadata()
+            .map_err(|e| StorageError::io(e, path.clone()))?;
+        if Source::metadata(source.raw.clone(), &after) != source || self.read(name)? != source {
+            return Err(conflict(&path, "source changed during file sync"));
+        }
+        self.verify()?;
+        Ok(file)
     }
     pub fn names(&self) -> Result<Vec<OsString>, StorageError> {
         self.verify()?;
@@ -310,6 +447,16 @@ impl Directory {
             e
         })
     }
+    pub fn sync_archive_parents(&self, destination: &Self) -> Result<(), StorageError> {
+        #[cfg(test)]
+        inject("archive_source_sync", &self.path)?;
+        self.sync()?;
+        #[cfg(test)]
+        inject("archive_destination_sync", &destination.path)?;
+        destination.sync()?;
+        self.verify()?;
+        destination.verify()
+    }
     pub fn rename_child(
         &self,
         name: &str,
@@ -333,10 +480,7 @@ impl Directory {
             RenameFlags::NOREPLACE,
         )
         .map_err(|e| map(e, &destination.path.join(name)))?;
-        self.sync()?;
-        destination.sync()?;
-        self.verify()?;
-        destination.verify()?;
+        self.sync_archive_parents(destination)?;
         if &destination.child(name)?.identity != expected {
             return Err(conflict(
                 &destination.path.join(name),
@@ -504,6 +648,32 @@ fn map(error: rustix::io::Errno, path: &Path) -> StorageError {
 #[cfg(test)]
 thread_local! {
     static FAILURE: std::cell::Cell<Option<&'static str>>=const {std::cell::Cell::new(None)};
+    static ACTION: std::cell::RefCell<Option<TestAction>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+struct TestAction {
+    point: &'static str,
+    remaining: usize,
+    action: Box<dyn FnOnce()>,
+}
+#[cfg(test)]
+pub(super) fn on_next(point: &'static str, action: impl FnOnce() + 'static) -> FailureGuard {
+    on_nth(point, 1, action)
+}
+#[cfg(test)]
+pub(super) fn on_nth(
+    point: &'static str,
+    remaining: usize,
+    action: impl FnOnce() + 'static,
+) -> FailureGuard {
+    ACTION.with(|slot| {
+        *slot.borrow_mut() = Some(TestAction {
+            point,
+            remaining,
+            action: Box::new(action),
+        })
+    });
+    FailureGuard
 }
 #[cfg(test)]
 pub(super) struct FailureGuard;
@@ -511,6 +681,7 @@ pub(super) struct FailureGuard;
 impl Drop for FailureGuard {
     fn drop(&mut self) {
         FAILURE.set(None);
+        ACTION.with(|slot| *slot.borrow_mut() = None);
     }
 }
 #[cfg(test)]
@@ -520,6 +691,21 @@ pub(super) fn fail_next(point: &'static str) -> FailureGuard {
 }
 #[cfg(test)]
 fn inject(point: &str, path: &Path) -> Result<(), StorageError> {
+    let action = ACTION.with(|slot| {
+        let mut action = slot.borrow_mut();
+        if let Some(selected) = action.as_mut()
+            && selected.point == point
+        {
+            selected.remaining -= 1;
+            if selected.remaining == 0 {
+                return action.take();
+            }
+        }
+        None
+    });
+    if let Some(action) = action {
+        (action.action)();
+    }
     if FAILURE.get() == Some(point) {
         FAILURE.set(None);
         return Err(StorageError::io(

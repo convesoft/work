@@ -603,6 +603,21 @@ impl Storage {
                 && prior.kind == "recreate"
                 && prior.phase != "complete"
             {
+                // A healthy committed intent still needs its own completion.
+                // Supersession is only for terminal structure that cannot replay
+                // safely; explicit recreation then retains it in a fresh generation.
+                if prior.phase == "committed"
+                    && terminal_structure_damaged(
+                        &locked.root,
+                        &locked.common,
+                        &dir,
+                        &prior,
+                        !lock_present,
+                    )?
+                {
+                    context.operations.insert(id.to_owned(), dir.identity);
+                    continue;
+                }
                 return Err(StorageError::new(
                     StorageErrorCode::RecoveryRequired,
                     "resume the existing recreation by ID instead of superseding it",
@@ -667,6 +682,20 @@ impl Storage {
                 &advisory_dir.read("operation.yaml")?.raw,
                 &advisory_dir.path.join("operation.yaml"),
             )?;
+            if advisory_op.id != operation_id {
+                return Err(StorageError::new(
+                    StorageErrorCode::InvalidFormat,
+                    "operation ID does not match its directory",
+                    Some(advisory_dir.path),
+                ));
+            }
+            if matches!(advisory_op.phase.as_str(), "committed" | "complete") {
+                return Err(StorageError::new(
+                    StorageErrorCode::StorageMissing,
+                    "completed receipt cannot replace a lost coordination lock; explicit recreation required",
+                    Some(root.path.join("coordination.lock")),
+                ));
+            }
             if advisory_op.kind == "recreate"
                 && (!request.executors_stopped || !request.acknowledge_loss)
             {
@@ -796,10 +825,8 @@ impl Storage {
                 "completed receipt no longer matches current store generation",
             ));
         }
-        if operation.phase == "complete" || operation.phase == "committed" {
-            for name in DIRECTORIES {
-                locked.root.child(name)?;
-            }
+        if matches!(operation.phase.as_str(), "complete" | "committed") {
+            validate_terminal_structure(&locked.root, operation, context)?;
         }
         let terminal = matches!(operation.phase.as_str(), "complete" | "committed");
         let readonly_archive =
@@ -1089,19 +1116,8 @@ fn publish_source(
     let stage_path = dir.path.join(&stage_name);
     if current.as_ref().is_some_and(|s| s.raw == raw) {
         // Even a completed retry re-syncs published objects before reporting success.
-        std::fs::File::from(
-            rustix::fs::openat(
-                &dir.file,
-                name,
-                rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            )
-            .map_err(|e| StorageError::io(std::io::Error::from(e), dir.path.join(name)))?,
-        )
-        .sync_all()
-        .map_err(|e| StorageError::io(e, dir.path.join(name)))?;
+        let _synced_source =
+            dir.sync_source(name, current.as_ref().expect("matching published source"))?;
         dir.sync()?;
         *publication = Publication::Published;
         if dir.exists(&stage_name)? {
@@ -1123,7 +1139,9 @@ fn publish_source(
                 "existing publication stage has unexpected bytes",
             ));
         }
-        // A prior interrupted synced stage can be reused without rewriting it.
+        // Correct bytes may remain after a failed fsync. Retry that held-file
+        // sync before publication, even when the stage need not be rewritten.
+        let _synced_stage = dir.sync_source(&stage_name, &staged)?;
         let flags = if prior.is_some() {
             rustix::fs::RenameFlags::EXCHANGE
         } else {
@@ -1166,6 +1184,87 @@ fn publish_source(
     *publication = Publication::Published;
     Ok(())
 }
+// Read-only validation shared by completed replay and explicit recreation's
+// pending-operation guard. Permission/I/O uncertainty is not proof of damage.
+fn terminal_structure_damaged(
+    root: &files::Directory,
+    common: &files::Directory,
+    dir: &files::Directory,
+    operation: &format::Operation,
+    missing_lock: bool,
+) -> Result<bool, StorageError> {
+    let store = root.optional("store.yaml")?;
+    let witness = common.optional("work.identity.yaml")?;
+    // Missing/invalid terminal evidence requires a fresh generation. Supported
+    // intact evidence must still name this intent: another valid generation is
+    // a conflict, even when some terminal directory or the lock is missing.
+    let metadata = parse_optional_metadata(&store, &root.path.join("store.yaml"))?;
+    let identity = parse_optional_identity(&witness, &common.path.join("work.identity.yaml"))?;
+    if let Some(meta) = &metadata
+        && (meta.store_id != operation.store_id
+            || meta.recovery_generation != operation.next_generation)
+    {
+        return Err(files::conflict(
+            &root.path.join("store.yaml"),
+            "committed receipt does not match current validated generation",
+        ));
+    }
+    if let Some(id) = &identity
+        && *id != operation.store_id
+    {
+        return Err(StorageError::new(
+            StorageErrorCode::IdentityMismatch,
+            "committed receipt does not match retained local identity",
+            Some(common.path.join("work.identity.yaml")),
+        ));
+    }
+    let evidence_damaged = missing_lock || metadata.is_none() || identity.is_none();
+    let result = (|| {
+        let context = format::context(
+            &dir.read("context.yaml")?.raw,
+            operation,
+            &dir.path.join("context.yaml"),
+        )?;
+        validate_terminal_structure(root, operation, &context)
+    })();
+    match result {
+        Ok(()) => Ok(evidence_damaged),
+        Err(error)
+            if matches!(
+                error.code,
+                StorageErrorCode::StorageMissing
+                    | StorageErrorCode::StorageCorrupt
+                    | StorageErrorCode::UnsafePath
+                    | StorageErrorCode::Conflict
+                    | StorageErrorCode::InvalidFormat
+            ) =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+fn validate_terminal_structure(
+    root: &files::Directory,
+    operation: &format::Operation,
+    context: &format::Context,
+) -> Result<(), StorageError> {
+    for name in DIRECTORIES {
+        root.child(name)?;
+    }
+    if operation.kind == "recreate" {
+        let archive = root.child("recovery")?.child(&operation.id)?;
+        let prior = archive.child("prior")?;
+        let prior_operations = archive.child("operations")?;
+        for (name, identity) in &context.folders {
+            check_archived(&prior, name, identity)?;
+        }
+        for (id, identity) in &context.operations {
+            check_archived(&prior_operations, id, identity)?;
+        }
+    }
+    Ok(())
+}
 fn archive_one(
     source: &files::Directory,
     archive: &files::Directory,
@@ -1174,7 +1273,11 @@ fn archive_one(
 ) -> Result<(), StorageError> {
     match (source.exists(name)?, archive.exists(name)?) {
         (true, false) => source.rename_child(name, archive, identity),
-        (false, true) => check_archived(archive, name, identity),
+        (false, true) => {
+            check_archived(archive, name, identity)?;
+            source.sync_archive_parents(archive)?;
+            check_archived(archive, name, identity)
+        }
         _ => Err(files::conflict(
             &archive.path.join(name),
             "archival requires exactly one original or retained directory",

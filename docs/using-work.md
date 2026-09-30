@@ -77,6 +77,8 @@ target/debug/work --json storage recover OPERATION_ID
 
 Resuming recreation requires the same current stopped-executor/loss affirmations. Recovery never resets an unrelated newer generation. Unsupported metadata versions require a compatible tool. Backup/restore, actual claim operations and entity-specific run/handoff/workspace management remain deferred. See [the storage contract](storage.mara.md) for the file formats and recovery rules.
 
+On Linux, creation under a restrictive umask can require access to `/proc/self/fd` to set permissions through a held directory descriptor. If unavailable, the operation reports an error; it does not use an unsafe pathname fallback.
+
 ## MCP stdio
 
 Start `target/debug/work mcp` from a Git checkout and configure an MCP client to launch it over stdio. The server negotiates MCP `2025-06-18` and advertises 20 tools: `discover`, `item_create`, `item_list`, `item_inspect`, `item_inspect_raw`, `item_diagnose`, `item_ready`, `item_update`, `item_close`, `item_reopen`, `item_repair`, `relation_add`, `relation_remove`, `template_list`, `template_validate`, `template_preview`, `storage_inspect`, `storage_init`, `storage_recreate`, and `storage_recover`. The names correspond to the CLI commands above. Every tool accepts optional `worktree`; otherwise it uses the server process checkout. `item_repair` takes replacement bytes encoded as `raw_hex`. `template_preview` takes `name`, `root`, and optional `parameters` and `existing` maps. Tool successes return the result as `structuredContent`; domain failures set `isError: true` and return `structuredContent.error.code`. Unknown MCP methods and tools are JSON-RPC errors. Use `tools/list` for exact argument schemas; optional fields must be omitted rather than sent as `null`.

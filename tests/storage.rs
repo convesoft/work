@@ -706,3 +706,124 @@ fn two_real_callers_with_same_expected_generation_publish_at_most_one_reset() {
         1
     );
 }
+
+#[test]
+fn completed_receipt_cannot_replace_lost_lock_through_real_cli() {
+    let f = Fixture::new();
+    let initial = f.storage().initialize().unwrap();
+    let metadata = initial.storage.metadata.unwrap();
+    let id = initial.operation_id.as_deref().unwrap();
+    let lock_path = f.root().join("coordination.lock");
+    fs::remove_file(&lock_path).unwrap();
+    let (code, value) = f.cli(&["storage", "recover", id, "--all-clients-stopped"]);
+    assert_eq!(code, 4, "{value}");
+    assert_eq!(value["error"]["code"], "storage_missing");
+    assert!(!lock_path.exists());
+    let status = f.storage().inspect().unwrap();
+    assert!(!status.coordination_available);
+    assert_eq!(status.metadata.as_ref(), Some(&metadata));
+    let (code, result) = f.cli(&[
+        "storage",
+        "recreate",
+        "--expected-store-id",
+        &metadata.store_id,
+        "--expected-generation",
+        &metadata.recovery_generation,
+        "--executors-stopped",
+        "--acknowledge-loss",
+        "--all-clients-stopped",
+    ]);
+    assert_eq!(code, 0, "{result}");
+    assert_ne!(
+        result["result"]["storage"]["metadata"]["recovery_generation"],
+        metadata.recovery_generation
+    );
+    assert!(lock_path.is_file());
+}
+
+#[test]
+fn real_cli_initialization_and_recreation_use_private_modes_under_restrictive_child_umask() {
+    fn child(f: &Fixture, args: &[&str]) -> Value {
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                "umask 0777; exec \"$WORK_STORAGE_UMASK_BIN\" \"$@\"",
+                "storage-umask-test",
+            ])
+            .args(args)
+            .env("WORK_STORAGE_UMASK_BIN", env!("CARGO_BIN_EXE_work"))
+            .current_dir(&f.path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+    fn private_tree(path: &Path) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let expected = if metadata.is_dir() { 0o700 } else { 0o600 };
+        assert_eq!(metadata.mode() & 0o7777, expected, "{}", path.display());
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                private_tree(&entry.unwrap().path());
+            }
+        }
+    }
+    let f = Fixture::new();
+    let initial = child(&f, &["--json", "storage", "init"]);
+    assert_eq!(initial["result"]["storage"]["coordination_available"], true);
+    private_tree(&f.root());
+    private_tree(&f.project.git_common_dir.join("work.identity.yaml"));
+    let metadata = f.storage().inspect().unwrap().metadata.unwrap();
+    let lock = fs::metadata(f.root().join("coordination.lock")).unwrap();
+    let opaque = b"opaque entity bytes\0\xff";
+    let entity = f.root().join("claims/opaque");
+    fs::write(&entity, opaque).unwrap();
+    fs::set_permissions(&entity, fs::Permissions::from_mode(0o600)).unwrap();
+    let repeated = child(&f, &["--json", "storage", "init"]);
+    assert_eq!(repeated["result"]["changed"], false);
+    let recreated = child(
+        &f,
+        &[
+            "--json",
+            "storage",
+            "recreate",
+            "--expected-store-id",
+            &metadata.store_id,
+            "--expected-generation",
+            &metadata.recovery_generation,
+            "--executors-stopped",
+            "--acknowledge-loss",
+        ],
+    );
+    assert_eq!(
+        recreated["result"]["storage"]["coordination_available"],
+        true
+    );
+    assert_ne!(
+        recreated["result"]["storage"]["metadata"]["recovery_generation"],
+        metadata.recovery_generation
+    );
+    let after_lock = fs::metadata(f.root().join("coordination.lock")).unwrap();
+    assert_eq!(
+        (after_lock.dev(), after_lock.ino()),
+        (lock.dev(), lock.ino())
+    );
+    let id = recreated["result"]["operation_id"].as_str().unwrap();
+    assert_eq!(
+        fs::read(
+            f.root()
+                .join("recovery")
+                .join(id)
+                .join("prior/claims/opaque")
+        )
+        .unwrap(),
+        opaque
+    );
+    private_tree(&f.root());
+    private_tree(&f.project.git_common_dir.join("work.identity.yaml"));
+}

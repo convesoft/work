@@ -446,3 +446,399 @@ fn staged_write_sync_and_post_publication_io_failures_preserve_inspectable_sourc
         }
     }
 }
+
+#[test]
+fn recovery_retries_failed_publication_stage_sync_before_rename() {
+    for point in ["live_folders", "witness"] {
+        let f = Fixture::new();
+        let mut failure = None;
+        let error = f
+            .storage
+            .initialize_inner(&mut |step| {
+                if step == point {
+                    failure = Some(files::fail_next("stage_sync"));
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        drop(failure);
+        let id = error.operation_id.as_deref().unwrap();
+        let stage = error.path.unwrap();
+        let raw = fs::read(&stage).unwrap();
+        for _ in 0..2 {
+            let _guard = files::fail_next("retry_stage_sync");
+            let retry = f
+                .storage
+                .recover(id, RecoverRequest::default())
+                .unwrap_err();
+            assert_eq!(retry.code, StorageErrorCode::Io);
+            assert_eq!(retry.errno, Some(5));
+            assert_eq!(retry.path.as_ref(), Some(&stage));
+            assert_eq!(fs::read(&stage).unwrap(), raw);
+            assert!(!f.storage.inspect().unwrap().coordination_available);
+        }
+        assert!(
+            f.storage
+                .recover(id, RecoverRequest::default())
+                .unwrap()
+                .storage
+                .coordination_available
+        );
+    }
+}
+
+#[test]
+fn recovery_retries_both_archive_parent_syncs_after_completed_rename() {
+    for point in ["archive_source_sync", "archive_destination_sync"] {
+        let f = Fixture::new();
+        f.storage.initialize().unwrap();
+        let root = f.storage.project.git_common_dir.join("work");
+        fs::write(root.join("claims/opaque"), b"retained").unwrap();
+        let error = {
+            let _guard = files::fail_next(point);
+            f.storage.recreate(f.request()).unwrap_err()
+        };
+        let id = error.operation_id.as_deref().unwrap();
+        let archive = root.join("recovery").join(id).join("prior/claims/opaque");
+        assert!(!root.join("claims").exists());
+        assert_eq!(fs::read(&archive).unwrap(), b"retained");
+        let request = || RecoverRequest {
+            executors_stopped: true,
+            acknowledge_loss: true,
+            all_clients_stopped: false,
+        };
+        for again in ["archive_source_sync", "archive_destination_sync"] {
+            let _guard = files::fail_next(again);
+            let retry = f.storage.recover(id, request()).unwrap_err();
+            assert_eq!(retry.code, StorageErrorCode::Io);
+            assert_eq!(retry.errno, Some(5));
+            assert_eq!(fs::read(&archive).unwrap(), b"retained");
+            assert!(!root.join("claims").exists());
+        }
+        assert!(
+            f.storage
+                .recover(id, request())
+                .unwrap()
+                .storage
+                .coordination_available
+        );
+    }
+}
+
+#[test]
+fn incomplete_initialization_can_explicitly_recover_a_missing_lock() {
+    let f = Fixture::new();
+    let error = f
+        .storage
+        .initialize_inner(&mut |step| {
+            if step == "prepared" {
+                Err(injected())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    fs::remove_file(
+        f.storage
+            .project
+            .git_common_dir
+            .join("work/coordination.lock"),
+    )
+    .unwrap();
+    let result = f
+        .storage
+        .recover(
+            error.operation_id.as_deref().unwrap(),
+            RecoverRequest {
+                all_clients_stopped: true,
+                ..RecoverRequest::default()
+            },
+        )
+        .unwrap();
+    assert!(result.storage.coordination_available);
+}
+
+#[test]
+fn source_resync_refuses_fifo_and_replacement_after_validated_stat_without_hanging() {
+    // Run the deliberate FIFO race in a killable child: a blocking-open regression
+    // must fail promptly instead of hanging the entire test process and its lock.
+    if std::env::var_os("WORK_STORAGE_REOPEN_CHILD").is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "core::storage::tests::source_resync_refuses_fifo_and_replacement_after_validated_stat_without_hanging", "--nocapture"])
+            .env("WORK_STORAGE_REOPEN_CHILD", "1")
+            .spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("source resync blocked on a substituted FIFO");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        return;
+    }
+    for kind in ["fifo", "replacement", "hardlink", "symlink"] {
+        let f = Fixture::new();
+        let outcome = f.storage.initialize().unwrap();
+        let common = files::Directory::open(&f.storage.project.git_common_dir).unwrap();
+        let receipt = common
+            .child("work")
+            .unwrap()
+            .child("operations")
+            .unwrap()
+            .child(outcome.operation_id.as_deref().unwrap())
+            .unwrap();
+        let operation = format::operation(
+            &receipt.read("operation.yaml").unwrap().raw,
+            &receipt.path.join("operation.yaml"),
+        )
+        .unwrap();
+        let source = common.read("work.identity.yaml").unwrap();
+        let path = common.path.join("work.identity.yaml");
+        let retained = common.path.join("retained-witness");
+        let target = common.path.join("unexpected");
+        fs::write(&target, b"unexpected source").unwrap();
+        let changed = path.clone();
+        let kept = retained.clone();
+        let other = target.clone();
+        let _guard = files::on_nth("source_open", 2, move || {
+            fs::rename(&changed, &kept).unwrap();
+            match kind {
+                "fifo" => rustix::fs::mknodat(
+                    rustix::fs::CWD,
+                    &changed,
+                    rustix::fs::FileType::Fifo,
+                    rustix::fs::Mode::from_bits_truncate(0o600),
+                    0,
+                )
+                .unwrap(),
+                "replacement" => fs::write(&changed, b"unexpected replacement").unwrap(),
+                "hardlink" => fs::hard_link(&other, &changed).unwrap(),
+                "symlink" => std::os::unix::fs::symlink(&other, &changed).unwrap(),
+                _ => unreachable!(),
+            }
+        });
+        // The first open is publish_source's matching-current read. Substitute
+        // after the resync reopen's stat/type check, immediately before openat.
+        let error = publish_source(
+            &common,
+            "work.identity.yaml",
+            &source.raw,
+            &None,
+            &operation,
+            &mut Vec::new(),
+            &mut Publication::NotPublished,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.code,
+                StorageErrorCode::Conflict | StorageErrorCode::UnsafePath
+            ),
+            "{kind}: {error}"
+        );
+        assert_eq!(fs::read(&retained).unwrap(), source.raw);
+        assert_eq!(fs::read(&target).unwrap(), b"unexpected source");
+        if kind == "replacement" {
+            assert_eq!(fs::read(&path).unwrap(), b"unexpected replacement");
+        }
+    }
+}
+
+#[test]
+fn new_directory_permission_recovery_rejects_substituted_entry() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let f = Fixture::new();
+    let common = files::Directory::open(&f.storage.project.git_common_dir).unwrap();
+    let held = common.create("new-private").unwrap();
+    let target = common.create("unrelated").unwrap();
+    fs::set_permissions(&target.path, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&held.path, common.path.join("retained-private")).unwrap();
+    std::os::unix::fs::symlink(&target.path, &held.path).unwrap();
+    assert!(
+        common
+            .restore_new_directory_mode("new-private", &held.identity)
+            .is_err()
+    );
+    assert_eq!(fs::metadata(&target.path).unwrap().mode() & 0o777, 0o755);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn new_directory_permission_recovery_chmods_only_pinned_inode_after_substitution() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let f = Fixture::new();
+    let common = files::Directory::open(&f.storage.project.git_common_dir).unwrap();
+    let held = common.create("new-private").unwrap();
+    let target = common.create("unrelated").unwrap();
+    fs::set_permissions(&held.path, fs::Permissions::from_mode(0o0)).unwrap();
+    fs::set_permissions(&target.path, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = held.path.clone();
+    let retained = common.path.join("retained-private");
+    let moved = retained.clone();
+    let other = target.path.clone();
+    let _guard = files::on_next("directory_mode", move || {
+        fs::rename(&path, &moved).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+    });
+    assert_eq!(
+        common
+            .restore_new_directory_mode("new-private", &held.identity)
+            .unwrap_err()
+            .code,
+        StorageErrorCode::Conflict
+    );
+    assert_eq!(fs::metadata(&target.path).unwrap().mode() & 0o777, 0o755);
+    assert_eq!(fs::metadata(&retained).unwrap().mode() & 0o777, 0o700);
+}
+
+#[test]
+fn healthy_committed_recreation_resumes_by_id_but_damaged_terminal_structure_requires_fresh_generation()
+ {
+    for damage in ["healthy", "lock", "claims", "archive", "retained_claims"] {
+        let f = Fixture::new();
+        f.storage.initialize().unwrap();
+        let error = f
+            .storage
+            .recreate_inner(f.request(), &mut |step| {
+                if step == "committed" {
+                    Err(injected())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        let id = error.operation_id.as_deref().unwrap();
+        let root = f.storage.project.git_common_dir.join("work");
+        let generation = f
+            .storage
+            .inspect()
+            .unwrap()
+            .metadata
+            .unwrap()
+            .recovery_generation;
+        let request = || RecoverRequest {
+            executors_stopped: true,
+            acknowledge_loss: true,
+            all_clients_stopped: true,
+        };
+        if damage == "healthy" {
+            let before = fs::read(root.join("operations").join(id).join("operation.yaml")).unwrap();
+            assert_eq!(
+                f.storage.recreate(f.request()).unwrap_err().code,
+                StorageErrorCode::RecoveryRequired
+            );
+            assert_eq!(
+                fs::read(root.join("operations").join(id).join("operation.yaml")).unwrap(),
+                before
+            );
+            let result = f.storage.recover(id, request()).unwrap();
+            assert_eq!(
+                result.storage.metadata.unwrap().recovery_generation,
+                generation
+            );
+            continue;
+        }
+        let damaged = match damage {
+            "lock" => root.join("coordination.lock"),
+            "claims" => root.join("claims"),
+            "archive" => root.join("recovery").join(id),
+            "retained_claims" => root.join("recovery").join(id).join("prior/claims"),
+            _ => unreachable!(),
+        };
+        if damage == "lock" {
+            fs::remove_file(&damaged).unwrap();
+        } else {
+            fs::remove_dir_all(&damaged).unwrap();
+        }
+        assert_eq!(
+            f.storage.recover(id, request()).unwrap_err().code,
+            StorageErrorCode::StorageMissing
+        );
+        assert!(!damaged.exists(), "{damage}");
+        let result = f.storage.recreate(f.request()).unwrap();
+        assert!(result.storage.coordination_available, "{damage}");
+        assert_ne!(
+            result.storage.metadata.unwrap().recovery_generation,
+            generation,
+            "{damage}"
+        );
+        assert!(
+            result
+                .loss
+                .unwrap()
+                .prior_state_path
+                .unwrap()
+                .join("operations")
+                .join(id)
+                .join("operation.yaml")
+                .is_file()
+        );
+    }
+}
+
+#[test]
+fn committed_recreation_missing_terminal_metadata_or_witness_requires_explicit_fresh_generation() {
+    for name in ["store.yaml", "work.identity.yaml"] {
+        let f = Fixture::new();
+        f.storage.initialize().unwrap();
+        let error = f
+            .storage
+            .recreate_inner(f.request(), &mut |step| {
+                if step == "committed" {
+                    Err(injected())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        let id = error.operation_id.as_deref().unwrap();
+        let root = f.storage.project.git_common_dir.join("work");
+        let generation = f
+            .storage
+            .inspect()
+            .unwrap()
+            .metadata
+            .unwrap()
+            .recovery_generation;
+        let damaged = if name == "store.yaml" {
+            root.join(name)
+        } else {
+            f.storage.project.git_common_dir.join(name)
+        };
+        fs::remove_file(&damaged).unwrap();
+        let request = RecoverRequest {
+            executors_stopped: true,
+            acknowledge_loss: true,
+            all_clients_stopped: false,
+        };
+        let refusal = f.storage.recover(id, request).unwrap_err();
+        assert!(matches!(
+            refusal.code,
+            StorageErrorCode::Conflict | StorageErrorCode::StorageMissing
+        ));
+        assert!(!damaged.exists());
+        let result = f.storage.recreate(f.request()).unwrap();
+        assert!(result.storage.coordination_available);
+        assert_ne!(
+            result.storage.metadata.unwrap().recovery_generation,
+            generation
+        );
+        assert!(
+            result
+                .loss
+                .unwrap()
+                .prior_state_path
+                .unwrap()
+                .join("operations")
+                .join(id)
+                .join("operation.yaml")
+                .is_file()
+        );
+    }
+}
