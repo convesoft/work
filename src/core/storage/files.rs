@@ -44,7 +44,14 @@ impl Source {
         }
     }
     pub fn same_content_identity(&self, other: &Self) -> bool {
-        self.raw == other.raw && self.identity == other.identity && self.mode == other.mode
+        // Rename/exchange itself can change ctime on the retained inode. Keep
+        // full Source equality before rename; afterward compare every captured
+        // property that the rename preserves, including size and mtime.
+        self.raw == other.raw
+            && self.identity == other.identity
+            && self.mode == other.mode
+            && self.size == other.size
+            && self.mtime == other.mtime
     }
 }
 pub(super) struct Directory {
@@ -148,6 +155,7 @@ impl Directory {
     }
     // Only called for an inaccessible directory this attempt just created.
     // Never follow the mutable storage entry to recover from a restrictive umask.
+    #[cfg(target_os = "linux")]
     pub(super) fn restore_new_directory_mode(
         &self,
         name: &str,
@@ -186,28 +194,6 @@ impl Directory {
             .map_err(|e| StorageError::io(std::io::Error::from(e), path.clone()))?;
             Some(File::from(fd))
         };
-        #[cfg(not(target_os = "linux"))]
-        let held = {
-            let stat = fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW)
-                .map_err(|e| map(e, &path))?;
-            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
-                || stat.st_dev as u64 != expected.dev
-                || stat.st_ino as u64 != expected.ino
-            {
-                return Err(conflict(
-                    &path,
-                    "new directory changed before permission recovery",
-                ));
-            }
-            fs::chmodat(
-                &self.file,
-                name,
-                Mode::from_bits_truncate(0o700),
-                AtFlags::SYMLINK_NOFOLLOW,
-            )
-            .map_err(|e| map(e, &path))?;
-            None
-        };
         self.verify()?;
         let stat =
             fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| map(e, &path))?;
@@ -221,6 +207,19 @@ impl Directory {
             ));
         }
         Ok(held)
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn restore_new_directory_mode(
+        &self,
+        name: &str,
+        _expected: &Identity,
+    ) -> Result<Option<File>, StorageError> {
+        // No inode-bound permission recovery is established on these hosts.
+        // Leave the inaccessible new directory as explicit recovery context.
+        Err(StorageError::io(
+            std::io::Error::from_raw_os_error(13),
+            self.path.join(name),
+        ))
     }
     pub fn ensure(&self, name: &str) -> Result<Self, StorageError> {
         if self.exists(name)? {
@@ -703,7 +702,7 @@ pub(super) fn fail_next(point: &'static str) -> FailureGuard {
     FailureGuard
 }
 #[cfg(test)]
-fn inject(point: &str, path: &Path) -> Result<(), StorageError> {
+pub(super) fn inject(point: &str, path: &Path) -> Result<(), StorageError> {
     let action = ACTION.with(|slot| {
         let mut action = slot.borrow_mut();
         if let Some(selected) = action.as_mut()

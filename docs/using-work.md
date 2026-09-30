@@ -77,7 +77,7 @@ target/debug/work --json storage recover OPERATION_ID
 
 Resuming recreation requires the same current stopped-executor/loss affirmations. Recovery never resets an unrelated newer generation. Unsupported metadata versions require a compatible tool. Backup/restore, actual claim operations and entity-specific run/handoff/workspace management remain deferred. See [the storage contract](storage.mara.md) for the file formats and recovery rules.
 
-On Linux, creation under a restrictive umask can require access to `/proc/self/fd` to set permissions through a held directory descriptor. If unavailable, the operation reports an error; it does not use an unsafe pathname fallback.
+On Linux, creation under a restrictive umask can require access to `/proc/self/fd` to set permissions through a held directory descriptor. If unavailable, the operation reports an error; it does not use an unsafe pathname fallback. On macOS, a umask that prevents opening a newly created directory causes a permission error; use a umask that leaves owner access (for example, `077`). Work preserves the interrupted state for explicit recovery.
 
 ## MCP stdio
 

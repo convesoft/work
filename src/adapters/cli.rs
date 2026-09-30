@@ -166,10 +166,12 @@ fn leading_json_mode(args: &[OsString]) -> bool {
 fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
     let mut at = 0;
     let mut selected: Option<&Path> = None;
+    let mut duplicate_selector = false;
     while let Some(arg) = args.get(at) {
         if arg == "--json" {
             at += 1;
         } else if arg == "--worktree" {
+            duplicate_selector |= selected.is_some();
             selected = Some(Path::new(
                 args.get(at + 1)
                     .ok_or_else(|| usage("missing --worktree path"))?,
@@ -180,6 +182,20 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
         }
     }
     let command = args.get(at).ok_or_else(|| usage("missing command"))?;
+    if duplicate_selector {
+        let error = CliError::new("invalid_argument", "duplicate --worktree selector");
+        return Err(
+            if command == "storage"
+                && args
+                    .get(at + 1)
+                    .is_some_and(|verb| verb == "init" || verb == "recreate" || verb == "recover")
+            {
+                error.storage_failure()
+            } else {
+                error
+            },
+        );
+    }
     if command == "--help" || command == "help" {
         if at + 1 != args.len() || selected.is_some() {
             return Err(usage("work --help takes no arguments"));

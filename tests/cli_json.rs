@@ -481,3 +481,45 @@ fn storage_contention_is_distinct_and_does_not_hide_file_readiness() {
         true
     );
 }
+
+#[test]
+fn duplicate_worktree_selectors_refuse_storage_mutations_before_discovery() {
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let absent = first.0.join("does-not-exist");
+    for selected in [&first.0, &absent] {
+        for command in [
+            vec!["storage", "init"],
+            vec![
+                "storage",
+                "recreate",
+                "--executors-stopped",
+                "--acknowledge-loss",
+            ],
+            vec!["storage", "recover", "00000000000040008000000000000001"],
+        ] {
+            let mut args = vec![
+                "--worktree",
+                selected.to_str().unwrap(),
+                "--worktree",
+                second.0.to_str().unwrap(),
+            ];
+            args.extend(command);
+            let (status, response) = first.call(&args);
+            assert_eq!(status, 2);
+            assert_eq!(response["error"]["code"], "invalid_argument");
+            assert_eq!(response["error"]["publication"], "not_published");
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("duplicate")
+            );
+            for checkout in [&first.0, &second.0] {
+                assert!(!checkout.join(".git/work").exists());
+                assert!(!checkout.join(".git/work.identity.yaml").exists());
+            }
+            assert!(!absent.exists());
+        }
+    }
+}

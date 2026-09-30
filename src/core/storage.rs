@@ -264,6 +264,31 @@ impl Storage {
         Ok(result)
     }
     fn inspect_locked(&self, locked: &files::Locked, result: &mut StorageInspection) {
+        let _ = self.inspect_locked_evidence(locked, result);
+    }
+    // Retain the original refusal (including errno) for mutation callers;
+    // public inspection deliberately reports value-only diagnostics.
+    fn inspect_locked_evidence(
+        &self,
+        locked: &files::Locked,
+        result: &mut StorageInspection,
+    ) -> Option<StorageError> {
+        let mut refusal = None;
+        let mut warn = |result: &mut StorageInspection, error: StorageError| {
+            if refusal.is_none()
+                && matches!(
+                    error.code,
+                    StorageErrorCode::UnsafePath
+                        | StorageErrorCode::Conflict
+                        | StorageErrorCode::IdentityMismatch
+                        | StorageErrorCode::PermissionDenied
+                        | StorageErrorCode::Io
+                )
+            {
+                refusal = Some(error.clone());
+            }
+            warn(result, error);
+        };
         match locked
             .root
             .read("store.yaml")
@@ -302,10 +327,6 @@ impl Storage {
             match operations.names() {
                 Ok(names) => {
                     for name in names {
-                        // Same-directory retained/staged copies are not live operation entries.
-                        if name.to_string_lossy().starts_with(".storage-") {
-                            continue;
-                        }
                         let path = operations.path.join(&name);
                         let id = name
                             .to_str()
@@ -320,17 +341,21 @@ impl Storage {
                         } else {
                             operations.child(&name).and_then(|dir| {
                                 decode_intent(&dir, id.as_deref().expect("validated operation ID"))
-                                    .map(|(op, _)| op)
                             })
                         };
                         match decoded {
-                            Ok(op) if op.phase == "complete" => {
-                                matching_complete |= result.metadata.as_ref().is_some_and(|meta| {
+                            Ok((op, context)) if op.phase == "complete" => {
+                                if result.metadata.as_ref().is_some_and(|meta| {
                                     meta.store_id == op.store_id
                                         && meta.recovery_generation == op.next_generation
-                                });
+                                }) {
+                                    match validate_retained_archives(&locked.root, &op, &context) {
+                                        Ok(()) => matching_complete = true,
+                                        Err(error) => warn(result, error),
+                                    }
+                                }
                             }
-                            Ok(op) => {
+                            Ok((op, _)) => {
                                 result.pending_operations.push(PendingOperation {
                                     id,
                                     path: path.clone(),
@@ -380,6 +405,7 @@ impl Storage {
             result.state = StorageState::Initialized;
             result.coordination_available = true;
         }
+        refusal
     }
 }
 fn warn(result: &mut StorageInspection, error: StorageError) {
@@ -593,7 +619,16 @@ impl Storage {
                 "expected identity/generation does not match current validated evidence",
             ));
         }
+        // Capture prior health before repairing missing operational directories.
+        // Root/lock absence was observed before acquiring the replacement lock.
+        let mut prior_inspection = self.empty_inspection();
+        if let Some(error) = self.inspect_locked_evidence(&locked, &mut prior_inspection) {
+            return Err(error);
+        }
         let mut context = format::Context {
+            prior_missing_or_damaged: !root_present
+                || !lock_present
+                || !prior_inspection.coordination_available,
             store,
             identity,
             folders: Default::default(),
@@ -965,17 +1000,7 @@ impl Storage {
         let loss = if operation.kind == "recreate" {
             Some(LossReport {
                 coordination_reset: true,
-                missing_or_damaged: context
-                    .store
-                    .as_ref()
-                    .and_then(|s| format::metadata(&s.raw, &dir.path).ok())
-                    .is_none()
-                    || context
-                        .identity
-                        .as_ref()
-                        .and_then(|s| format::identity(&s.raw, &dir.path).ok())
-                        .is_none()
-                    || context.folders.len() != LIVE.len(),
+                missing_or_damaged: context.prior_missing_or_damaged,
                 prior_state_path: Some(recovery.path.join(&operation.id)),
             })
         } else {
@@ -1178,6 +1203,20 @@ fn publish_source(
     let stage_path = dir.path.join(&stage_name);
     if current.as_ref().is_some_and(|s| s.raw == raw) {
         validate_source(&current, prior, raw, &dir.path.join(name))?;
+        if let Some(before) = prior
+            && before.raw != raw
+        {
+            // Different intended bytes require an exchange: the old source must
+            // still be retained before an interrupted publication can succeed.
+            let retained = dir.read(&stage_name)?;
+            if !before.same_content_identity(&retained) {
+                return Err(files::conflict(
+                    &stage_path,
+                    "retained prior source differs from captured publication evidence",
+                ));
+            }
+            let _synced_retained = dir.sync_source(&stage_name, &retained)?;
+        }
         // Even a completed retry re-syncs published objects before reporting success.
         let _synced_source =
             dir.sync_source(name, current.as_ref().expect("matching published source"))?;
@@ -1220,6 +1259,8 @@ fn publish_source(
         rustix::fs::renameat_with(&dir.file, &stage_name, &dir.file, name, flags)
             .map_err(|e| StorageError::io(std::io::Error::from(e), dir.path.join(name)))?;
         *publication = Publication::Possible;
+        #[cfg(test)]
+        files::inject("retry_after_publication", &stage_path)?;
         dir.sync()?;
         dir.verify()?;
         if let Some(before) = prior
@@ -1315,6 +1356,13 @@ fn validate_terminal_structure(
     for name in DIRECTORIES {
         root.child(name)?;
     }
+    validate_retained_archives(root, operation, context)
+}
+fn validate_retained_archives(
+    root: &files::Directory,
+    operation: &format::Operation,
+    context: &format::Context,
+) -> Result<(), StorageError> {
     if operation.kind == "recreate" {
         let archive = root.child("recovery")?.child(&operation.id)?;
         let prior = archive.child("prior")?;

@@ -755,6 +755,7 @@ fn real_cli_initialization_and_recreation_use_private_modes_under_restrictive_ch
             .current_dir(&f.path)
             .output()
             .unwrap();
+        #[cfg(target_os = "linux")]
         assert!(
             output.status.success(),
             "stdout={} stderr={}",
@@ -763,6 +764,7 @@ fn real_cli_initialization_and_recreation_use_private_modes_under_restrictive_ch
         );
         serde_json::from_slice(&output.stdout).unwrap()
     }
+    #[cfg(target_os = "linux")]
     fn private_tree(path: &Path) {
         let metadata = fs::symlink_metadata(path).unwrap();
         let expected = if metadata.is_dir() { 0o700 } else { 0o600 };
@@ -775,57 +777,102 @@ fn real_cli_initialization_and_recreation_use_private_modes_under_restrictive_ch
     }
     let f = Fixture::new();
     let initial = child(&f, &["--json", "storage", "init"]);
-    assert_eq!(initial["result"]["storage"]["coordination_available"], true);
-    private_tree(&f.root());
-    private_tree(&f.project.git_common_dir.join("work.identity.yaml"));
-    let metadata = f.storage().inspect().unwrap().metadata.unwrap();
-    let lock = fs::metadata(f.root().join("coordination.lock")).unwrap();
-    let opaque = b"opaque entity bytes\0\xff";
-    let entity = f.root().join("claims/opaque");
-    fs::write(&entity, opaque).unwrap();
-    fs::set_permissions(&entity, fs::Permissions::from_mode(0o600)).unwrap();
-    let repeated = child(&f, &["--json", "storage", "init"]);
-    assert_eq!(repeated["result"]["changed"], false);
-    let recreated = child(
-        &f,
-        &[
-            "--json",
-            "storage",
-            "recreate",
-            "--expected-store-id",
-            &metadata.store_id,
-            "--expected-generation",
-            &metadata.recovery_generation,
-            "--executors-stopped",
-            "--acknowledge-loss",
-        ],
-    );
-    assert_eq!(
-        recreated["result"]["storage"]["coordination_available"],
-        true
-    );
-    assert_ne!(
-        recreated["result"]["storage"]["metadata"]["recovery_generation"],
-        metadata.recovery_generation
-    );
-    let after_lock = fs::metadata(f.root().join("coordination.lock")).unwrap();
-    assert_eq!(
-        (after_lock.dev(), after_lock.ino()),
-        (lock.dev(), lock.ino())
-    );
-    let id = recreated["result"]["operation_id"].as_str().unwrap();
-    assert_eq!(
-        fs::read(
-            f.root()
-                .join("recovery")
-                .join(id)
-                .join("prior/claims/opaque")
-        )
-        .unwrap(),
-        opaque
-    );
-    private_tree(&f.root());
-    private_tree(&f.project.git_common_dir.join("work.identity.yaml"));
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert_eq!(initial["error"]["code"], "permission_denied");
+        assert_eq!(fs::metadata(f.root()).unwrap().mode() & 0o7777, 0);
+        assert!(!f.project.git_common_dir.join("work.identity.yaml").exists());
+        // Restore test-fixture accessibility only after checking preserved mode.
+        fs::set_permissions(f.root(), fs::Permissions::from_mode(0o700)).unwrap();
+        let existing = Fixture::new();
+        existing.storage().initialize().unwrap();
+        let meta = existing.storage().inspect().unwrap().metadata.unwrap();
+        let bytes = fs::read(existing.root().join("store.yaml")).unwrap();
+        let witness = fs::read(existing.project.git_common_dir.join("work.identity.yaml")).unwrap();
+        let failure = child(
+            &existing,
+            &[
+                "--json",
+                "storage",
+                "recreate",
+                "--expected-store-id",
+                &meta.store_id,
+                "--expected-generation",
+                &meta.recovery_generation,
+                "--executors-stopped",
+                "--acknowledge-loss",
+            ],
+        );
+        assert_eq!(failure["error"]["code"], "permission_denied");
+        assert_eq!(fs::read(existing.root().join("store.yaml")).unwrap(), bytes);
+        assert_eq!(
+            fs::read(existing.project.git_common_dir.join("work.identity.yaml")).unwrap(),
+            witness
+        );
+        let mut inaccessible = 0;
+        for entry in fs::read_dir(existing.root().join("operations")).unwrap() {
+            let entry = entry.unwrap();
+            if fs::metadata(entry.path()).unwrap().mode() & 0o7777 == 0 {
+                inaccessible += 1;
+                fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        assert_eq!(inaccessible, 1);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(initial["result"]["storage"]["coordination_available"], true);
+        private_tree(&f.root());
+        private_tree(&f.project.git_common_dir.join("work.identity.yaml"));
+        let metadata = f.storage().inspect().unwrap().metadata.unwrap();
+        let lock = fs::metadata(f.root().join("coordination.lock")).unwrap();
+        let opaque = b"opaque entity bytes\0\xff";
+        let entity = f.root().join("claims/opaque");
+        fs::write(&entity, opaque).unwrap();
+        fs::set_permissions(&entity, fs::Permissions::from_mode(0o600)).unwrap();
+        let repeated = child(&f, &["--json", "storage", "init"]);
+        assert_eq!(repeated["result"]["changed"], false);
+        let recreated = child(
+            &f,
+            &[
+                "--json",
+                "storage",
+                "recreate",
+                "--expected-store-id",
+                &metadata.store_id,
+                "--expected-generation",
+                &metadata.recovery_generation,
+                "--executors-stopped",
+                "--acknowledge-loss",
+            ],
+        );
+        assert_eq!(
+            recreated["result"]["storage"]["coordination_available"],
+            true
+        );
+        assert_ne!(
+            recreated["result"]["storage"]["metadata"]["recovery_generation"],
+            metadata.recovery_generation
+        );
+        let after_lock = fs::metadata(f.root().join("coordination.lock")).unwrap();
+        assert_eq!(
+            (after_lock.dev(), after_lock.ino()),
+            (lock.dev(), lock.ino())
+        );
+        let id = recreated["result"]["operation_id"].as_str().unwrap();
+        assert_eq!(
+            fs::read(
+                f.root()
+                    .join("recovery")
+                    .join(id)
+                    .join("prior/claims/opaque")
+            )
+            .unwrap(),
+            opaque
+        );
+        private_tree(&f.root());
+        private_tree(&f.project.git_common_dir.join("work.identity.yaml"));
+    }
 }
 
 #[test]
@@ -1090,5 +1137,197 @@ fn real_cli_and_mcp_retry_complete_receipts_without_rewriting_bytes_or_generatio
         );
         assert_eq!(fs::read(&receipt).unwrap(), bytes);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), count);
+    }
+}
+
+// Capture file bytes and directory identities without following symlink entries.
+fn retained_tree(path: &Path) -> std::collections::BTreeMap<PathBuf, (u64, u64, Vec<u8>)> {
+    let mut result = std::collections::BTreeMap::new();
+    let metadata = fs::symlink_metadata(path).unwrap();
+    let bytes = if metadata.file_type().is_symlink() {
+        use std::os::unix::ffi::OsStrExt;
+        fs::read_link(path).unwrap().as_os_str().as_bytes().to_vec()
+    } else if metadata.is_file() {
+        fs::read(path).unwrap()
+    } else {
+        Vec::new()
+    };
+    result.insert(path.to_owned(), (metadata.dev(), metadata.ino(), bytes));
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).unwrap() {
+            result.extend(retained_tree(&entry.unwrap().path()));
+        }
+    }
+    result
+}
+
+#[test]
+fn real_callers_refuse_storage_prefixed_entries_in_operations_without_changing_them() {
+    for kind in ["directory", "symlink"] {
+        let f = Fixture::new();
+        assert_eq!(f.cli(&["storage", "init"]).0, 0);
+        let unexpected = f.root().join("operations/.storage-not-an-intent");
+        if kind == "directory" {
+            fs::create_dir(&unexpected).unwrap();
+            fs::write(unexpected.join("opaque"), b"preserved bytes").unwrap();
+        } else {
+            std::os::unix::fs::symlink(f.root().join("claims"), &unexpected).unwrap();
+        }
+        let before = retained_tree(&f.root());
+        let (code, cli) = f.cli(&["storage", "inspect"]);
+        assert_eq!(code, 0);
+        assert_eq!(cli["result"]["storage"]["coordination_available"], false);
+        assert_eq!(
+            cli["result"]["storage"]["storage_warning"]["code"],
+            "unsafe_path"
+        );
+        let mut mcp = Mcp::new(&f.path);
+        assert_eq!(
+            mcp.call("storage_inspect", json!({}))["structuredContent"],
+            cli["result"]
+        );
+        let (code, refused) = f.cli(&["storage", "init"]);
+        assert_eq!(code, 5, "{refused}");
+        assert_eq!(refused["error"]["code"], "unsafe_path");
+        assert_eq!(mcp.call("storage_init", json!({}))["isError"], true);
+        assert_eq!(retained_tree(&f.root()), before);
+    }
+}
+
+#[test]
+fn real_callers_validate_matching_receipts_retained_archives_read_only() {
+    for damage in [
+        "healthy",
+        "prior",
+        "operations",
+        "missing_folder",
+        "replaced_folder",
+        "missing_receipt",
+        "replaced_receipt",
+    ] {
+        let f = Fixture::new();
+        let initial = f.storage().initialize().unwrap();
+        let old_id = initial.operation_id.unwrap();
+        let outcome = f.storage().recreate(f.request()).unwrap();
+        let id = outcome.operation_id.unwrap();
+        let archive = f.root().join("recovery").join(&id);
+        // A valid obsolete receipt may coexist with the matching receipt.
+        let old = archive.join("operations").join(&old_id);
+        let copied = f.root().join("operations").join(&old_id);
+        fs::create_dir(&copied).unwrap();
+        for entry in fs::read_dir(&old).unwrap() {
+            let entry = entry.unwrap();
+            fs::copy(entry.path(), copied.join(entry.file_name())).unwrap();
+        }
+        let target = match damage {
+            "prior" => Some(archive.join("prior")),
+            "operations" => Some(archive.join("operations")),
+            "missing_folder" | "replaced_folder" => Some(archive.join("prior/claims")),
+            "missing_receipt" | "replaced_receipt" => Some(old),
+            "healthy" => None,
+            _ => unreachable!(),
+        };
+        if let Some(path) = target {
+            if damage.starts_with("replaced") {
+                // Retain the old inode to prevent filesystem inode reuse.
+                fs::rename(&path, archive.join("original-kept-for-conflict")).unwrap();
+                fs::create_dir(&path).unwrap();
+                fs::write(path.join("unexpected"), b"replacement bytes").unwrap();
+            } else {
+                fs::remove_dir_all(&path).unwrap();
+            }
+        }
+        let before = retained_tree(&f.root());
+        let (code, inspected) = f.cli(&["storage", "inspect"]);
+        assert_eq!(code, 0);
+        let healthy = damage == "healthy";
+        assert_eq!(
+            inspected["result"]["storage"]["coordination_available"], healthy,
+            "{damage}"
+        );
+        let mut mcp = Mcp::new(&f.path);
+        assert_eq!(
+            mcp.call("storage_inspect", json!({}))["structuredContent"],
+            inspected["result"]
+        );
+        let (code, initialized) = f.cli(&["storage", "init"]);
+        assert_eq!(code == 0, healthy, "{damage}: {initialized}");
+        if healthy {
+            assert_eq!(initialized["result"]["changed"], false);
+        } else {
+            assert!(
+                matches!(
+                    initialized["error"]["code"].as_str(),
+                    Some("storage_missing" | "conflict")
+                ),
+                "{initialized}"
+            );
+            assert_eq!(mcp.call("storage_init", json!({}))["isError"], true);
+        }
+        assert_eq!(retained_tree(&f.root()), before, "{damage}");
+    }
+}
+
+#[test]
+fn real_cli_and_mcp_report_retained_prior_loss_on_initial_and_same_id_results() {
+    for damage in ["healthy", "lock", "operations", "recovery", "receipt"] {
+        let f = Fixture::new();
+        f.storage().initialize().unwrap();
+        let previous = f.storage().recreate(f.request()).unwrap();
+        let previous_id = previous.operation_id.unwrap();
+        fs::write(
+            f.root()
+                .join("recovery")
+                .join(&previous_id)
+                .join("prior/claims/opaque"),
+            b"retained old claim bytes",
+        )
+        .unwrap();
+        match damage {
+            "healthy" => {}
+            "lock" => fs::remove_file(f.root().join("coordination.lock")).unwrap(),
+            "operations" | "recovery" => fs::remove_dir_all(f.root().join(damage)).unwrap(),
+            "receipt" => fs::write(
+                f.root()
+                    .join("operations")
+                    .join(previous_id)
+                    .join("operation.yaml"),
+                b"malformed receipt",
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let request = f.request();
+        let mut mcp = Mcp::new(&f.path);
+        let result = mcp.call(
+            "storage_recreate",
+            json!({
+                "expected_store_id": request.expected_store_id,
+                "expected_generation": request.expected_generation,
+                "executors_stopped": true, "acknowledge_loss": true,
+                "all_clients_stopped": true
+            }),
+        );
+        assert_ne!(result["isError"], true, "{damage}: {result}");
+        let data = &result["structuredContent"];
+        assert_eq!(
+            data["loss"]["missing_or_damaged"],
+            damage != "healthy",
+            "{damage}"
+        );
+        let id = data["operation_id"].as_str().unwrap();
+        let (code, recovered) = f.cli(&[
+            "storage",
+            "recover",
+            id,
+            "--executors-stopped",
+            "--acknowledge-loss",
+        ]);
+        assert_eq!(code, 0, "{damage}: {recovered}");
+        assert_eq!(recovered["result"]["loss"], data["loss"]);
+        assert_eq!(
+            recovered["result"]["storage"]["metadata"],
+            data["storage"]["metadata"]
+        );
     }
 }

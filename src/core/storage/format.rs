@@ -362,6 +362,7 @@ pub(super) fn bytes(value: &Value) -> Vec<u8> {
 
 #[derive(Debug, Clone)]
 pub(super) struct Context {
+    pub prior_missing_or_damaged: bool,
     pub store: Option<Source>,
     pub identity: Option<Source>,
     pub folders: BTreeMap<String, Identity>,
@@ -370,6 +371,7 @@ pub(super) struct Context {
 impl Context {
     pub fn empty() -> Self {
         Self {
+            prior_missing_or_damaged: false,
             store: None,
             identity: None,
             folders: BTreeMap::new(),
@@ -379,7 +381,8 @@ impl Context {
     pub fn bytes(&self) -> Vec<u8> {
         bytes(
             &json!({"format_version":1,"store":source_value(&self.store),"identity":source_value(&self.identity),
-        "folders":directory_values(&self.folders),"operations":directory_values(&self.operations)}),
+        "folders":directory_values(&self.folders),"operations":directory_values(&self.operations),
+        "prior_missing_or_damaged":self.prior_missing_or_damaged}),
         )
     }
 }
@@ -488,6 +491,7 @@ pub(super) fn context(raw: &[u8], op: &Operation, path: &Path) -> Result<Context
         &value,
         &[
             "format_version",
+            "prior_missing_or_damaged",
             "store",
             "identity",
             "folders",
@@ -512,13 +516,17 @@ pub(super) fn context(raw: &[u8], op: &Operation, path: &Path) -> Result<Context
                 .collect()
         };
     let context = Context {
+        prior_missing_or_damaged: m["prior_missing_or_damaged"]
+            .as_bool()
+            .ok_or_else(|| bad(path, "prior_missing_or_damaged must be boolean"))?,
         store: source(&m["store"], path)?,
         identity: source(&m["identity"], path)?,
         folders: decode(&m["folders"], &op.prior_folders)?,
         operations: decode(&m["operations"], &op.prior_operations)?,
     };
     if op.kind == "initialize"
-        && (context.store.is_some()
+        && (context.prior_missing_or_damaged
+            || context.store.is_some()
             || context.identity.is_some()
             || !context.folders.is_empty()
             || !context.operations.is_empty())

@@ -306,6 +306,8 @@ fn strict_context_rejects_unknown_keys_wrong_snapshots_and_timestamp_bounds() {
         serde_json::from_slice(&fs::read(dir.join("context.yaml")).unwrap()).unwrap();
     for kind in [
         "unknown",
+        "missing_health",
+        "wrong_health",
         "size",
         "nano",
         "mode",
@@ -317,6 +319,15 @@ fn strict_context_rejects_unknown_keys_wrong_snapshots_and_timestamp_bounds() {
         match kind {
             "unknown" => {
                 value["unknown"] = serde_json::json!(true);
+            }
+            "missing_health" => {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("prior_missing_or_damaged");
+            }
+            "wrong_health" => {
+                value["prior_missing_or_damaged"] = serde_json::json!("false");
             }
             "size" => {
                 value["store"]["size"] = serde_json::json!(1);
@@ -1319,5 +1330,407 @@ fn unchanged_intended_witness_rejects_same_bytes_with_changed_fingerprint_at_bot
             }
             assert!(!f.storage.inspect().unwrap().coordination_available);
         }
+    }
+}
+
+#[test]
+fn retained_exchange_fingerprint_checks_mtime_on_initial_and_existing_stage_publication() {
+    use std::fs::FileTimes;
+    use std::time::{Duration, UNIX_EPOCH};
+    for retry in [false, true] {
+        for tamper in [false, true] {
+            let f = Fixture::new();
+            let initialized = f.storage.initialize().unwrap();
+            let id = initialized.operation_id.unwrap();
+            let receipt = f
+                .storage
+                .project
+                .git_common_dir
+                .join("work/operations")
+                .join(&id);
+            let operation =
+                format::operation(&fs::read(receipt.join("operation.yaml")).unwrap(), &receipt)
+                    .unwrap();
+            let dir = files::Directory::open(&f.storage.project.git_common_dir).unwrap();
+            dir.stage("store.yaml", b"old bytes").unwrap();
+            let before = dir.read("store.yaml").unwrap();
+            let stage = format!(".storage-{id}-store");
+            if retry {
+                dir.stage(&stage, b"new bytes").unwrap();
+            }
+            let retained = dir.path.join(&stage);
+            let changed = retained.clone();
+            let old = before.raw.clone();
+            let mtime = before.mtime.0;
+            let _guard = tamper.then(|| {
+                files::on_next(
+                    if retry {
+                        "retry_after_publication"
+                    } else {
+                        "after_publication"
+                    },
+                    move || {
+                        fs::write(&changed, old).unwrap();
+                        let file = fs::OpenOptions::new().write(true).open(changed).unwrap();
+                        file.set_times(
+                            FileTimes::new()
+                                .set_modified(UNIX_EPOCH + Duration::from_secs(mtime as u64 + 10)),
+                        )
+                        .unwrap();
+                        file.sync_all().unwrap();
+                    },
+                )
+            });
+            let mut publication = Publication::NotPublished;
+            let result = if retry {
+                publish_source(
+                    &dir,
+                    "store.yaml",
+                    b"new bytes",
+                    &Some(before.clone()),
+                    &operation,
+                    &mut Vec::new(),
+                    &mut publication,
+                )
+            } else {
+                dir.publish("store.yaml", b"new bytes", Some(&before), &stage)
+                    .map(|_| ())
+            };
+            if tamper {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    StorageErrorCode::Conflict,
+                    "retry={retry}"
+                );
+                assert_ne!(dir.read(&stage).unwrap().mtime, before.mtime);
+            } else {
+                result.unwrap();
+                assert!(before.same_content_identity(&dir.read(&stage).unwrap()));
+            }
+            assert_eq!(fs::read(retained).unwrap(), b"old bytes");
+            assert_eq!(dir.read("store.yaml").unwrap().raw, b"new bytes");
+        }
+    }
+}
+
+#[test]
+fn interrupted_exchange_requires_intact_retained_source_before_successful_retry() {
+    for damage in ["missing", "bytes", "substitute", "mtime", "healthy"] {
+        let f = Fixture::new();
+        f.storage.initialize().unwrap();
+        let error = f
+            .storage
+            .recreate_inner(f.request(), &mut |step| {
+                if step == "metadata" {
+                    Err(injected())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        let id = error.operation_id.as_deref().unwrap();
+        let root = f.storage.project.git_common_dir.join("work");
+        let stage = root.join(format!(".storage-{id}-store"));
+        let current = fs::read(root.join("store.yaml")).unwrap();
+        let old = fs::read(&stage).unwrap();
+        match damage {
+            "missing" => fs::remove_file(&stage).unwrap(),
+            "bytes" => fs::write(&stage, b"unexpected retained bytes").unwrap(),
+            "substitute" => {
+                fs::rename(&stage, root.join("held-prior-source")).unwrap();
+                fs::write(&stage, &old).unwrap();
+            }
+            "mtime" => {
+                let source = files::Directory::open(&root)
+                    .unwrap()
+                    .read(stage.file_name().unwrap().to_str().unwrap())
+                    .unwrap();
+                fs::File::open(&stage)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH
+                            + std::time::Duration::from_secs(source.mtime.0 as u64 + 10),
+                    ))
+                    .unwrap();
+            }
+            "healthy" => {}
+            _ => unreachable!(),
+        }
+        let retained_after_damage = fs::read(&stage).ok();
+        let result = f.storage.recover(
+            id,
+            RecoverRequest {
+                executors_stopped: true,
+                acknowledge_loss: true,
+                all_clients_stopped: false,
+            },
+        );
+        if damage == "healthy" {
+            assert!(result.unwrap().storage.coordination_available);
+        } else {
+            assert!(
+                matches!(
+                    result.unwrap_err().code,
+                    StorageErrorCode::StorageMissing | StorageErrorCode::Conflict
+                ),
+                "{damage}"
+            );
+            assert!(!f.storage.inspect().unwrap().coordination_available);
+        }
+        assert_eq!(fs::read(root.join("store.yaml")).unwrap(), current);
+        assert_eq!(fs::read(&stage).ok(), retained_after_damage);
+    }
+}
+
+#[test]
+fn prior_health_is_persisted_before_repair_and_returned_on_same_id_recovery() {
+    for damage in [
+        "healthy",
+        "root",
+        "lock",
+        "operations",
+        "recovery",
+        "archive",
+        "receipt",
+        "live",
+        "metadata",
+    ] {
+        let f = Fixture::new();
+        f.storage.initialize().unwrap();
+        let earlier = f.storage.recreate(f.request()).unwrap();
+        assert!(!earlier.loss.unwrap().missing_or_damaged);
+        let root = f.storage.project.git_common_dir.join("work");
+        let earlier_id = earlier.operation_id.unwrap();
+        match damage {
+            "healthy" => {}
+            "root" => fs::remove_dir_all(&root).unwrap(),
+            "lock" => fs::remove_file(root.join("coordination.lock")).unwrap(),
+            "operations" | "recovery" | "live" => {
+                fs::remove_dir_all(root.join(if damage == "live" { "claims" } else { damage }))
+                    .unwrap()
+            }
+            "archive" => {
+                fs::remove_dir_all(root.join("recovery").join(&earlier_id).join("prior/claims"))
+                    .unwrap()
+            }
+            "receipt" => fs::write(
+                root.join("operations")
+                    .join(&earlier_id)
+                    .join("operation.yaml"),
+                b"invalid receipt",
+            )
+            .unwrap(),
+            "metadata" => fs::remove_file(root.join("store.yaml")).unwrap(),
+            _ => unreachable!(),
+        }
+        let error = f
+            .storage
+            .recreate_inner(f.request(), &mut |step| {
+                if step == "prepared" {
+                    Err(injected())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        let id = error.operation_id.as_deref().unwrap();
+        let context_path = root.join("operations").join(id).join("context.yaml");
+        let raw = fs::read(&context_path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            value["prior_missing_or_damaged"],
+            damage != "healthy",
+            "{damage}"
+        );
+        let request = RecoverRequest {
+            executors_stopped: true,
+            acknowledge_loss: true,
+            all_clients_stopped: true,
+        };
+        let result = f.storage.recover(id, request.clone()).unwrap();
+        assert_eq!(
+            result.loss.unwrap().missing_or_damaged,
+            damage != "healthy",
+            "{damage}"
+        );
+        assert_eq!(
+            f.storage
+                .recover(id, request)
+                .unwrap()
+                .loss
+                .unwrap()
+                .missing_or_damaged,
+            damage != "healthy",
+            "{damage}"
+        );
+        assert_eq!(fs::read(context_path).unwrap(), raw);
+    }
+}
+
+#[test]
+fn initialization_context_requires_false_prior_health() {
+    let f = Fixture::new();
+    let error = f
+        .storage
+        .initialize_inner(&mut |step| {
+            if step == "prepared" {
+                Err(injected())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    let id = error.operation_id.as_deref().unwrap();
+    let dir = f
+        .storage
+        .project
+        .git_common_dir
+        .join("work/operations")
+        .join(id);
+    let op = format::operation(&fs::read(dir.join("operation.yaml")).unwrap(), &dir).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("context.yaml")).unwrap()).unwrap();
+    value["prior_missing_or_damaged"] = serde_json::json!(true);
+    assert_eq!(
+        format::context(&format::bytes(&value), &op, &dir)
+            .unwrap_err()
+            .code,
+        StorageErrorCode::InvalidFormat
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn permission_recovery_never_chmods_a_substituted_real_directory() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let f = Fixture::new();
+    let common = files::Directory::open(&f.storage.project.git_common_dir).unwrap();
+    let original = common.create("new-private").unwrap();
+    fs::rename(&original.path, common.path.join("retained-private")).unwrap();
+    fs::create_dir(&original.path).unwrap();
+    fs::set_permissions(&original.path, fs::Permissions::from_mode(0o755)).unwrap();
+    let error = common
+        .restore_new_directory_mode("new-private", &original.identity)
+        .unwrap_err();
+    assert_eq!(error.code, StorageErrorCode::PermissionDenied);
+    assert_eq!(fs::metadata(&original.path).unwrap().mode() & 0o777, 0o755);
+}
+
+#[test]
+fn prior_health_retains_incomplete_supported_initialization_as_damage() {
+    let f = Fixture::new();
+    let incomplete = f
+        .storage
+        .initialize_inner(&mut |step| {
+            if step == "prepared" {
+                Err(injected())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    let before = f.storage.inspect().unwrap();
+    assert!(
+        before
+            .pending_operations
+            .iter()
+            .any(|op| op.supported && op.kind.as_deref() == Some("initialize"))
+    );
+    let outcome = f.storage.recreate(f.request()).unwrap();
+    assert!(outcome.loss.as_ref().unwrap().missing_or_damaged);
+    let id = outcome.operation_id.unwrap();
+    let archived = outcome
+        .loss
+        .unwrap()
+        .prior_state_path
+        .unwrap()
+        .join("operations")
+        .join(incomplete.operation_id.unwrap());
+    assert!(archived.join("operation.yaml").is_file());
+    let recovered = f
+        .storage
+        .recover(
+            &id,
+            RecoverRequest {
+                executors_stopped: true,
+                acknowledge_loss: true,
+                all_clients_stopped: false,
+            },
+        )
+        .unwrap();
+    assert!(recovered.loss.unwrap().missing_or_damaged);
+}
+
+#[test]
+fn matching_archive_uncertainty_refuses_reset_but_missing_archive_can_be_acknowledged() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for damage in ["unsafe", "unreadable", "conflict", "missing"] {
+        let f = Fixture::new();
+        f.storage.initialize().unwrap();
+        let previous = f.storage.recreate(f.request()).unwrap();
+        let root = f.storage.project.git_common_dir.join("work");
+        let archive = previous.loss.unwrap().prior_state_path.unwrap();
+        let path = archive.join("prior/claims");
+        let retained = archive.join("held-claims");
+        fs::write(path.join("opaque"), b"retained claim bytes").unwrap();
+        match damage {
+            "unsafe" => {
+                fs::rename(&path, &retained).unwrap();
+                std::os::unix::fs::symlink(&retained, &path).unwrap();
+            }
+            "unreadable" => fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).unwrap(),
+            "conflict" => {
+                fs::rename(&path, &retained).unwrap();
+                fs::create_dir(&path).unwrap();
+                fs::write(path.join("replacement"), b"unrelated bytes").unwrap();
+            }
+            "missing" => fs::remove_dir_all(&path).unwrap(),
+            _ => unreachable!(),
+        }
+        let operations_before = files::Directory::open(&root.join("operations"))
+            .unwrap()
+            .names()
+            .unwrap();
+        let metadata = fs::read(root.join("store.yaml")).unwrap();
+        let lock = fs::metadata(root.join("coordination.lock")).unwrap();
+        let result = f.storage.recreate(f.request());
+        if damage == "missing" {
+            assert!(result.unwrap().loss.unwrap().missing_or_damaged);
+            assert!(!path.exists());
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.publication, Publication::NotPublished);
+            assert_eq!(
+                error.code,
+                match damage {
+                    "unsafe" => StorageErrorCode::UnsafePath,
+                    "unreadable" => StorageErrorCode::PermissionDenied,
+                    "conflict" => StorageErrorCode::Conflict,
+                    _ => unreachable!(),
+                }
+            );
+            assert_eq!(error.path, Some(path.clone()));
+            if damage == "unreadable" {
+                assert_eq!(error.errno, Some(13));
+                assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0);
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert_eq!(fs::read(root.join("store.yaml")).unwrap(), metadata);
+            assert_eq!(
+                files::Directory::open(&root.join("operations"))
+                    .unwrap()
+                    .names()
+                    .unwrap(),
+                operations_before
+            );
+            let opaque = if damage == "unreadable" {
+                path.join("opaque")
+            } else {
+                retained.join("opaque")
+            };
+            assert_eq!(fs::read(opaque).unwrap(), b"retained claim bytes");
+        }
+        let after = fs::metadata(root.join("coordination.lock")).unwrap();
+        assert_eq!((after.dev(), after.ino()), (lock.dev(), lock.ino()));
     }
 }
