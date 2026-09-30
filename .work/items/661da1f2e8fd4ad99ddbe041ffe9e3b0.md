@@ -12,15 +12,17 @@ thinking: "high"
 
 ## Scope
 
-Implement the Git-common-dir SQLite side store for operational state and derived indexes while keeping each selected checkout's durable item files authoritative. Define schema, migration, backup/recovery, and cache reconciliation before coding.
+Implement shared plain-file storage under the resolved Git common directory, with separate entity folders, a stable short-lived OS coordination lock, safe per-file publication and disposable in-memory views. Keep selected-checkout durable files authoritative. Define versioned store metadata, initialization/loss detection, safe path handling, lock ordering, error categories, and explicit recovery before coding. Entity-specific claim/run/session/handoff operations remain in their bounded items.
+
+The 2026-09-30 file-storage decision supersedes the paused SQLite implementation direction. Existing implementation work is not evidence that this revised acceptance passes; do not resume or publish that implementation as the current contract.
 
 ## Acceptance criteria
 
-- Linked worktrees share one coordination store without leaking one checkout's durable state into another.
-- A selected checkout reloads changed files and gives correct readiness despite an old index or branch switch.
-- Interrupted migration or index rebuild preserves claims and other non-derivable state; recovery is explicit.
-- CLI and MCP expose the applicable inspection or repair path with deterministic diagnostics; tests cover divergent worktree views and database restart.
+- Linked worktrees resolve the same shared entity folders; branch switching or feature-worktree removal does not remove shared operational files or leak durable completion between checkout views. No database or all-entity snapshot is required.
+- A selected checkout reloads changed files and gives correct graph readiness; rebuilding a disposable view preserves authoritative entity files byte-for-byte.
+- Independent processes serialize mutations through the same stable lock inode; process exit releases the lock. Single-file publication and interrupted initialization/format changes retain explicit recovery context.
+- CLI/MCP distinguish contention, invalid formats, missing/corrupt state and permission/I/O failures. Available file inspection/readiness reports storage warnings while uncertain ownership blocks claims. Tests cover restart, divergent views, unsafe paths and recovery without silently resetting ownership.
 
 ## Mara contracts
 
-`DES-SHARED-SQLITE`, `REQ-SIDE-STATE`, `REQ-WORKTREE-VIEWS`, `REQ-INDEX-REBUILD`, `RISK-DIVERGENT-VIEWS`. Resolve any unsettled operation or storage details in [open questions](../../docs/open-questions.mara.md) and update canonical Mara knowledge before implementation.
+`ADR-FILE-STATE`, `DES-SHARED-FILES`, `DES-ENTITY-LIFECYCLES`, `DES-FILE-COORDINATION`, `VER-FILE-COORDINATION`, `REQ-SIDE-STATE`, `REQ-WORKTREE-VIEWS`, `REQ-INDEX-REBUILD`, `RISK-DIVERGENT-VIEWS`. Resolve any unsettled operation or storage details in [open questions](../../docs/open-questions.mara.md) and update canonical Mara knowledge before implementation.

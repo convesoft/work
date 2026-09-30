@@ -33,7 +33,7 @@ The seven implementation items are done after their merged PRs. The alpha releas
 | Item | Purpose |
 | --- | --- |
 | [w-fba5815b](items/fba5815b224f4c74a194ec2be6dd5d90.md) | Implementation aggregate |
-| [w-661da1f2](items/661da1f2e8fd4ad99ddbe041ffe9e3b0.md) | Shared coordination store and worktree-view reconciliation |
+| [w-661da1f2](items/661da1f2e8fd4ad99ddbe041ffe9e3b0.md) | Shared entity-file storage, locking, recovery and worktree-view reconciliation |
 | [w-299765f4](items/299765f4605e414f974c2aa7cbe85b49.md) | Exclusive claims and recovery |
 | [w-65c88091](items/65c8809176c3464b8bf341500e9ecb4c.md) | Scoped selection and atomic claim-next |
 | [w-ef35536d](items/ef35536d06194c6b95c7e7b7fbd06aa0.md) | Parameterized template preview |
@@ -52,3 +52,7 @@ The beta implementation items are children of the implementation aggregate. The 
 Use the Work CLI or MCP against the selected checkout to inspect items, graph diagnostics, and readiness. A practical CLI entry point is `work --worktree PATH item ready`; run `work item --help` for available operations. Keep item IDs and opaque bodies intact when editing metadata.
 
 For this repository, close an implementation item only after its acceptance criteria pass and its change is merged. Release items also require the publication evidence in their bodies. Run destructive or state-changing acceptance scenarios on disposable copies, never on this live backlog. Main remains the integration branch; implementation work starts in dedicated item branches.
+
+## Storage direction
+
+The 2026-09-30 revision in [file storage](../docs/storage.mara.md) and `ADR-FILE-STATE` replaces the SQLite plan with separate authoritative Markdown/YAML entity files. The shared-storage item establishes filesystem and locking primitives; claims, runs, handoffs, sessions/workspaces and finalization retain their own bounded implementation items. The revised scopes are planning contracts, not completion evidence. No item is closed by this documentation revision.

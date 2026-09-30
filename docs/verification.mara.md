@@ -11,7 +11,7 @@ These are repeatable acceptance definitions, not execution results. The implemen
 :verifies: REQ-DURABLE-FILES
 :validates: SCN-PLAN-WORK
 
-Create a work item with a multiline description, acceptance criteria, a dependency, and a recorded outcome. Exit every Work process and reopen the project in a new session. Inspect the item through Work and directly in the durable YAML/Markdown. Expect the same semantic content and recorded state, with no chat-history dependency and no durable field recoverable only from the side database.
+Create a work item with a multiline description, acceptance criteria, a dependency, and a recorded outcome. Exit every Work process and reopen the project in a new session. Inspect the item through Work and directly in the durable YAML/Markdown. Expect the same semantic content and recorded state, with no chat-history dependency and every retained field readable from the item files.
 :::
 
 :::mara verification VER-DEPENDENCY-SELECTION
@@ -48,7 +48,7 @@ Supply template parameters and preview the resulting bodies, metadata, and graph
 :verifies: REQ-SIDE-STATE
 :validates: SCN-QUIET-EXECUTION
 
-Capture durable file contents, instantiate temporary operational work as inspectable files outside versioned history, and update its activity using SQLite coordination. Restart the Work process. Expect temporary content and edges to remain available from the files, participate in dependency evaluation, and cause no durable file churn merely through their operational lifecycle. Retain a useful final result and explicitly clean temporary detail; expect the durable project item and retained result to remain.
+Capture durable file contents and instantiate temporary execution as separate run, item and application files. Create claims, named sessions, reusable workspace records and handoffs in their documented locations, then restart every Work process. Inspect each entity directly with ordinary file tools and through CLI/MCP; expect matching semantic content and unchanged ownership. No SQLite file or single all-entity snapshot is required, and operational updates do not dirty versioned content. Retain a feature-level digest through ordinary Git commit/squash history before explicit temporary cleanup. Confirm branch merge alone does not copy live operational files into main.
 :::
 
 :::mara verification VER-CLAIM-RACE
@@ -60,7 +60,7 @@ Capture durable file contents, instantiate temporary operational work as inspect
 :verifies: REQ-CLAIM-RECOVERY
 :validates: SCN-CONCURRENT-AGENTS
 
-Use independent processes in linked worktrees to claim the same item simultaneously. Assert exactly one owner and an explicit conflict for the loser, even when callers supply different run/worktree contexts. Readers must remain able to inspect progress. Claim distinct items and expect independent ownership. Explicitly release and reassign a claim, then submit former-owner completion and release tokens and expect rejection. Recheck readiness between listing and claiming. Advance time without heartbeats and verify claims do not expire. Exercise explicit controller recovery of abandoned ownership. With executors stopped, remove the coordination database in a disposable fixture and verify recovery requires fresh ownership rather than inventing prior claims.
+Use independent processes in linked worktrees to claim the same item simultaneously. Assert exactly one owner and an explicit conflict for the loser, even when callers supply different run/worktree contexts. Readers must remain able to inspect progress. Claim distinct items and expect independent ownership. Explicitly release and reassign a claim, then submit former-owner completion and release tokens and expect rejection. Recheck readiness between listing and claiming. Advance time without heartbeats and verify claims do not expire. Exercise explicit controller recovery of abandoned ownership. Exercise concurrent independent CLI and MCP processes with notifications disabled or missed. Kill a process while it holds the shared OS lock; a later process can acquire the lock but cannot claim an already-owned item. With executors stopped, corrupt a claim file in a disposable fixture and verify an explicit storage warning/refusal rather than treating it as unclaimed. Explicit repair or ownership recreation invalidates old tokens and never invents prior owners.
 :::
 
 :::mara verification VER-WORKTREE-ISOLATION
@@ -72,9 +72,9 @@ Use independent processes in linked worktrees to claim the same item simultaneou
 :verifies: REQ-INDEX-REBUILD
 :validates: SCN-REBUILD-INDEX
 
-Create linked worktrees whose same-ID durable item has different content and completion state; include uncommitted changes. Alternate queries and index refreshes from each tree. Expect each query to use its selected tree's content without leaking the other's state, while claims exclude competing execution of the same repository item across both worktrees. Rebuild derived indexes with retained ephemeral files and live coordination records present and expect both to survive. In a separate stopped-execution fixture remove only SQLite: expect durable and ephemeral file-derived reconstruction, explicit loss of database-only coordination, and no invented ownership or observations.
+Create linked worktrees whose same-ID durable item differs in content and completion, including uncommitted changes. Alternate queries and source reloads from each tree. Expect selected-checkout content without completion leakage, while shared claims exclude competing execution across both trees. Restart and reconstruct the in-memory graph with claims, runs, sessions, workspaces and handoffs present; compare authoritative file bytes and require unchanged ownership/context.
 
-From a control checkout, explicitly select each worktree path and verify its file contents are read without checking out another branch in the control checkout.
+From a control checkout select each worktree by path and inspect its content without switching branches. Exercise branch switching and externally removing an eligible feature worktree; shared run/claim files remain inspectable and cannot be recreated from stale branch-local claim copies. The operational workspace record follows explicit cleanup reporting. In a separate stopped-execution fixture corrupt or remove recognizable initialized store metadata: require a warning for available file inspection/readiness, blocked claims, preserved surviving entity files and an explicit recovery path.
 :::
 
 :::mara verification VER-RUN-RECOVERY
@@ -86,6 +86,8 @@ From a control checkout, explicitly select each worktree path and verify its fil
 :verifies: REQ-RUN-FINALIZATION
 
 Inject failure before publishing a template run and expect no partial runnable graph. For finalization, inject interruption before and after durable result persistence and before temporary cleanup. On retry, expect exactly one retained result and no premature loss of the temporary graph. Keep a surviving dependent item to verify cleanup cannot leave an unresolved reference. The selected recovery protocol must define the recoverable intermediate states.
+
+Exercise failure after each staged write, operation-intent persistence, commit/visibility publication and cleanup step, including process kill and reported sync failures. Include repeated applications to an existing run and completion coupled with handoff/claim release. Retry using the same operation identity; require no duplicate IDs, lost context or stale-token authorization. During finalization, test a designated output checkout on a different filesystem where available: no cross-filesystem rename atomicity may be assumed. A process-kill test alone is not evidence of power-loss durability.
 :::
 
 :::mara verification VER-GRAPH-ERRORS
@@ -146,7 +148,7 @@ Exercise item selection, claiming, run creation, and supplied workspace or PR/CI
 :method: test
 :verifies: REQ-EPHEMERAL-FILES
 
-Create temporary work with several nodes and dependency edges, inspect its source files, stop all execution, and remove only the side database in a disposable fixture. Rebuild the derived view. Expect retained temporary item content and relationships to remain reconstructible from files without claiming to restore lost ownership or observations. Squash or cleanup must be an explicit lifecycle operation.
+Create a run with multiple temporary items and template applications. Inspect the separate manifest, item and provenance files directly. Restart Work and rebuild its disposable view without any database or persistent index; expect all content, edges, application mappings and ownership records to remain. In a stopped-execution fixture corrupt one entity file and verify diagnostics identify its path and preserve the other entities. Temporary cleanup remains an explicit lifecycle operation, never a side effect of rebuilding a graph.
 :::
 
 :::mara verification VER-NESTED-DELIVERY
@@ -305,4 +307,20 @@ Create durable and temporary items and verify UUIDv4 canonical identities use 32
 :verifies: DES-ITEM-FORMAT
 
 Copy the real .work/items backlog into a disposable initialized Git checkout. Load it without importing to a database or changing IDs/body bytes. Confirm aggregate items omit recorded state, manual items have valid state, and every full-ID relationship resolves. Exercise creation, inspection, readiness, relationships, close, and reopen through CLI and MCP on equivalent fixtures, preserving original files and comparing semantics. Verify the expected initial ready item and the next ready item after prerequisite completion. Cover LF/CRLF bodies, ambiguous YAML strings, duplicate keys, unknown fields/versions, invalid IDs, filename mismatches, aggregate stored state, unresolved edges, reciprocal related assertions, and mixed lifecycle deadlocks. Rejected writes must preserve files. The delivered durable-item slice has automated coverage in `tests/bootstrap_adoption.rs` and other integration tests in `tests/`. This definition records the repeatable check, not a passing result; consult actual test runs for execution evidence.
+:::
+
+:::mara verification VER-FILE-COORDINATION
+:mid: 01M3RPMWJSJ2SVH8XKQKTV5SGX
+:title: Verify separate entity storage and shared file coordination
+:status: accepted
+:method: test
+:verifies: DES-SHARED-FILES
+:verifies: DES-ENTITY-LIFECYCLES
+:verifies: DES-FILE-COORDINATION
+
+Use disposable Git repositories and linked worktrees to verify the entity layout, one authoritative owner per field/reference, and independent retention rules. Run concurrent CLI/MCP mutations through the shared lock, including contention and process termination. Confirm lock-file presence is not interpreted as ownership and normal cleanup never unlinks/replaces the live lock inode. Test symlink/path substitution and source conflicts without following unsafe replacements or silently overwriting changed content.
+
+Inject failure before and after single-file publication and directory sync; report whether publication may have occurred and retain recovery context. Inspect interrupted multi-file operations before scheduling and require an explicit committed visibility point. Verify a durable-only graph rebuild never clears claims or rewrites operational files. Missing/corrupt/unreadable ownership data must not become an empty ownership set. Permission/I/O, malformed entity and lock-contention failures must be distinguishable through both adapters.
+
+Test restore with matching active or retained local identity evidence and with no trusted local evidence. Require stopped executors, stale-token rejection and explicit loss reporting for recreation. Retained backup/recovery files must not appear as live entities. Raw external deletion and bypassing advisory locks remain outside the stated exclusion guarantee; this test must not imply otherwise. Use separate evidence for OS-crash/power-loss durability if such guarantees are claimed.
 :::

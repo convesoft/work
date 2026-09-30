@@ -16,6 +16,7 @@ Mara items describe the Work product. They are not Work's own issue records: Mar
 | [Scenarios](scenarios.mara.md) | Planning, actionable work, repeatable review, temporary work, concurrency, and recovery |
 | [Requirements](requirements.mara.md) | Observable obligations with accepted versus draft status |
 | [Design](design.mara.md) | Persistence boundaries, layouts, lifecycle proposals, and shared interfaces |
+| [File storage](storage.mara.md) | Shared plain-file storage, entity locations and lifetimes, locking and recovery boundaries |
 | [Item format](item-format.mara.md) | Version-1 item file contract and frontmatter schema |
 | [Template format](template-format.mara.md) | Version-1 YAML template and symbolic preview contract |
 | [Decisions](decisions.mara.md) | Rationale for the graph, storage model, and initial scope |
@@ -33,13 +34,15 @@ Mara items describe the Work product. They are not Work's own issue records: Mar
 | --- | --- |
 | Durable work items | Versioned Markdown/YAML under `.work/items/` |
 | Reusable templates | Versioned YAML under `.work/templates/` |
-| Ephemeral work content and relationships | Unversioned files under `<Git common directory>/work/runs/`, retained until squash or cleanup |
+| Runs, temporary items and template applications | Separate manifests, item documents and provenance files under `<Git common directory>/work/runs/` |
 | Handoff context | Unversioned Markdown under `<Git common directory>/work/handoffs/`, retained until all receiving items finish |
-| Claims, observations, and other coordination records | SQLite at `<Git common directory>/work/work.db` |
-| Optional named sessions and reusable workspace associations | Shared SQLite; names are scoped to a run, while one-time sessions need no named registration |
-| Search and graph indexes | Derived SQLite data, rebuildable from the authoritative files |
+| Claims | One YAML file per item under shared `work/claims/` |
+| Optional named sessions | Separate YAML files under their run's `sessions/`; one-time sessions need no named registration |
+| Reusable workspace associations | Separate YAML files under shared `work/workspaces/`; lifetime independent of an individual claim or run |
+| Recovery and operation metadata | Separate records under shared `work/operations/` and retained copies under `work/recovery/` |
+| Search and graph views | Disposable in-memory structures derived from authoritative files; no database required |
 
-The durable [bootstrap backlog](../.work/README.md) now uses `.work/items/` and [[DES-ITEM-FORMAT]]. It is real implementation work, separate from Mara specification items. No coordination database or run state has been initialized. [[DES-PERSISTENCE-BOUNDARY]] distinguishes reconstructible file-derived data from database-only coordination state.
+The durable [bootstrap backlog](../.work/README.md) uses `.work/items/` and [[DES-ITEM-FORMAT]]. It is implementation work, separate from Mara specification items. [[DES-PERSISTENCE-BOUNDARY]] distinguishes project history, shared execution files and shared operational files. [[DES-ENTITY-LIFECYCLES]] gives the complete layout; [[DES-FILE-COORDINATION]] defines the short shared OS lock and recoverable multi-file boundaries. These contracts describe planned coordination behavior, not delivered runtime state.
 
 [[DES-WORKSPACE-ASSOCIATIONS]] allows sequential activities and different sessions to reuse a workspace, with a run default and item overrides. An ordinary explicit cleanup item tracks external worktree removal before operational workspace records are removed. Failure retains retry context, and shared unfinished users prevent premature cleanup. Neither claim release nor run completion implicitly deletes a worktree.
 
@@ -49,13 +52,13 @@ The durable [bootstrap backlog](../.work/README.md) now uses `.work/items/` and 
 
 ## Provenance
 
-Recent refinements include [[REQ-WORK-SELECTION]] for priority, filtering, and atomic claim-next; [[REQ-GRAPH-INSPECTION]] for graph inspection and readiness explanations; parameterized template preview; and [[REQ-EXECUTOR-HINTS]] for optional model/thinking metadata. [[REQ-OPAQUE-BODIES]] keeps acceptance criteria and other narrative opaque to Work. [[DES-CLAIM-CONTEXT]] records session and workspace associations in SQLite. [[DES-HANDOFF-RECORDS]] passes temporary context between one or more source and receiving items without affecting readiness. [[DES-SQUASH-DIGEST]] preserves a caller-authored summary as an ordinary completed durable item before temporary cleanup.
+Recent refinements include [[REQ-WORK-SELECTION]] for priority, filtering, and atomic claim-next; [[REQ-GRAPH-INSPECTION]] for graph inspection and readiness explanations; parameterized template preview; and [[REQ-EXECUTOR-HINTS]] for optional model/thinking metadata. [[REQ-OPAQUE-BODIES]] keeps acceptance criteria and other narrative opaque to Work. [[DES-CLAIM-CONTEXT]] records ownership and external session references in shared files. [[DES-HANDOFF-RECORDS]] passes temporary context between one or more source and receiving items without affecting readiness. [[DES-SQUASH-DIGEST]] preserves a caller-authored summary as an ordinary completed durable item before temporary cleanup.
 
-This corpus captures product discussions and decisions reviewed on 2026-09-28. Explicit user intent establishes the local work tracker, graph and template model, ephemeral operational work, Rust implementation direction, working name `work`, and durable YAML/Markdown with a side database. Suggestions from the assistant are proposals unless subsequently confirmed.
+This corpus captures product decisions reviewed on 2026-09-28 and revised on 2026-09-30. Explicit user intent establishes the local work tracker, graph and template model, ephemeral operational work, Rust implementation direction, working name `work`, and separate plain files for all authoritative entities. Suggestions remain proposals unless subsequently confirmed.
 
-The discussion evolved from evaluating existing products through SQLite-only and filesystem-only sketches to hybrid persistence. Those earlier sketches are background alternatives, not simultaneous requirements. Commands, Rust structs, database tables, library choices, and version numbers shown there were illustrative; this corpus does not adopt them as implemented interfaces. No current claims about competing products are carried over.
+[[ADR-FILE-STATE]] supersedes the former hybrid SQLite direction. [[ADR-HYBRID-STATE]], [[ADR-SQLITE-COMMON-DIR]] and [[DES-SHARED-SQLITE]] are retained as retired history. The current architecture uses entity-specific folders and files, a short shared OS lock, and explicit recovery protocols. It requires neither custom Git refs nor a socket service. Notifications may refresh a view but cannot establish exclusive ownership.
 
-The current corpus-preparation conversation on 2026-09-28 clarified three decisions: retain ephemeral work as files until squash or cleanup, place those files in the shared Git common directory, and include MCP with CLI in an initial release limited to tracking and coordination. These clarifications take precedence over earlier suggestions to store ephemeral items only in SQLite or defer MCP.
+The shared Git common-directory location and CLI/MCP tracking boundary remain. A single external coordinator normally assigns work, while safe concurrent mutations are still required. Ordinary squash merges retain feature-level project history; operational files are not automatically archived by merging a branch. Retain required results explicitly before cleanup. This revision changes the contract and backlog, not the implemented status below.
 
 ## Implementation evidence
 
