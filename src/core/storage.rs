@@ -818,14 +818,17 @@ impl Storage {
             ));
         }
         let mut publication = Publication::NotPublished;
-        let result = self.finish(
-            &locked,
-            &dir,
-            &mut operation,
-            &context,
-            checkpoint,
-            &mut publication,
-        );
+        let result = (|| {
+            refuse_reserved_replay(&operations, operation_id)?;
+            self.finish(
+                &locked,
+                &dir,
+                &mut operation,
+                &context,
+                checkpoint,
+                &mut publication,
+            )
+        })();
         operation_result(result, &operation, &dir.path, publication)
     }
     fn finish(
@@ -1123,6 +1126,51 @@ fn decode_intent(
     )?;
     dir.verify()?;
     Ok((op, context))
+}
+// A pending recreation's captured prior operations must remain unchanged until
+// it archives them. Replaying one would invalidate that supported recovery.
+fn refuse_reserved_replay(
+    operations: &files::Directory,
+    operation_id: &str,
+) -> Result<(), StorageError> {
+    for name in operations.names()? {
+        let Some(id) = name.to_str().filter(|id| format::valid_id(id)) else {
+            continue;
+        };
+        if id == operation_id {
+            continue;
+        }
+        let dir = operations.child(id)?;
+        match decode_intent(&dir, id) {
+            Ok((operation, _))
+                if operation.kind == "recreate"
+                    && operation.phase != "complete"
+                    && operation
+                        .prior_operations
+                        .iter()
+                        .any(|id| id == operation_id) =>
+            {
+                return Err(StorageError::new(
+                    StorageErrorCode::RecoveryRequired,
+                    format!(
+                        "operation is reserved by incomplete recreation {id}; recover it first"
+                    ),
+                    Some(dir.path),
+                ));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.code,
+                    StorageErrorCode::InvalidFormat
+                        | StorageErrorCode::UnsupportedFormat
+                        | StorageErrorCode::StorageMissing
+                        | StorageErrorCode::StorageCorrupt
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 fn publish_phase(
     dir: &files::Directory,

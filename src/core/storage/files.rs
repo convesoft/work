@@ -149,6 +149,8 @@ impl Directory {
         let result = Self::from_file(file, path)?;
         result.verify()?;
         result.sync()?;
+        #[cfg(test)]
+        inject("directory_parent_sync", &self.path)?;
         self.sync()?;
         self.verify()?;
         Ok(result)
@@ -223,7 +225,16 @@ impl Directory {
     }
     pub fn ensure(&self, name: &str) -> Result<Self, StorageError> {
         if self.exists(name)? {
-            self.child(name)
+            let result = self.child(name)?;
+            // Reopening a directory after interrupted creation must retry both
+            // its sync and the sync that durably establishes its parent entry.
+            result.sync()?;
+            #[cfg(test)]
+            inject("directory_parent_sync", &self.path)?;
+            self.sync()?;
+            result.verify()?;
+            self.verify()?;
+            Ok(result)
         } else {
             self.create(name)
         }

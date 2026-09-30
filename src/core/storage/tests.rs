@@ -2039,3 +2039,191 @@ fn interrupted_partial_publication_stage_refuses_replay_but_allows_explicit_reta
         );
     }
 }
+
+#[test]
+fn pending_recreation_reserves_prior_initialization_before_any_replay_publication() {
+    let f = Fixture::new();
+    let initialization = f
+        .storage
+        .initialize_inner(&mut |step| {
+            if step == "prepared" {
+                Err(injected())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    let initial_id = initialization.operation_id.unwrap();
+    let recreation = f
+        .storage
+        .recreate_inner(f.request(), &mut |step| {
+            if step == "prepared" {
+                Err(injected())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    let recreation_id = recreation.operation_id.unwrap();
+    let common = files::Directory::open(&f.storage.project.git_common_dir).unwrap();
+    let root = common.child("work").unwrap();
+    let operations = root.child("operations").unwrap();
+    let initializing = operations.child(&initial_id).unwrap();
+    let recreating = operations.child(&recreation_id).unwrap();
+    let (intent, _) = decode_intent(&recreating, &recreation_id).unwrap();
+    assert_eq!(intent.phase, "prepared");
+    assert!(intent.prior_operations.contains(&initial_id));
+    let store_before = root.optional("store.yaml").unwrap();
+    let witness_before = common.optional("work.identity.yaml").unwrap();
+    let root_names_before = root.names().unwrap();
+    let operation_names_before = operations.names().unwrap();
+    let sources = [&initializing, &recreating]
+        .into_iter()
+        .flat_map(|directory| {
+            [
+                "operation.yaml",
+                "context.yaml",
+                "store.yaml",
+                "identity.yaml",
+            ]
+            .map(|name| (directory.path.join(name), directory.read(name).unwrap()))
+        })
+        .collect::<Vec<_>>();
+    let error = f
+        .storage
+        .recover(&initial_id, RecoverRequest::default())
+        .unwrap_err();
+    assert_eq!(error.code, StorageErrorCode::RecoveryRequired);
+    assert_eq!(error.publication, Publication::NotPublished);
+    assert_eq!(error.path, Some(recreating.path.clone()));
+    assert_eq!(root.optional("store.yaml").unwrap(), store_before);
+    assert_eq!(
+        common.optional("work.identity.yaml").unwrap(),
+        witness_before
+    );
+    assert_eq!(root.names().unwrap(), root_names_before);
+    assert_eq!(operations.names().unwrap(), operation_names_before);
+    for (path, source) in sources {
+        let dir = files::Directory::open(path.parent().unwrap()).unwrap();
+        assert_eq!(
+            dir.read(path.file_name().unwrap().to_str().unwrap())
+                .unwrap(),
+            source
+        );
+    }
+    let outcome = f
+        .storage
+        .recover(
+            &recreation_id,
+            RecoverRequest {
+                executors_stopped: true,
+                acknowledge_loss: true,
+                all_clients_stopped: false,
+            },
+        )
+        .unwrap();
+    assert!(outcome.storage.coordination_available);
+    assert_eq!(outcome.storage.metadata.unwrap(), intent.metadata());
+    let archived = outcome
+        .loss
+        .unwrap()
+        .prior_state_path
+        .unwrap()
+        .join("operations")
+        .join(&initial_id);
+    assert!(archived.join("operation.yaml").is_file());
+    assert_eq!(
+        f.storage
+            .recover(&initial_id, RecoverRequest::default())
+            .unwrap_err()
+            .code,
+        StorageErrorCode::Conflict
+    );
+}
+
+#[test]
+fn recovery_retries_parent_sync_for_existing_archive_created_before_sync_failure() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new();
+    f.storage.initialize().unwrap();
+    let root = f.storage.project.git_common_dir.join("work");
+    fs::write(root.join("claims/opaque"), b"retained claim bytes").unwrap();
+    let mut failure = None;
+    let error = f
+        .storage
+        .recreate_inner(f.request(), &mut |step| {
+            if step == "prepared" {
+                // First sync reopens recovery/ itself; second creates recovery/<id>
+                // and fails syncing its held work/recovery parent after mkdir.
+                failure = Some(files::on_nth("directory_parent_sync", 2, || {
+                    std::mem::forget(files::fail_next("directory_parent_sync"));
+                }));
+            }
+            Ok(())
+        })
+        .unwrap_err();
+    drop(failure);
+    assert_eq!(error.code, StorageErrorCode::Io);
+    assert_eq!(error.errno, Some(5));
+    assert_eq!(error.path, Some(root.join("recovery")));
+    let id = error.operation_id.unwrap();
+    let archive = root.join("recovery").join(&id);
+    let inode = fs::metadata(&archive).unwrap();
+    assert!(!archive.join("prior").exists());
+    let operation_dir = root.join("operations").join(&id);
+    let receipt = fs::read(operation_dir.join("operation.yaml")).unwrap();
+    let intent = format::operation(&receipt, &operation_dir).unwrap();
+    assert_eq!(intent.phase, "prepared");
+    let source = fs::read(root.join("store.yaml")).unwrap();
+    for _ in 0..2 {
+        let _guard = files::on_nth("directory_parent_sync", 2, || {
+            std::mem::forget(files::fail_next("directory_parent_sync"));
+        });
+        let retry = f
+            .storage
+            .recover(
+                &id,
+                RecoverRequest {
+                    executors_stopped: true,
+                    acknowledge_loss: true,
+                    all_clients_stopped: false,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(retry.code, StorageErrorCode::Io);
+        assert_eq!(retry.errno, Some(5));
+        assert_eq!(retry.path, Some(root.join("recovery")));
+        assert_eq!(retry.publication, Publication::NotPublished);
+        assert_eq!(
+            fs::read(operation_dir.join("operation.yaml")).unwrap(),
+            receipt
+        );
+        assert_eq!(fs::read(root.join("store.yaml")).unwrap(), source);
+        assert_eq!(
+            fs::read(root.join("claims/opaque")).unwrap(),
+            b"retained claim bytes"
+        );
+        assert!(!archive.join("prior").exists());
+        let after = fs::metadata(&archive).unwrap();
+        assert_eq!((after.dev(), after.ino()), (inode.dev(), inode.ino()));
+    }
+    let outcome = f
+        .storage
+        .recover(
+            &id,
+            RecoverRequest {
+                executors_stopped: true,
+                acknowledge_loss: true,
+                all_clients_stopped: false,
+            },
+        )
+        .unwrap();
+    assert!(outcome.storage.coordination_available);
+    assert_eq!(outcome.storage.metadata.unwrap(), intent.metadata());
+    assert_eq!(
+        fs::read(archive.join("prior/claims/opaque")).unwrap(),
+        b"retained claim bytes"
+    );
+    let after = fs::metadata(archive).unwrap();
+    assert_eq!((after.dev(), after.ino()), (inode.dev(), inode.ino()));
+}
