@@ -6,6 +6,8 @@ A local, agent-first issue tracker, being built in Rust. Work will track work it
 
 The published `0.1.0-alpha.1` release supports durable item operations through the CLI and MCP stdio, with equivalent structured results from the shared core. Claims, templates, temporary runs, sessions, workspaces, handoffs, and run finalization are later work.
 
+This development checkout also includes read-only template preview and the shared plain-file storage foundation: inspection, explicit initialization, recreation and interrupted-operation recovery. These are not claims or run execution; backup/restore remains deferred. See [the usage guide](docs/using-work.md) for commands and current limits.
+
 - [Product knowledge](docs/index.mara.md): scope, requirements, design, and decisions.
 - [Implementation backlog](.work/README.md): actual Work items, maintained with the Work CLI.
 - [Item format](docs/item-format.mara.md): the contract the implementation must adopt.

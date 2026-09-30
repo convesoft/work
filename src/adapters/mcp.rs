@@ -127,6 +127,10 @@ const TOOL_NAMES: &[&str] = &[
     "template_list",
     "template_validate",
     "template_preview",
+    "storage_inspect",
+    "storage_init",
+    "storage_recreate",
+    "storage_recover",
 ];
 
 fn tool(name: &str, properties: Value, required: &[&str], description: &str) -> Value {
@@ -150,6 +154,31 @@ fn tools() -> Vec<Value> {
     update.remove("body");
     update.insert("id".into(), s.clone());
     vec![
+        tool(
+            "storage_inspect",
+            common.clone(),
+            &[],
+            "Inspect shared file storage health without writes.",
+        ),
+        tool(
+            "storage_init",
+            common.clone(),
+            &[],
+            "Explicitly initialize fresh shared storage; a healthy store is unchanged.",
+        ),
+        tool(
+            "storage_recreate",
+            json!({"worktree":s,"expected_store_id":s,"expected_generation":s,
+            "executors_stopped":{"type":"boolean","enum":[true]},"acknowledge_loss":{"type":"boolean","enum":[true]},"all_clients_stopped":b}),
+            &["executors_stopped", "acknowledge_loss"],
+            "Retain prior state and explicitly reset live coordination to a new generation. Stop executors first; a missing root/lock also requires all clients stopped.",
+        ),
+        tool(
+            "storage_recover",
+            json!({"worktree":s,"operation_id":s,"executors_stopped":b,"acknowledge_loss":b,"all_clients_stopped":b}),
+            &["operation_id"],
+            "Resume a supported interrupted initialization or recreation. Recreation requires renewed stopped-executor and loss affirmations.",
+        ),
         tool(
             "discover",
             common.clone(),
@@ -396,10 +425,26 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, CliError> {
 }
 
 fn call(name: &str, input: &Value) -> Result<Value, CliError> {
+    let result = call_inner(name, input);
+    if matches!(
+        name,
+        "storage_init" | "storage_recreate" | "storage_recover"
+    ) {
+        result.map_err(CliError::storage_failure)
+    } else {
+        result
+    }
+}
+
+fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
     let args = validate(name, input)?;
+    if let Some(verb) = name.strip_prefix("storage_") {
+        let request = super::storage::from_fields(verb, args)?;
+        return super::storage::execute(&selected(args)?, request);
+    }
     let project = selected(args)?;
     let ops = DurableOperations::new(&project.worktree_root);
-    match name {
+    let result = match name {
         "discover" => Ok(
             json!({"worktree_root":cli::encode_path(&project.worktree_root),"git_common_dir":cli::encode_path(&project.git_common_dir)}),
         ),
@@ -517,5 +562,13 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
             Ok(json!({"item":cli::mutation_item_value(&project,&item)?}))
         }
         _ => unreachable!(),
+    }?;
+    if matches!(
+        name,
+        "item_list" | "item_ready" | "item_diagnose" | "item_inspect" | "item_inspect_raw"
+    ) {
+        Ok(super::storage::attach_read(&project, result))
+    } else {
+        Ok(result)
     }
 }
