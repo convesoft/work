@@ -16,6 +16,8 @@ Implement shared plain-file storage under the resolved Git common directory, wit
 
 The 2026-09-30 file-storage decision supersedes the paused SQLite implementation direction. Existing implementation work is not evidence that this revised acceptance passes; do not resume or publish that implementation as the current contract.
 
+Backup creation and restoring old backups are deferred. This foundation reports damaged or missing state and requires explicit action before recreation, with loss reporting and preservation of surviving context. It does not implement a backup/restore command or validate future claim/run envelopes as a prerequisite.
+
 ## Acceptance criteria
 
 - Linked worktrees resolve the same shared entity folders; branch switching or feature-worktree removal does not remove shared operational files or leak durable completion between checkout views. No database or all-entity snapshot is required.
