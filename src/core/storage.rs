@@ -297,6 +297,7 @@ impl Storage {
                 warn(result, e);
             }
         }
+        let mut matching_complete = false;
         if let Ok(operations) = locked.root.child("operations") {
             match operations.names() {
                 Ok(names) => {
@@ -318,31 +319,17 @@ impl Storage {
                             ))
                         } else {
                             operations.child(&name).and_then(|dir| {
-                                let source = dir.read("operation.yaml")?;
-                                let op = format::operation(
-                                    &source.raw,
-                                    &dir.path.join("operation.yaml"),
-                                )?;
-                                if Some(&op.id) != id.as_ref() {
-                                    return Err(StorageError::new(
-                                        StorageErrorCode::InvalidFormat,
-                                        "operation ID differs from directory",
-                                        Some(path.clone()),
-                                    ));
-                                }
-                                let meta = dir.read("store.yaml")?;
-                                let identity = dir.read("identity.yaml")?;
-                                op.check_stages(&meta.raw, &identity.raw, &dir.path)?;
-                                format::context(
-                                    &dir.read("context.yaml")?.raw,
-                                    &op,
-                                    &dir.path.join("context.yaml"),
-                                )?;
-                                Ok(op)
+                                decode_intent(&dir, id.as_deref().expect("validated operation ID"))
+                                    .map(|(op, _)| op)
                             })
                         };
                         match decoded {
-                            Ok(op) if op.phase == "complete" => {}
+                            Ok(op) if op.phase == "complete" => {
+                                matching_complete |= result.metadata.as_ref().is_some_and(|meta| {
+                                    meta.store_id == op.store_id
+                                        && meta.recovery_generation == op.next_generation
+                                });
+                            }
                             Ok(op) => {
                                 result.pending_operations.push(PendingOperation {
                                     id,
@@ -378,6 +365,16 @@ impl Storage {
         }
         if let Err(e) = locked.verify() {
             warn(result, e);
+        }
+        if result.diagnostics.is_empty() && !matching_complete {
+            warn(
+                result,
+                StorageError::new(
+                    StorageErrorCode::StorageCorrupt,
+                    "no validated complete operation matches the current store identity and generation",
+                    Some(locked.root.path.join("operations")),
+                ),
+            );
         }
         if result.diagnostics.is_empty() {
             result.state = StorageState::Initialized;
@@ -598,31 +595,39 @@ impl Storage {
                     )
                 })?;
             let dir = operations.child(id)?;
-            if let Ok(source) = dir.read("operation.yaml")
-                && let Ok(prior) = format::operation(&source.raw, &dir.path.join("operation.yaml"))
-                && prior.kind == "recreate"
-                && prior.phase != "complete"
-            {
-                // A healthy committed intent still needs its own completion.
-                // Supersession is only for terminal structure that cannot replay
-                // safely; explicit recreation then retains it in a fresh generation.
-                if prior.phase == "committed"
-                    && terminal_structure_damaged(
-                        &locked.root,
-                        &locked.common,
-                        &dir,
-                        &prior,
-                        !lock_present,
-                    )?
-                {
-                    context.operations.insert(id.to_owned(), dir.identity);
-                    continue;
+            match decode_intent(&dir, id) {
+                Ok((prior, _)) if prior.kind == "recreate" && prior.phase != "complete" => {
+                    // Fully supported pending recreation resumes by ID, except
+                    // terminal damage that requires an explicitly fresh generation.
+                    if prior.phase != "committed"
+                        || !terminal_structure_damaged(
+                            &locked.root,
+                            &locked.common,
+                            &dir,
+                            &prior,
+                            !lock_present,
+                        )?
+                    {
+                        return Err(StorageError::new(
+                            StorageErrorCode::RecoveryRequired,
+                            "resume the existing recreation by ID instead of superseding it",
+                            Some(dir.path),
+                        ));
+                    }
                 }
-                return Err(StorageError::new(
-                    StorageErrorCode::RecoveryRequired,
-                    "resume the existing recreation by ID instead of superseding it",
-                    Some(dir.path),
-                ));
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.code,
+                        StorageErrorCode::InvalidFormat
+                            | StorageErrorCode::UnsupportedFormat
+                            | StorageErrorCode::StorageMissing
+                            | StorageErrorCode::StorageCorrupt
+                    ) =>
+                {
+                    // An unusable record is retained opaquely, never replayed.
+                }
+                Err(error) => return Err(error),
             }
             context.operations.insert(id.to_owned(), dir.identity);
         }
@@ -678,17 +683,7 @@ impl Storage {
         let missing_lock = !root.exists("coordination.lock")?;
         if missing_lock {
             let advisory_dir = root.child("operations")?.child(operation_id)?;
-            let advisory_op = format::operation(
-                &advisory_dir.read("operation.yaml")?.raw,
-                &advisory_dir.path.join("operation.yaml"),
-            )?;
-            if advisory_op.id != operation_id {
-                return Err(StorageError::new(
-                    StorageErrorCode::InvalidFormat,
-                    "operation ID does not match its directory",
-                    Some(advisory_dir.path),
-                ));
-            }
+            let (advisory_op, _) = decode_intent(&advisory_dir, operation_id)?;
             if matches!(advisory_op.phase.as_str(), "committed" | "complete") {
                 return Err(StorageError::new(
                     StorageErrorCode::StorageMissing,
@@ -744,23 +739,7 @@ impl Storage {
             }
         }
         let dir = operations.child(operation_id)?;
-        let source = dir.read("operation.yaml")?;
-        let mut operation = format::operation(&source.raw, &dir.path.join("operation.yaml"))?;
-        if operation.id != operation_id {
-            return Err(StorageError::new(
-                StorageErrorCode::InvalidFormat,
-                "operation ID does not match its directory",
-                Some(dir.path),
-            ));
-        }
-        let intended_store = dir.read("store.yaml")?;
-        let intended_identity = dir.read("identity.yaml")?;
-        operation.check_stages(&intended_store.raw, &intended_identity.raw, &dir.path)?;
-        let context = format::context(
-            &dir.read("context.yaml")?.raw,
-            &operation,
-            &dir.path.join("context.yaml"),
-        )?;
+        let (mut operation, context) = decode_intent(&dir, operation_id)?;
         if operation.kind == "recreate" && (!request.executors_stopped || !request.acknowledge_loss)
         {
             return Err(StorageError::new(
@@ -827,6 +806,7 @@ impl Storage {
         }
         if matches!(operation.phase.as_str(), "complete" | "committed") {
             validate_terminal_structure(&locked.root, operation, context)?;
+            checkpoint("terminal_structure")?;
         }
         let terminal = matches!(operation.phase.as_str(), "complete" | "committed");
         let readonly_archive =
@@ -876,6 +856,7 @@ impl Storage {
             }
             recovery_paths.push(archive.path);
         }
+        let mut live_folders = Vec::new();
         for name in LIVE {
             if matches!(operation.phase.as_str(), "prepared" | "archived")
                 && locked.root.exists(name)?
@@ -886,11 +867,18 @@ impl Storage {
                     "unexpected live content during pending initialization/recreation",
                 ));
             }
-            locked.root.ensure(name)?;
+            live_folders.push(if terminal {
+                locked.root.child(name)?
+            } else {
+                locked.root.ensure(name)?
+            });
         }
         // Newly prepared initialization has the required operations and recovery folders.
         locked.verify()?;
         checkpoint("live_folders")?;
+        for folder in &live_folders {
+            folder.verify()?;
+        }
         publish_source(
             &locked.common,
             "work.identity.yaml",
@@ -913,6 +901,9 @@ impl Storage {
         )?;
         checkpoint("metadata")?;
         locked.verify()?;
+        for folder in &live_folders {
+            folder.verify()?;
+        }
         if operation.phase != "complete" {
             operation.phase = "committed".into();
             publish_phase(dir, operation)?;
@@ -1031,6 +1022,36 @@ fn prepare(
     )?;
     dir.sync()?;
     checkpoint("prepared")
+}
+// One bounded decoder defines support for inspection, recovery and the
+// recreation guard. A valid header alone never authorizes replay or blocks reset.
+fn decode_intent(
+    dir: &files::Directory,
+    expected_id: &str,
+) -> Result<(format::Operation, format::Context), StorageError> {
+    let op = format::operation(
+        &dir.read("operation.yaml")?.raw,
+        &dir.path.join("operation.yaml"),
+    )?;
+    if op.id != expected_id {
+        return Err(StorageError::new(
+            StorageErrorCode::InvalidFormat,
+            "operation ID differs from directory",
+            Some(dir.path.clone()),
+        ));
+    }
+    op.check_stages(
+        &dir.read("store.yaml")?.raw,
+        &dir.read("identity.yaml")?.raw,
+        &dir.path,
+    )?;
+    let context = format::context(
+        &dir.read("context.yaml")?.raw,
+        &op,
+        &dir.path.join("context.yaml"),
+    )?;
+    dir.verify()?;
+    Ok((op, context))
 }
 fn publish_phase(
     dir: &files::Directory,

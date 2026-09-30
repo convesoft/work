@@ -842,3 +842,204 @@ fn committed_recreation_missing_terminal_metadata_or_witness_requires_explicit_f
         );
     }
 }
+
+#[test]
+fn terminal_replay_never_recreates_a_live_folder_deleted_after_structure_validation() {
+    for kind in ["initialize", "recreate"] {
+        for phase in ["committed", "complete"] {
+            let f = Fixture::new();
+            let mut stop = |step: &str| {
+                if step == phase {
+                    Err(injected())
+                } else {
+                    Ok(())
+                }
+            };
+            let error = if kind == "initialize" {
+                f.storage.initialize_inner(&mut stop).unwrap_err()
+            } else {
+                f.storage.initialize().unwrap();
+                f.storage
+                    .recreate_inner(f.request(), &mut stop)
+                    .unwrap_err()
+            };
+            let id = error.operation_id.as_deref().unwrap();
+            let root = f.storage.project.git_common_dir.join("work");
+            let metadata = fs::read(root.join("store.yaml")).unwrap();
+            let receipt =
+                fs::read(root.join("operations").join(id).join("operation.yaml")).unwrap();
+            let request = RecoverRequest {
+                executors_stopped: true,
+                acknowledge_loss: true,
+                all_clients_stopped: false,
+            };
+            let error = f
+                .storage
+                .recover_inner(id, request, &mut |step| {
+                    if step == "terminal_structure" {
+                        fs::remove_dir(root.join("claims")).unwrap();
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                StorageErrorCode::StorageMissing,
+                "{kind}/{phase}"
+            );
+            assert_eq!(error.publication, Publication::NotPublished);
+            assert!(!root.join("claims").exists());
+            assert_eq!(fs::read(root.join("store.yaml")).unwrap(), metadata);
+            assert_eq!(
+                fs::read(root.join("operations").join(id).join("operation.yaml")).unwrap(),
+                receipt
+            );
+            assert!(!f.storage.inspect().unwrap().coordination_available);
+        }
+    }
+}
+
+#[test]
+fn malformed_pending_recreation_components_are_unsupported_and_retained_by_explicit_recreation() {
+    for phase in ["prepared", "archived"] {
+        for damaged in [
+            "context.yaml",
+            "store.yaml",
+            "identity.yaml",
+            "missing_context",
+            "mismatched_stage",
+        ] {
+            let f = Fixture::new();
+            f.storage.initialize().unwrap();
+            let error = f
+                .storage
+                .recreate_inner(f.request(), &mut |step| {
+                    if step == phase {
+                        Err(injected())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_err();
+            let id = error.operation_id.as_deref().unwrap();
+            let root = f.storage.project.git_common_dir.join("work");
+            let dir = root.join("operations").join(id);
+            let generation = f
+                .storage
+                .inspect()
+                .unwrap()
+                .metadata
+                .unwrap()
+                .recovery_generation;
+            let name = match damaged {
+                "missing_context" => "context.yaml",
+                "mismatched_stage" => "store.yaml",
+                name => name,
+            };
+            let path = dir.join(name);
+            if damaged == "missing_context" {
+                fs::remove_file(&path).unwrap();
+            } else if damaged == "mismatched_stage" {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["recovery_generation"] =
+                    serde_json::json!("00000000000040008000000000000000");
+                fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            } else {
+                fs::write(&path, b"malformed retained bytes\0\xff").unwrap();
+            }
+            let retained = fs::read(&path).ok();
+            let header = fs::read(dir.join("operation.yaml")).unwrap();
+            let status = f.storage.inspect().unwrap();
+            assert!(!status.coordination_available);
+            assert!(
+                !status
+                    .pending_operations
+                    .iter()
+                    .find(|op| op.id.as_deref() == Some(id))
+                    .unwrap()
+                    .supported
+            );
+            let request = RecoverRequest {
+                executors_stopped: true,
+                acknowledge_loss: true,
+                all_clients_stopped: false,
+            };
+            assert!(f.storage.recover(id, request).is_err());
+            let result = f.storage.recreate(f.request()).unwrap();
+            assert!(result.storage.coordination_available, "{phase}/{damaged}");
+            assert_ne!(
+                result.storage.metadata.unwrap().recovery_generation,
+                generation
+            );
+            let archived = result
+                .loss
+                .unwrap()
+                .prior_state_path
+                .unwrap()
+                .join("operations")
+                .join(id);
+            assert_eq!(fs::read(archived.join("operation.yaml")).unwrap(), header);
+            assert_eq!(fs::read(archived.join(name)).ok(), retained);
+        }
+    }
+}
+
+#[test]
+fn pending_intent_guard_refuses_unreadable_or_unsafe_components_without_archival() {
+    use std::os::unix::fs::PermissionsExt;
+    for kind in ["permissions", "symlink", "fifo"] {
+        let f = Fixture::new();
+        f.storage.initialize().unwrap();
+        let error = f
+            .storage
+            .recreate_inner(f.request(), &mut |step| {
+                if step == "prepared" {
+                    Err(injected())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        let id = error.operation_id.as_deref().unwrap();
+        let root = f.storage.project.git_common_dir.join("work");
+        let dir = root.join("operations").join(id);
+        let context = dir.join("context.yaml");
+        let header = fs::read(dir.join("operation.yaml")).unwrap();
+        match kind {
+            "permissions" => {
+                fs::set_permissions(&context, fs::Permissions::from_mode(0o000)).unwrap()
+            }
+            "symlink" => {
+                fs::remove_file(&context).unwrap();
+                std::os::unix::fs::symlink(root.join("store.yaml"), &context).unwrap();
+            }
+            "fifo" => {
+                fs::remove_file(&context).unwrap();
+                rustix::fs::mknodat(
+                    rustix::fs::CWD,
+                    &context,
+                    rustix::fs::FileType::Fifo,
+                    rustix::fs::Mode::from_bits_truncate(0o600),
+                    0,
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let error = f.storage.recreate(f.request()).unwrap_err();
+        assert_eq!(
+            error.code,
+            if kind == "permissions" {
+                StorageErrorCode::PermissionDenied
+            } else {
+                StorageErrorCode::UnsafePath
+            }
+        );
+        assert_eq!(fs::read(dir.join("operation.yaml")).unwrap(), header);
+        assert!(root.join("claims").is_dir());
+        if kind == "permissions" {
+            fs::set_permissions(&context, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+}

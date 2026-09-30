@@ -827,3 +827,197 @@ fn real_cli_initialization_and_recreation_use_private_modes_under_restrictive_ch
     private_tree(&f.root());
     private_tree(&f.project.git_common_dir.join("work.identity.yaml"));
 }
+
+#[test]
+fn real_cli_and_mcp_require_a_complete_receipt_matching_live_generation_without_writing() {
+    fn snapshot(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                files.extend(snapshot(&entry.path()));
+            } else {
+                files.insert(entry.path(), fs::read(entry.path()).unwrap());
+            }
+        }
+        files
+    }
+    for mode in [
+        "generation",
+        "empty",
+        "obsolete_only",
+        "matching_and_obsolete",
+    ] {
+        let f = Fixture::new();
+        let (code, initial) = f.cli(&["storage", "init"]);
+        assert_eq!(code, 0);
+        let old_id = initial["result"]["operation_id"].as_str().unwrap();
+        if mode.starts_with("obsolete") || mode == "matching_and_obsolete" {
+            let data = &initial["result"]["storage"]["metadata"];
+            let (code, result) = f.cli(&[
+                "storage",
+                "recreate",
+                "--expected-store-id",
+                data["store_id"].as_str().unwrap(),
+                "--expected-generation",
+                data["recovery_generation"].as_str().unwrap(),
+                "--executors-stopped",
+                "--acknowledge-loss",
+            ]);
+            assert_eq!(code, 0, "{result}");
+            let current_id = result["result"]["operation_id"].as_str().unwrap();
+            let old = f
+                .root()
+                .join("recovery")
+                .join(current_id)
+                .join("operations")
+                .join(old_id);
+            let copied = f.root().join("operations").join(old_id);
+            fs::create_dir(&copied).unwrap();
+            for entry in fs::read_dir(&old).unwrap() {
+                let entry = entry.unwrap();
+                fs::copy(entry.path(), copied.join(entry.file_name())).unwrap();
+            }
+            if mode == "obsolete_only" {
+                fs::remove_dir_all(f.root().join("operations").join(current_id)).unwrap();
+            }
+        } else if mode == "empty" {
+            fs::remove_dir_all(f.root().join("operations").join(old_id)).unwrap();
+        } else {
+            let path = f.root().join("store.yaml");
+            let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["recovery_generation"] = json!("00000000000040008000000000000000");
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let before = snapshot(&f.root());
+        let witness = fs::read(f.project.git_common_dir.join("work.identity.yaml")).unwrap();
+        let (code, cli) = f.cli(&["storage", "inspect"]);
+        assert_eq!(code, 0);
+        let mut mcp = Mcp::new(&f.path);
+        let response = mcp.call("storage_inspect", json!({}));
+        assert_eq!(response["structuredContent"], cli["result"]);
+        let healthy = mode == "matching_and_obsolete";
+        let status = &cli["result"]["storage"];
+        assert_eq!(status["coordination_available"], healthy, "{mode}");
+        if healthy {
+            assert!(status["storage_warning"].is_null());
+        } else {
+            assert_eq!(status["storage_warning"]["code"], "storage_corrupt");
+            assert_eq!(
+                status["storage_warning"]["path"],
+                f.root().join("operations").to_str().unwrap()
+            );
+            let (code, refusal) = f.cli(&["storage", "init"]);
+            assert_eq!(code, 4, "{refusal}");
+            assert_eq!(refusal["error"]["code"], "storage_corrupt");
+        }
+        assert_eq!(snapshot(&f.root()), before);
+        assert_eq!(
+            fs::read(f.project.git_common_dir.join("work.identity.yaml")).unwrap(),
+            witness
+        );
+    }
+}
+
+#[test]
+fn real_callers_report_malformed_pending_intent_and_explicitly_retain_it_without_replay() {
+    for damaged in ["context.yaml", "store.yaml", "identity.yaml"] {
+        let f = Fixture::new();
+        let (code, initial) = f.cli(&["storage", "init"]);
+        assert_eq!(code, 0);
+        let data = &initial["result"]["storage"]["metadata"];
+        let (code, recreated) = f.cli(&[
+            "storage",
+            "recreate",
+            "--expected-store-id",
+            data["store_id"].as_str().unwrap(),
+            "--expected-generation",
+            data["recovery_generation"].as_str().unwrap(),
+            "--executors-stopped",
+            "--acknowledge-loss",
+        ]);
+        assert_eq!(code, 0);
+        let id = recreated["result"]["operation_id"].as_str().unwrap();
+        let metadata = &recreated["result"]["storage"]["metadata"];
+        let dir = f.root().join("operations").join(id);
+        // Simulate a malformed pending header/component, using a real published
+        // foundation layout. Actual interruption phases are covered by core tests.
+        let header_path = dir.join("operation.yaml");
+        let mut header: Value = serde_json::from_slice(&fs::read(&header_path).unwrap()).unwrap();
+        header["phase"] = json!("prepared");
+        fs::write(&header_path, serde_json::to_vec(&header).unwrap()).unwrap();
+        let component = dir.join(damaged);
+        if damaged == "context.yaml" {
+            fs::write(&component, b"malformed retained context").unwrap();
+        } else {
+            let mut value: Value = serde_json::from_slice(&fs::read(&component).unwrap()).unwrap();
+            value[if damaged == "store.yaml" {
+                "recovery_generation"
+            } else {
+                "store_id"
+            }] = json!("00000000000040008000000000000000");
+            fs::write(&component, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let bytes = fs::read(&component).unwrap();
+        let receipt = fs::read(&header_path).unwrap();
+        let (code, status) = f.cli(&["storage", "inspect"]);
+        assert_eq!(code, 0);
+        let mut mcp = Mcp::new(&f.path);
+        let response = mcp.call("storage_inspect", json!({}));
+        assert_eq!(response["structuredContent"], status["result"]);
+        assert_eq!(status["result"]["storage"]["coordination_available"], false);
+        let pending = status["result"]["storage"]["pending_operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pending| pending["id"] == id)
+            .unwrap();
+        assert_eq!(pending["supported"], false);
+        let (code, refusal) = f.cli(&[
+            "storage",
+            "recover",
+            id,
+            "--executors-stopped",
+            "--acknowledge-loss",
+        ]);
+        assert_eq!(code, 4);
+        let expected = if damaged == "context.yaml" {
+            "invalid_format"
+        } else {
+            "storage_corrupt"
+        };
+        assert_eq!(refusal["error"]["code"], expected);
+        let refusal = mcp.call(
+            "storage_recover",
+            json!({"operation_id":id,"executors_stopped":true,"acknowledge_loss":true}),
+        );
+        assert_eq!(refusal["isError"], true);
+        assert_eq!(refusal["structuredContent"]["error"]["code"], expected);
+        assert_eq!(fs::read(&component).unwrap(), bytes);
+        let (code, reset) = f.cli(&[
+            "storage",
+            "recreate",
+            "--expected-store-id",
+            metadata["store_id"].as_str().unwrap(),
+            "--expected-generation",
+            metadata["recovery_generation"].as_str().unwrap(),
+            "--executors-stopped",
+            "--acknowledge-loss",
+        ]);
+        assert_eq!(code, 0, "{reset}");
+        assert_eq!(reset["result"]["storage"]["coordination_available"], true);
+        assert_ne!(
+            reset["result"]["storage"]["metadata"]["recovery_generation"],
+            metadata["recovery_generation"]
+        );
+        let new_id = reset["result"]["operation_id"].as_str().unwrap();
+        let archive = f
+            .root()
+            .join("recovery")
+            .join(new_id)
+            .join("operations")
+            .join(id);
+        assert_eq!(fs::read(archive.join(damaged)).unwrap(), bytes);
+        assert_eq!(fs::read(archive.join("operation.yaml")).unwrap(), receipt);
+    }
+}
