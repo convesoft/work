@@ -39,7 +39,7 @@ Work shall expose which work items are actionable from their own state and satis
 :kind: functional
 :derives_from: SCN-REPEATABLE-REVIEW
 
-Work shall support reusable templates that instantiate work items and relationships for a repeatable process. The instantiated activities and gates shall be inspectable and evaluated through the same work-item and dependency model used for manually created work.
+Work shall support reusable templates that instantiate work items and relationships for a repeatable process. Each template may mix material (durable) items and temporary items (wisps); persistence belongs to each item, not to a separate planning/execution template category. Material items are created in the selected checkout's `.work/items/`; wisps are created inside a run. Material-only expansion is available during planning without a run. The instantiated activities and gates shall be inspectable and evaluated through the same work-item and dependency model used for manually created work.
 
 Templates shall support caller-supplied parameters and a preview of the rendered items and relationships before publication. Preview shall not publish work or acquire claims. Initial template rendering may produce Markdown bodies; later Work operations shall treat those bodies as opaque content.
 :::
@@ -51,7 +51,7 @@ Templates shall support caller-supplied parameters and a preview of the rendered
 :kind: functional
 :derives_from: SCN-QUIET-EXECUTION
 
-Work shall support temporary operational work items that participate in dependency evaluation without requiring their lifecycle detail to be committed as durable project history.
+Work shall support temporary operational work items (wisps) that participate in dependency evaluation without requiring their lifecycle detail to be committed as durable project history.
 :::
 
 :::mara requirement REQ-DURABLE-FILES
@@ -86,14 +86,14 @@ For the same item identity within one Git repository and its linked worktrees, s
 
 :::mara requirement REQ-WORKTREE-VIEWS
 :mid: 01M3KAQ0TDAY6227Q9RFQZMJK1
-:title: Keep durable worktree views isolated
+:title: Combine selected definitions with active-run state
 :status: accepted
 :kind: quality
 :derives_from: SCN-CONCURRENT-AGENTS
 
-A query shall use the durable file view of its selected worktree while sharing the intended repository coordination state. Indexing an item in one worktree shall not replace another worktree's divergent version in that other worktree's queries. Shared coordination must not make branch-local completion appear durably recorded in other branches.
+A query shall use the selected checkout's durable item definition, body and relationships. When an item has active-run execution state, normal inspection and readiness shall use that shared state, consistently across linked worktrees. Without active-run state, use the selected checkout's recorded lifecycle state. Responses shall distinguish effective execution state from the durable state recorded in that checkout; reading the overlay does not rewrite a branch's files.
 
-The control session shall be able to inspect another worktree by selecting its filesystem path, including uncommitted item changes there, without changing its own checkout. The selected path determines durable file content; the resolved Git common directory determines shared coordination and temporary-work storage. Branch content isolation does not create independent claim identities.
+The controller can inspect another worktree by filesystem path, including uncommitted content, without switching its checkout. The selected path determines durable definitions; the Git common directory determines claims, runs and effective execution state. Branch divergence does not create independent claim identities. Run finalization does not implicitly close the root; root completion is a separate lifecycle operation.
 :::
 
 :::mara requirement REQ-CLAIM-RECOVERY
@@ -103,7 +103,11 @@ The control session shall be able to inspect another worktree by selecting its f
 :kind: functional
 :derives_from: SCN-CONCURRENT-AGENTS
 
-Claims shall expose their owner and recorded timestamps. The initial version shall not automatically expire claims or require heartbeats. A claim persists until completion, explicit release, or explicit recovery/reassignment. The controller resolves an abandoned claim explicitly; an old owner's token shall no longer authorize owner operations after release or reassignment. Detected loss or corruption of authoritative ownership files is an explicit recovery condition. Report the uncertainty; retain available file-based inspection/readiness with a storage warning, but refuse claims whose exclusion cannot be established. Stop affected executors before explicit ownership recovery, validate any restored files, and invalidate former tokens before fresh ownership is established. Rebuilding a graph must never infer owners, silently recreate lost claims, or erase surviving execution files.
+Each ownership acquisition shall emit a new claim with its own identity and owning agent/session identity. Retain prior claims as distinguishable historical claims; never repurpose an old claim for a new owner. Current ownership must be unambiguous under the shared lock, not selected merely by comparing caller timestamps.
+
+Owner operations use the current claim ID together with its session identity. No additional secret ownership token or token store is required. After completion, release or reassignment, the former pair no longer authorizes operations; even the same session reacquiring the same item receives a new claim ID. The exact retirement representation remains part of the claim format contract.
+
+Claims expose their owner and recorded timestamps, with no automatic expiry or mandatory heartbeat. The controller resolves abandoned ownership explicitly. Detected loss or corruption is a recovery condition: retain file inspection/readiness with a warning, but refuse claims whose exclusion cannot be established. Stop affected executors before explicit ownership recovery. Old claims from an earlier storage generation do not become current after recreation. Rebuilding a graph never infers owners, silently recreates lost claims or erases surviving execution files.
 :::
 
 :::mara requirement REQ-INDEX-REBUILD
@@ -123,7 +127,9 @@ Work shall rebuild disposable graph and lookup views from authoritative durable,
 :kind: quality
 :derives_from: SCN-QUIET-EXECUTION
 
-Squashing completed temporary work shall create a durable completed digest item from a caller-supplied summary before removing temporary work. Work shall preserve the supplied summary verbatim and retain the durable root with its existing completion policy. Interruption and retry shall neither duplicate the retained result nor erase it. Cleanup shall not leave unresolved references in surviving work or discard handoffs whose receivers still need them. Refuse cleanup while surviving outside references require temporary items, and identify those references for caller resolution. Publish retained results in a designated surviving checkout. Recovery mechanics remain engineering specifications; arbitrary promotion and unfinished-run discard are outside the defined squash operation.
+Squashing completed temporary work shall retain a caller-supplied digest as an extension to the existing durable root before removing temporary work. Preserve supplied summary text verbatim and preserve existing root content. The digest is not a new work item or child obligation. The root's completion is separate; retaining a digest or finalizing a run shall not close it.
+
+Cleanup shall not erase retained results, leave unresolved references in surviving work or discard handoffs whose receivers still need them. Refuse cleanup while surviving outside references require wisps, and identify those references for caller resolution. Retain the digest in a designated surviving checkout before cleanup; an interrupted operation must leave enough evidence for inspection and continuation. The exact root-extension representation and retry interface remain bounded engineering details. Arbitrary promotion and unfinished-run discard are outside this operation.
 :::
 
 :::mara requirement REQ-GRAPH-INTEGRITY
@@ -148,12 +154,16 @@ Core work operations shall be available through a CLI with structured JSON outpu
 
 :::mara requirement REQ-RUN-ATOMICITY
 :mid: 01M3KAQ0VT4XC3ZYT94DJQ4ZJN
-:title: Instantiate complete temporary runs
-:status: draft
+:title: Create template items with explicit partial results
+:status: accepted
 :kind: quality
 :derives_from: SCN-REPEATABLE-REVIEW
 
-A template instantiation shall validate its inputs and graph before publishing its ephemeral item files as a complete runnable run. Invalid input or interruption before publication shall not expose a partial runnable process. Retried instantiation semantics and durable template expansion remain open. Because several entity files are authoritative, publication requires a committed visibility boundary and recoverable file protocol; a shared lock alone is insufficient.
+A template expansion shall validate its inputs and prospective graph before creating files. It shall create predefined items and relationships, assigning permanent item IDs at creation. Preview remains read-only and uses local keys.
+
+Expansion is a sequence of ordinary file writes, not an all-or-nothing transaction. If creation stops after a subset of items, preserve those files and report the failure and known created items. After a process crash, the caller can inspect the files to determine the partial result. The agent may delete that partial result and retry. Work shall not create template application records, require an application/idempotency key, or promise automatic rollback or retry deduplication. Ordinary graph validation continues to reject invalid graphs; no special committed-run visibility boundary hides partial results.
+
+The stable requirement ID is retained for references; this contract replaces its former atomic-publication requirement.
 :::
 
 :::mara requirement REQ-GATE-CONTEXT
@@ -173,7 +183,7 @@ Retired proposal: Work would interpret structured external observations and enfo
 :kind: constraint
 :derives_from: SCN-QUIET-EXECUTION
 
-Ephemeral item content and graph relationships, run metadata and template application provenance shall be stored in inspectable filesystem documents until explicitly finalized. Each entity shall have its own file and defined retention; a process restart, derived-view rebuild or feature-worktree removal shall not discard the shared execution files.
+Wisp content and graph relationships, run metadata and active-run execution state shall be stored in inspectable filesystem documents until explicitly finalized. Each entity shall have its own file and defined retention; a process restart, derived-view rebuild or feature-worktree removal shall not discard the shared execution files.
 :::
 
 :::mara requirement REQ-CLI-MCP-PARITY

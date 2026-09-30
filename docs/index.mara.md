@@ -28,13 +28,13 @@ Mara items describe the Work product. They are not Work's own issue records: Mar
 
 [[ADR-INITIAL-SCOPE]] includes the work graph, reusable templates, temporary runs, multi-agent claims, and both CLI and MCP over shared operations. The TUI is deferred. External tools execute agents, create worktrees, and perform PR/CI actions; Work tracks and coordinates the work.
 
-[[REQ-GIT-CHECKOUT]] requires a Git working checkout. [[REQ-SINGLE-RUN]] keeps one execution run per root item; [[REQ-CLAIM-EXCLUSION]] excludes competing owners across linked worktrees while allowing read-only inspection. The controller can select another worktree by its filesystem path. [[REQ-GRAPH-PROGRESS]] expresses review findings and repeated rounds through ordinary items and blocking edges, without a structured outcome engine.
+[[REQ-GIT-CHECKOUT]] requires a Git working checkout. [[REQ-SINGLE-RUN]] keeps one execution run per root item; [[REQ-CLAIM-EXCLUSION]] excludes competing owners across linked worktrees while allowing read-only inspection. The controller can select another worktree by its filesystem path. Its durable definitions remain checkout-specific; normal queries use active-run execution state when present. Templates can mix material items and wisps, and material-only planning needs no run; this format extension remains planned. [[REQ-GRAPH-PROGRESS]] expresses review findings and repeated rounds through ordinary items and blocking edges, without a structured outcome engine.
 
 | State | Authority and location |
 | --- | --- |
 | Durable work items | Versioned Markdown/YAML under `.work/items/` |
 | Reusable templates | Versioned YAML under `.work/templates/` |
-| Runs, temporary items and template applications | Separate manifests, item documents and provenance files under `<Git common directory>/work/runs/` |
+| Runs, wisps and active execution state | Separate manifests and entity files under `<Git common directory>/work/runs/`; no template application records |
 | Handoff context | Unversioned Markdown under `<Git common directory>/work/handoffs/`, retained until all receiving items finish |
 | Claims | One YAML file per item under shared `work/claims/` |
 | Optional named sessions | Separate YAML files under their run's `sessions/`; one-time sessions need no named registration |
@@ -52,7 +52,7 @@ The durable [bootstrap backlog](../.work/README.md) uses `.work/items/` and [[DE
 
 ## Provenance
 
-Recent refinements include [[REQ-WORK-SELECTION]] for priority, filtering, and atomic claim-next; [[REQ-GRAPH-INSPECTION]] for graph inspection and readiness explanations; parameterized template preview; and [[REQ-EXECUTOR-HINTS]] for optional model/thinking metadata. [[REQ-OPAQUE-BODIES]] keeps acceptance criteria and other narrative opaque to Work. [[DES-CLAIM-CONTEXT]] records ownership and external session references in shared files. [[DES-HANDOFF-RECORDS]] passes temporary context between one or more source and receiving items without affecting readiness. [[DES-SQUASH-DIGEST]] preserves a caller-authored summary as an ordinary completed durable item before temporary cleanup.
+Recent refinements include [[REQ-WORK-SELECTION]] for priority, filtering, and atomic claim-next; [[REQ-GRAPH-INSPECTION]] for graph inspection and readiness explanations; parameterized template preview; and [[REQ-EXECUTOR-HINTS]] for optional model/thinking metadata. [[REQ-OPAQUE-BODIES]] keeps acceptance criteria and other narrative opaque to Work. [[DES-CLAIM-CONTEXT]] records ownership and external session references in shared files. [[DES-HANDOFF-RECORDS]] passes temporary context between one or more source and receiving items without affecting readiness. [[DES-SQUASH-DIGEST]] retains a caller-authored digest extension on the existing root before wisp cleanup, without closing the root.
 
 This corpus captures product decisions reviewed on 2026-09-28 and revised on 2026-09-30. Explicit user intent establishes the local work tracker, graph and template model, ephemeral operational work, Rust implementation direction, working name `work`, and separate plain files for all authoritative entities. Suggestions remain proposals unless subsequently confirmed.
 

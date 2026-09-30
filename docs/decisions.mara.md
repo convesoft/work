@@ -52,6 +52,7 @@ Trade-offs: this does not synchronize separate clones. Branch-local durable view
 :title: Deliver coordination through CLI and MCP first
 :status: accepted
 :justifies: DES-INTERFACE-ADAPTERS
+:justifies: RISK-FILE-DB-CONSISTENCY
 
 Decision: the initial release includes CLI and MCP, the work graph, templates, file-backed temporary runs, and multi-agent claims. Defer the TUI. Keep agent execution, worktree management, and PR/CI actions in external tools.
 
@@ -59,7 +60,7 @@ Rationale: in the corpus-preparation clarification on 2026-09-28, the user selec
 
 Consequences: shared core operations and equivalent error semantics are required from the first release. This scope does not decide every lifecycle, serialization, or recovery detail; draft contracts and open questions still require resolution before implementing affected behavior.
 
-Subsequent accepted refinements include priority and scoped selection, atomic claim-next, readiness explanations, graph inspection, parameterized template preview, optional model/thinking hints, file-backed handoffs between items, and caller-authored squash digests. Keep Markdown bodies opaque outside initial template rendering. Defer snooze/defer scheduling, arbitrary temporary-item promotion, general batch editing, and shared-resource locks. Narrow multi-file template publication and squash still require recoverable protocols despite deferring a general batch API.
+Subsequent accepted refinements include priority and scoped selection, atomic claim-next, readiness explanations, graph inspection, parameterized template preview, optional model/thinking hints, file-backed handoffs between items, and caller-authored squash digests. Keep Markdown bodies opaque outside initial template rendering. Defer snooze/defer scheduling, arbitrary temporary-item promotion, general batch editing, and shared-resource locks. Template expansion uses ordinary per-file creation with explicit partial-result reporting and caller cleanup/retry, without application records or all-or-nothing publication. Finalization retains a digest extension to the root before temporary cleanup; it does not create a digest item or close the root.
 :::
 
 :::mara decision ADR-RELATION-SEMANTICS
