@@ -1734,3 +1734,196 @@ fn matching_archive_uncertainty_refuses_reset_but_missing_archive_can_be_acknowl
         assert_eq!((after.dev(), after.ino()), (lock.dev(), lock.ino()));
     }
 }
+
+#[test]
+fn publication_validates_original_stage_and_installed_fingerprint_on_both_paths() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for retry in [false, true] {
+        for change in [
+            "healthy",
+            "capture_substitute",
+            "existing_mode",
+            "stage_substitute",
+            "installed_substitute",
+            "installed_mode",
+        ] {
+            if (retry && change == "capture_substitute") || (!retry && change == "existing_mode") {
+                continue;
+            }
+            let f = Fixture::new();
+            let initialized = f.storage.initialize().unwrap();
+            let id = initialized.operation_id.unwrap();
+            let receipt = f
+                .storage
+                .project
+                .git_common_dir
+                .join("work/operations")
+                .join(&id);
+            let operation =
+                format::operation(&fs::read(receipt.join("operation.yaml")).unwrap(), &receipt)
+                    .unwrap();
+            let dir = files::Directory::open(&f.storage.project.git_common_dir).unwrap();
+            dir.stage("store.yaml", b"previous bytes").unwrap();
+            let prior = dir.read("store.yaml").unwrap();
+            let stage_name = format!(".storage-{id}-store");
+            let stage_path = dir.path.join(&stage_name);
+            let source_path = dir.path.join("store.yaml");
+            if retry {
+                dir.stage(&stage_name, b"intended bytes").unwrap();
+                if change == "existing_mode" {
+                    fs::set_permissions(&stage_path, fs::Permissions::from_mode(0o666)).unwrap();
+                }
+            }
+            let kept = dir.path.join("original-inode-kept");
+            let path = if change.ends_with("substitute") && !change.starts_with("installed") {
+                stage_path.clone()
+            } else {
+                source_path.clone()
+            };
+            let held = kept.clone();
+            let point = if change == "capture_substitute" {
+                "stage_sync"
+            } else if change == "stage_substitute" {
+                if retry {
+                    "retry_before_publication"
+                } else {
+                    "before_publication"
+                }
+            } else if retry {
+                "retry_after_publication"
+            } else {
+                "after_publication"
+            };
+            let _guard = (!matches!(change, "healthy" | "existing_mode")).then(|| {
+                files::on_next(point, move || {
+                    if change == "installed_mode" {
+                        fs::set_permissions(path, fs::Permissions::from_mode(0o666)).unwrap();
+                    } else {
+                        fs::rename(&path, held).unwrap();
+                        fs::write(&path, b"intended bytes").unwrap();
+                        // Same-byte stage replacement must never publish healthy mode0666.
+                        fs::set_permissions(
+                            path,
+                            fs::Permissions::from_mode(if change == "stage_substitute" {
+                                0o666
+                            } else {
+                                0o600
+                            }),
+                        )
+                        .unwrap();
+                    }
+                })
+            });
+            let mut publication = Publication::NotPublished;
+            let mut recovery = Vec::new();
+            let result = if retry {
+                publish_source(
+                    &dir,
+                    "store.yaml",
+                    b"intended bytes",
+                    &Some(prior.clone()),
+                    &operation,
+                    &mut recovery,
+                    &mut publication,
+                )
+            } else {
+                dir.publish("store.yaml", b"intended bytes", Some(&prior), &stage_name)
+                    .map(|_| ())
+            };
+            if change == "healthy" {
+                result.unwrap();
+                assert_eq!(fs::metadata(&source_path).unwrap().mode() & 0o7777, 0o600);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.code,
+                    StorageErrorCode::Conflict,
+                    "retry={retry} change={change}"
+                );
+                if matches!(change, "capture_substitute" | "existing_mode") {
+                    assert_eq!(error.publication, Publication::NotPublished);
+                    assert_eq!(fs::read(&source_path).unwrap(), prior.raw);
+                    assert_eq!(fs::read(&stage_path).unwrap(), b"intended bytes");
+                } else {
+                    assert_eq!(error.publication, Publication::Possible);
+                    assert_eq!(error.recovery_paths, vec![stage_path.clone()]);
+                }
+                if change.ends_with("substitute") {
+                    assert_eq!(fs::read(&kept).unwrap(), b"intended bytes");
+                }
+            }
+            if !matches!(change, "capture_substitute" | "existing_mode") {
+                assert_eq!(fs::read(source_path).unwrap(), b"intended bytes");
+                assert_eq!(fs::read(stage_path).unwrap(), prior.raw);
+            }
+        }
+    }
+}
+
+#[test]
+fn staged_retry_races_preserve_filesystem_categories_and_never_overwrite_new_targets() {
+    for exchange in [false, true] {
+        let f = Fixture::new();
+        let initialized = f.storage.initialize().unwrap();
+        let id = initialized.operation_id.unwrap();
+        let receipt = f
+            .storage
+            .project
+            .git_common_dir
+            .join("work/operations")
+            .join(&id);
+        let operation =
+            format::operation(&fs::read(receipt.join("operation.yaml")).unwrap(), &receipt)
+                .unwrap();
+        let dir = files::Directory::open(&f.storage.project.git_common_dir).unwrap();
+        let prior = if exchange {
+            dir.stage("store.yaml", b"old bytes").unwrap();
+            Some(dir.read("store.yaml").unwrap())
+        } else {
+            None
+        };
+        let stage = format!(".storage-{id}-store");
+        dir.stage(&stage, b"intended bytes").unwrap();
+        let source_path = dir.path.join("store.yaml");
+        let path = source_path.clone();
+        let saved = dir.path.join("original-target-kept");
+        let kept = saved.clone();
+        let _guard = files::on_next("retry_before_publication", move || {
+            if exchange {
+                fs::rename(path, kept).unwrap();
+            } else {
+                fs::write(path, b"newly appeared target").unwrap();
+            }
+        });
+        let mut publication = Publication::NotPublished;
+        let error = publish_source(
+            &dir,
+            "store.yaml",
+            b"intended bytes",
+            &prior,
+            &operation,
+            &mut Vec::new(),
+            &mut publication,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            if exchange {
+                StorageErrorCode::StorageMissing
+            } else {
+                StorageErrorCode::Conflict
+            }
+        );
+        assert_eq!(error.publication, Publication::NotPublished);
+        assert_eq!(publication, Publication::NotPublished);
+        assert_eq!(error.path, Some(source_path.clone()));
+        assert_eq!(error.recovery_paths, vec![dir.path.join(&stage)]);
+        assert_eq!(dir.read(&stage).unwrap().raw, b"intended bytes");
+        if exchange {
+            assert!(!source_path.exists());
+            assert_eq!(fs::read(saved).unwrap(), b"old bytes");
+        } else {
+            assert_eq!(fs::read(source_path).unwrap(), b"newly appeared target");
+        }
+    }
+}

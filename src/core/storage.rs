@@ -503,9 +503,9 @@ impl Storage {
     ) -> Result<StorageOutcome, StorageError> {
         let locked = files::Locked::open(common, true, false)?;
         let mut inspection = self.empty_inspection();
-        self.inspect_locked(&locked, &mut inspection);
+        let refusal = self.inspect_locked_evidence(&locked, &mut inspection);
         if !inspection.coordination_available {
-            return Err(inspection_error(&inspection));
+            return Err(refusal.unwrap_or_else(|| inspection_error(&inspection)));
         }
         Ok(StorageOutcome {
             changed: false,
@@ -1235,10 +1235,10 @@ fn publish_source(
     }
     if dir.exists(&stage_name)? {
         let staged = dir.read(&stage_name)?;
-        if staged.raw != raw {
+        if staged.raw != raw || staged.mode & 0o7777 != 0o600 {
             return Err(files::conflict(
                 &stage_path,
-                "existing publication stage has unexpected bytes",
+                "existing publication stage has unexpected bytes or permissions",
             ));
         }
         // Correct bytes may remain after a failed fsync. Retry that held-file
@@ -1249,28 +1249,50 @@ fn publish_source(
         } else {
             rustix::fs::RenameFlags::NOREPLACE
         };
-        dir.verify()?;
-        if dir.optional(name)?.as_ref() != prior.as_ref() {
-            return Err(files::conflict(
-                &dir.path.join(name),
-                "source changed before staged retry",
-            ));
-        }
-        rustix::fs::renameat_with(&dir.file, &stage_name, &dir.file, name, flags)
-            .map_err(|e| StorageError::io(std::io::Error::from(e), dir.path.join(name)))?;
-        *publication = Publication::Possible;
-        #[cfg(test)]
-        files::inject("retry_after_publication", &stage_path)?;
-        dir.sync()?;
-        dir.verify()?;
-        if let Some(before) = prior
-            && !before.same_content_identity(&dir.read(&stage_name)?)
-        {
-            return Err(files::conflict(
-                &stage_path,
-                "previous source changed during retry publication",
-            ));
-        }
+        let result = (|| {
+            dir.verify()?;
+            if dir.optional(name)?.as_ref() != prior.as_ref() {
+                return Err(files::conflict(
+                    &dir.path.join(name),
+                    "source changed before staged retry",
+                ));
+            }
+            if dir.read(&stage_name)? != staged {
+                return Err(files::conflict(
+                    &stage_path,
+                    "stage changed before retry rename",
+                ));
+            }
+            #[cfg(test)]
+            files::inject("retry_before_publication", &stage_path)?;
+            rustix::fs::renameat_with(&dir.file, &stage_name, &dir.file, name, flags)
+                .map_err(|e| files::map(e, &dir.path.join(name)))?;
+            *publication = Publication::Possible;
+            #[cfg(test)]
+            files::inject("retry_after_publication", &stage_path)?;
+            dir.sync()?;
+            dir.verify()?;
+            if !staged.same_content_identity(&dir.read(name)?) {
+                return Err(files::conflict(
+                    &dir.path.join(name),
+                    "installed file differs from held retry stage",
+                ));
+            }
+            if let Some(before) = prior
+                && !before.same_content_identity(&dir.read(&stage_name)?)
+            {
+                return Err(files::conflict(
+                    &stage_path,
+                    "previous source changed during retry publication",
+                ));
+            }
+            Ok(())
+        })();
+        result.map_err(|mut error: StorageError| {
+            error.publication = *publication;
+            error.recovery_paths.push(stage_path.clone());
+            error
+        })?;
         if prior.is_some() {
             recovery.push(stage_path);
         }

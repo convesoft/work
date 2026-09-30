@@ -1331,3 +1331,42 @@ fn real_cli_and_mcp_report_retained_prior_loss_on_initial_and_same_id_results() 
         );
     }
 }
+
+#[test]
+fn real_cli_and_mcp_initialization_preserve_unreadable_directory_errno_and_state() {
+    let f = Fixture::new();
+    f.storage().initialize().unwrap();
+    let path = f.root().join("claims");
+    fs::write(path.join("opaque"), b"preserved claim bytes").unwrap();
+    let before = retained_tree(&f.root());
+    let witness = fs::read(f.project.git_common_dir.join("work.identity.yaml")).unwrap();
+    struct Accessibility(PathBuf);
+    impl Drop for Accessibility {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+        }
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let accessibility = Accessibility(path.clone());
+    let (code, cli) = f.cli(&["storage", "init"]);
+    assert_eq!(code, 1, "{cli}");
+    let error = &cli["error"];
+    assert_eq!(error["code"], "permission_denied");
+    assert_eq!(error["errno"], 13);
+    assert_eq!(error["path"], path.to_str().unwrap());
+    assert_eq!(error["publication"], "not_published");
+    let mut mcp = Mcp::new(&f.path);
+    let response = mcp.call("storage_init", json!({}));
+    assert_eq!(response["isError"], true);
+    let mcp_error = &response["structuredContent"]["error"];
+    for field in ["code", "errno", "path", "publication"] {
+        assert_eq!(mcp_error[field], error[field], "{response}");
+    }
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o000);
+    drop(accessibility);
+    assert_eq!(retained_tree(&f.root()), before);
+    assert_eq!(
+        fs::read(f.project.git_common_dir.join("work.identity.yaml")).unwrap(),
+        witness
+    );
+}

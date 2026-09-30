@@ -3,7 +3,7 @@ use super::{Publication, StorageError, StorageErrorCode};
 use rustix::fs::{self, AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
@@ -376,13 +376,18 @@ impl Directory {
         self.verify()
     }
     pub fn stage(&self, name: &str, raw: &[u8]) -> Result<(), StorageError> {
+        self.stage_open(name, raw).map(|_| ())
+    }
+    // Capture the file we actually created, retaining its descriptor. A stage
+    // pathname can be replaced while writing/syncing; it is never its identity.
+    fn stage_open(&self, name: &str, raw: &[u8]) -> Result<(File, Source), StorageError> {
         self.verify()?;
         valid_name(OsStr::new(name))?;
         let path = self.path.join(name);
         let fd = fs::openat(
             &self.file,
             name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_bits_truncate(0o600),
         )
         .map_err(|e| map(e, &path))?;
@@ -394,9 +399,35 @@ impl Directory {
             .map_err(|e| StorageError::io(e, path.clone()))?;
         #[cfg(test)]
         inject("stage_sync", &path)?;
-        file.sync_all().map_err(|e| StorageError::io(e, path))?;
+        file.sync_all()
+            .map_err(|e| StorageError::io(e, path.clone()))?;
+        let before = file
+            .metadata()
+            .map_err(|e| StorageError::io(e, path.clone()))?;
+        if !before.is_file() || before.nlink() != 1 || before.mode() & 0o7777 != 0o600 {
+            return Err(conflict(
+                &path,
+                "created private stage changed while writing",
+            ));
+        }
+        file.rewind()
+            .map_err(|e| StorageError::io(e, path.clone()))?;
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual)
+            .map_err(|e| StorageError::io(e, path.clone()))?;
+        let source = Source::metadata(actual, &before);
+        let after = file
+            .metadata()
+            .map_err(|e| StorageError::io(e, path.clone()))?;
+        if source.raw != raw
+            || source != Source::metadata(source.raw.clone(), &after)
+            || self.read(name)? != source
+        {
+            return Err(conflict(&path, "created stage changed before publication"));
+        }
         self.sync()?;
-        self.verify()
+        self.verify()?;
+        Ok((file, source))
     }
     /// Publish one file; every successful replacement retains the former inode.
     pub fn publish(
@@ -415,11 +446,14 @@ impl Directory {
         if self.exists(stage_name)? {
             return Err(conflict(&stage_path, "publication stage already exists"));
         }
-        self.stage(stage_name, raw)?;
+        let (_held_stage, staged) = self.stage_open(stage_name, raw)?;
         if self.optional(name)?.as_ref() != expected {
             return Err(conflict(&path, "source changed while staging"));
         }
         self.verify()?;
+        if self.read(stage_name)? != staged {
+            return Err(conflict(&stage_path, "created stage changed before rename"));
+        }
         #[cfg(test)]
         inject("before_publication", &path)?;
         let flags = if expected.is_some() {
@@ -439,8 +473,8 @@ impl Directory {
             inject("after_directory_sync", &path)?;
             self.verify()?;
             let published = self.read(name)?;
-            if published.raw != raw {
-                return Err(conflict(&path, "source changed after publication"));
+            if !staged.same_content_identity(&published) {
+                return Err(conflict(&path, "installed file differs from created stage"));
             }
             if let Some(before) = expected {
                 let retained = self.read(stage_name)?;
@@ -642,7 +676,7 @@ fn unsafe_path(path: &Path, message: &str) -> StorageError {
 pub(super) fn conflict(path: &Path, message: &str) -> StorageError {
     StorageError::new(StorageErrorCode::Conflict, message, Some(path.to_owned()))
 }
-fn map(error: rustix::io::Errno, path: &Path) -> StorageError {
+pub(super) fn map(error: rustix::io::Errno, path: &Path) -> StorageError {
     match error {
         rustix::io::Errno::NOENT => StorageError::new(
             StorageErrorCode::StorageMissing,
