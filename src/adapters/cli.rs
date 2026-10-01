@@ -266,6 +266,18 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
         let (verb, fields) = super::claims::from_cli(&words[1..])?;
         return super::claims::execute(&discover(selected)?, &verb, &fields);
     }
+    if words.first().is_some_and(|s| s == "run")
+        || (words.first().is_some_and(|s| s == "template")
+            && words
+                .get(1)
+                .is_some_and(|s| matches!(s.as_str(), "preview" | "expand")))
+    {
+        if words.get(1).is_some_and(|s| s == "--help") {
+            return Ok(json!({"help":super::runs::HELP}));
+        }
+        let (name, fields) = super::runs::from_cli(&words[0], &words[1..])?;
+        return super::runs::execute(&discover(selected)?, &name, &fields);
+    }
     let mut words = words;
     let mut authorizations = Vec::new();
     let mut checkout_view = false;
@@ -397,16 +409,19 @@ fn command_help(words: &[String]) -> Option<&'static str> {
             "Usage: work relation remove KIND SOURCE TARGET\nRemove an existing edge. SOURCE is the child for parent and the dependent for depends_on. related may be removed from either endpoint.",
         ),
         ["template", "--help"] => Some(
-            "Usage: work template list|validate|preview\nDiscover version-1 YAML templates and render a symbolic item graph without publishing a run or items.",
+            "Usage: work template list|validate|preview|expand\nDiscover version-1/version-2 YAML templates and render a symbolic item graph without publishing a run or items.",
         ),
         ["template", "list", "--help"] => Some(
             "Usage: work template list\nList valid and invalid templates under .work/templates/.",
         ),
         ["template", "validate", "--help"] => Some(
-            "Usage: work template validate NAME\nValidate one version-1 YAML template definition.",
+            "Usage: work template validate NAME\nValidate one version-1/version-2 YAML template definition.",
+        ),
+        ["template", "expand", "--help"] => Some(
+            "Usage: work template expand NAME [--run RUN_ID] [--root ITEM] [--param NAME=TEXT]... [--existing NAME=ID]... [--authorize JSON]...\nPublish validated material/wisp files; failures can leave partial results.",
         ),
         ["template", "preview", "--help"] => Some(
-            "Usage: work template preview NAME --root FULL_ID [--param NAME=TEXT]... [--existing NAME=FULL_ID]...\nRender the exact symbolic graph for a selected checkout without creating items, runs, IDs, or claims.",
+            "Usage: work template preview NAME [--root FULL_ID] [--run RUN_ID] [--param NAME=TEXT]... [--existing NAME=FULL_ID]...\nRender the exact symbolic graph for a selected checkout without creating items, runs, IDs, or claims.",
         ),
         _ => None,
     }
@@ -433,11 +448,9 @@ fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
         }
         [noun, verb, tail @ ..] if noun == "template" => match (verb.as_str(), tail) {
             ("list", []) | ("validate", [_]) => Ok(()),
-            ("preview", [_, rest @ ..]) if rest.len() >= 2 && rest.len().is_multiple_of(2) => {
-                Ok(())
-            }
+            ("preview", [_, rest @ ..]) if rest.len().is_multiple_of(2) => Ok(()),
             _ => Err(usage(
-                "template list|validate NAME|preview NAME --root FULL_ID [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
+                "template list|validate NAME|preview NAME [--root FULL_ID] [--run RUN_ID] [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
             )),
         },
         _ => Err(usage("expected item, relation, or template command")),
@@ -561,7 +574,7 @@ fn template_definition_value(definition: &TemplateDefinition) -> Value {
         "existing":definition.existing,
         "defaults":{"model":definition.defaults.model,"thinking":definition.defaults.thinking},
         "items":definition.items.iter().map(|item| json!({
-            "key":item.key,"title":item.title,"body":item.body,
+            "key":item.key,"title":item.title,"body":item.body,"persistence":item.persistence.as_str(),
             "completion":match item.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
             "priority":item.priority,"labels":item.labels,"model":item.model,"thinking":item.thinking,
         })).collect::<Vec<_>>(),
@@ -571,12 +584,12 @@ fn template_definition_value(definition: &TemplateDefinition) -> Value {
     })
 }
 
-fn template_preview_value(preview: &TemplatePreview) -> Value {
+pub(super) fn template_preview_value(preview: &TemplatePreview) -> Value {
     json!({
         "name":preview.name,"root":preview.root,
         "parameters":preview.parameters,"existing":preview.existing,
         "items":preview.items.iter().map(|item| (item.key.clone(), json!({
-            "key":item.key,"title":item.title,"body":item.body,
+            "key":item.key,"title":item.title,"body":item.body,"persistence":item.persistence.as_str(),
             "completion":match item.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
             "state":item.state.map(|state|match state {ManualState::Open=>"open",ManualState::Done=>"done"}),
             "priority":item.priority,"labels":item.labels,
@@ -635,7 +648,7 @@ pub(super) fn template_command(
                     }
                     _ => {
                         return Err(usage(
-                            "template preview NAME --root FULL_ID [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
+                            "template preview NAME [--root FULL_ID] [--run RUN_ID] [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
                         ));
                     }
                 }
@@ -644,7 +657,7 @@ pub(super) fn template_command(
                 return Err(usage("template preview options require values"));
             }
             let request = PreviewRequest {
-                root: root.ok_or_else(|| usage("template preview requires --root FULL_ID"))?,
+                root,
                 parameters,
                 existing,
             };
@@ -652,7 +665,7 @@ pub(super) fn template_command(
             Ok(json!({"preview":template_preview_value(&catalog.preview(name,&request,&view)?)}))
         }
         _ => Err(usage(
-            "template list|validate NAME|preview NAME --root FULL_ID [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
+            "template list|validate NAME|preview NAME [--root FULL_ID] [--run RUN_ID] [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
         )),
     }
 }
@@ -1066,7 +1079,7 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview, claim acquire|inspect|list|release|recover|reassign, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|inspect|list|release|recover|reassign, run start|inspect|list|attach|detach, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
 Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.

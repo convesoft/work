@@ -204,7 +204,7 @@ impl ExecutionOperations {
             .join(format!(".work/items/{}.md", h.id));
         validate_candidate(&v.store, &path, &h, &body)?;
         let mut writer = CheckoutWriter::open(&self.project.worktree_root)?;
-        v.recheck()?;
+        v.recheck(&g)?;
         g.verify()?;
         let recovery = writer.publish(&h, &body, None)?;
         let mut result = reload_valid_inspection(&g, &h.id)
@@ -303,17 +303,27 @@ impl ExecutionOperations {
         edit(&mut h, selected)?;
         let body = before.body.as_deref().unwrap();
         validate_candidate(&v.store, &before.path, &h, body)?;
-        let root = v.sources.get(&h.id).ok_or_else(|| {
-            ExecutionError::new("source_unavailable", "material source is missing")
-        })?;
-        let mut writer = CheckoutWriter::open(root)?;
-        v.recheck()?;
+        v.recheck(&g)?;
         g.verify()?;
         let changed = before.header.as_ref() != Some(&h);
-        let recovery = if !changed {
+        let recovery = if let Some(root) = v.sources.get(&h.id) {
+            let mut writer = CheckoutWriter::open(root)?;
+            v.recheck(&g)?;
+            if !changed {
+                None
+            } else {
+                writer.publish(&h, body, Some(&before))?
+            }
+        } else if changed {
+            let run = v
+                .runs
+                .membership(&h.id)
+                .ok_or_else(|| ExecutionError::new("source_unavailable", "wisp run missing"))?;
+            let expected = &run.wisp_sources[&h.id];
+            super::runs::RunStore::replace_wisp(&g, &run.manifest.id, expected, &h, body)?;
             None
         } else {
-            writer.publish(&h, body, Some(&before))?
+            None
         };
         let mut endings = Vec::new();
         if complete && let Some(claim) = claim {
@@ -467,13 +477,13 @@ impl ExecutionOperations {
         let result = (|| {
             prepare_claim_context(&g, &v, &mut candidate, &mut created)?;
             let result = ClaimStore::acquire_checked(&g, &candidate, actor, session, || {
-                verify_claim_source(&source_lock, &v)
+                verify_claim_source(&source_lock, &v, &g)
             })?;
             created.push(json!({"id":result.claim.id,"path":encode_path(&g.root_path().join(format!("claims/{}.yaml",result.claim.id)))}));
             let current = ResolvedView::load(&g).map_err(claim_postpublication_error)?;
             let inspection =
                 inspect(&g, &current, &candidate.header.id).map_err(claim_postpublication_error)?;
-            verify_claim_source(&source_lock, &v).map_err(claim_postpublication_error)?;
+            verify_claim_source(&source_lock, &v, &g).map_err(claim_postpublication_error)?;
             Ok((result.claim.to_json(), inspection))
         })();
         result.map_err(|error| with_setup_progress(error, &created))
@@ -503,7 +513,7 @@ impl ExecutionOperations {
                 session,
                 reason,
                 stopped,
-                || verify_claim_source(&source_lock, &v),
+                || verify_claim_source(&source_lock, &v, &g),
             )?;
             for (id, name) in [
                 (
@@ -518,26 +528,40 @@ impl ExecutionOperations {
             }
             let inspection =
                 inspect(&g, &v, &candidate.header.id).map_err(claim_postpublication_error)?;
-            verify_claim_source(&source_lock, &v).map_err(claim_postpublication_error)?;
+            verify_claim_source(&source_lock, &v, &g).map_err(claim_postpublication_error)?;
             Ok((result.claim.to_json(), inspection))
         })();
         result.map_err(|error| with_setup_progress(error, &created))
     }
 }
-fn verify_claim_source(writer: &CheckoutWriter, view: &ResolvedView) -> ExecutionResult<()> {
-    writer.verify()?;
-    view.recheck()
+fn verify_claim_source(
+    writer: &Option<CheckoutWriter>,
+    view: &ResolvedView,
+    guard: &CoordinationGuard,
+) -> ExecutionResult<()> {
+    if let Some(writer) = writer {
+        writer.verify()?;
+    }
+    view.recheck(guard)
 }
 fn claim_postpublication_error(mut error: ExecutionError) -> ExecutionError {
     error.details["publication"] = json!("published");
     error
 }
-fn material_source_lock(v: &ResolvedView, id: &str) -> ExecutionResult<CheckoutWriter> {
-    let root = v
-        .sources
-        .get(id)
-        .ok_or_else(|| ExecutionError::new("source_unavailable", "material source is missing"))?;
-    Ok(CheckoutWriter::open(root)?)
+fn material_source_lock(v: &ResolvedView, id: &str) -> ExecutionResult<Option<CheckoutWriter>> {
+    if let Some(root) = v.sources.get(id) {
+        return Ok(Some(CheckoutWriter::open(root)?));
+    }
+    if v.runs
+        .membership(id)
+        .is_some_and(|r| r.wisp_sources.contains_key(id))
+    {
+        return Ok(None);
+    }
+    Err(ExecutionError::new(
+        "source_unavailable",
+        "material source is missing",
+    ))
 }
 pub(crate) fn require_valid(store: &ItemStore) -> ExecutionResult<()> {
     let graph = ItemGraph::from_store(store);
@@ -595,11 +619,18 @@ fn candidate(
     let evaluation = ItemGraph::from_store(&v.store)
         .evaluate(&h.id)
         .map_err(|e| ExecutionError::new("not_ready", format!("{e:?}")))?;
+    let run = v.runs.membership(&h.id);
+    if run.is_some_and(|r| r.manifest.phase != super::runs::RunPhase::Active) {
+        return Err(ExecutionError::new(
+            "run_not_current",
+            "run is frozen for cleanup",
+        ));
+    }
     let candidate = ClaimCandidate {
         header: h,
         evaluation,
         workspace_id: None,
-        run_id: None,
+        run_id: run.map(|r| r.manifest.id.clone()),
         session_record_id: None,
     };
     ClaimStore::validate_candidate(&candidate)?;
@@ -614,11 +645,35 @@ fn prepare_claim_context(
     created: &mut Vec<Value>,
 ) -> ExecutionResult<()> {
     let id = &candidate.header.id;
-    let root = v
-        .sources
-        .get(id)
-        .ok_or_else(|| ExecutionError::new("source_unavailable", "material source is missing"))?;
-    v.recheck()?;
+    let Some(root) = v.sources.get(id) else {
+        let run = v
+            .runs
+            .membership(id)
+            .ok_or_else(|| ExecutionError::new("source_unavailable", "wisp owner is missing"))?;
+        if let Some(wid) = &run.manifest.default_workspace_id {
+            let workspace = v.context.workspaces.get(wid).ok_or_else(|| {
+                ExecutionError::new("source_unavailable", "run default workspace is missing")
+            })?;
+            if workspace.state != "open" {
+                return Err(ExecutionError::new(
+                    "workspace_busy",
+                    "execution workspace is closing",
+                ));
+            }
+            let project = super::project::discover(Some(&workspace.path)).map_err(|e| {
+                ExecutionError::new("source_unavailable", e.to_string()).at(&workspace.path)
+            })?;
+            if project.git_common_dir != g.project().git_common_dir {
+                return Err(ExecutionError::new(
+                    "source_unavailable",
+                    "execution workspace repository changed",
+                ));
+            }
+            candidate.workspace_id = Some(wid.clone());
+        }
+        return Ok(());
+    };
+    v.recheck(g)?;
     let workspace = if let Some(binding) = v.context.bindings.get(id) {
         v.context.workspaces[&binding.workspace_id].clone()
     } else {
@@ -639,7 +694,7 @@ fn prepare_claim_context(
     candidate.workspace_id = Some(workspace.id);
     Ok(())
 }
-fn with_setup_progress(mut error: ExecutionError, created: &[Value]) -> ExecutionError {
+pub(crate) fn with_setup_progress(mut error: ExecutionError, created: &[Value]) -> ExecutionError {
     if !error.details.is_object() {
         error.details = json!({"cause_details":error.details});
     }
@@ -698,7 +753,7 @@ fn inspect_with_snapshot(
     {
         e.executable = false;
     }
-    i.context = json!({"source_worktree":v.sources.get(id).map(|p|encode_path(p)),"persistence":"material","run_id":v.run_ids.get(id),"claim":claim.map(|c|c.to_json())});
+    i.context = json!({"source_worktree":v.sources.get(id).map(|p|encode_path(p)),"persistence":if v.sources.contains_key(id){"material"}else{"wisp"},"run_id":v.run_ids.get(id),"claim":claim.map(|c|c.to_json())});
     if let Some(w) = warning {
         i.context["ownership_warning"] = w;
     }

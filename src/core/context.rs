@@ -261,6 +261,7 @@ fn create_context(g: &CoordinationGuard, path: &Path, id: &str, raw: &[u8]) -> E
     })
 }
 pub struct ResolvedView {
+    pub runs: super::runs::RunStore,
     pub project: Project,
     pub store: ItemStore,
     pub context: ContextStore,
@@ -273,10 +274,23 @@ impl ResolvedView {
     pub fn load(g: &CoordinationGuard) -> ExecutionResult<Self> {
         let project = g.project().clone();
         let context = ContextStore::load(g)?;
+        let runs = super::runs::RunStore::load(g)?;
+        let wisp_ids: std::collections::BTreeSet<_> = runs
+            .records
+            .iter()
+            .filter(|run| run.manifest.phase.is_current())
+            .flat_map(|run| &run.wisps)
+            .filter_map(|file| file.header.as_ref().map(|header| header.id.as_str()))
+            .collect();
         let ownership = ClaimStore::ownership_snapshot(g);
         let mut invalid_bindings = BTreeMap::new();
         if let Ok(snapshot) = &ownership {
             for claim in snapshot.material_claims() {
+                // A wisp can record its run's execution workspace, but its
+                // authoritative source remains the run rather than a binding.
+                if wisp_ids.contains(claim.item_id.as_str()) {
+                    continue;
+                }
                 let binding = context.bindings.get(&claim.item_id);
                 if binding.map(|b| &b.workspace_id) != claim.workspace_id.as_ref() {
                     let message = if binding.is_none() {
@@ -373,18 +387,49 @@ impl ResolvedView {
                     .or_insert_with(|| project.worktree_root.clone());
             }
         }
+        let mut run_ids = BTreeMap::new();
+        for run in &runs.records {
+            if run.manifest.phase.is_current() {
+                run_ids.insert(run.manifest.root_item_id.clone(), run.manifest.id.clone());
+                for id in &run.manifest.material_items {
+                    run_ids.insert(id.clone(), run.manifest.id.clone());
+                }
+                for file in &run.wisps {
+                    if let Some(h) = &file.header {
+                        run_ids.insert(h.id.clone(), run.manifest.id.clone());
+                    }
+                }
+                files.extend(run.wisps.clone());
+            }
+        }
         let store = ItemStore::from_candidate_files(files);
         Ok(Self {
             project,
             store,
             context,
             sources,
-            run_ids: BTreeMap::new(),
+            run_ids,
+            runs,
             ownership,
             snapshots,
         })
     }
-    pub fn recheck(&self) -> ExecutionResult<()> {
+    pub fn recheck(&self, g: &CoordinationGuard) -> ExecutionResult<()> {
+        for run in &self.runs.records {
+            g.recheck(
+                &Path::new("runs").join(&run.manifest.id).join("run.yaml"),
+                &run.source,
+            )?;
+            for (id, source) in &run.wisp_sources {
+                g.recheck(
+                    &Path::new("runs")
+                        .join(&run.manifest.id)
+                        .join("items")
+                        .join(format!("{id}.md")),
+                    source,
+                )?;
+            }
+        }
         for (root, prior) in &self.snapshots {
             let now = if root == &self.project.worktree_root {
                 ItemStore::load_optional_catalog(root)?

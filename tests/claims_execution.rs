@@ -474,7 +474,7 @@ fn acquire_checked_detects_source_substitution_after_claim_scan_before_publicati
             .unwrap()
             .replace("state: open", "state: done");
         fs::write(&path, text).unwrap();
-        view.recheck()
+        view.recheck(&guard)
     })
     .unwrap_err();
     assert_eq!(error.code, "conflict");
@@ -511,7 +511,7 @@ fn reassign_checked_rechecks_both_boundaries_and_reports_ending_if_second_check_
                     fs::write(&replacement, fs::read(&path).unwrap()).unwrap();
                     fs::rename(replacement, &path).unwrap();
                 }
-                view.recheck()
+                view.recheck(&guard)
             },
         )
         .unwrap_err();
