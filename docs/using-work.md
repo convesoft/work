@@ -46,7 +46,7 @@ target/debug/work --json template validate review_cycle
 target/debug/work --json template preview review_cycle --root ROOT_FULL_ID --param change='BUG-7'
 ```
 
-Preview returns rendered items under template-local keys and their edges without writing items, runs, claims, or permanent IDs. The caller supplies an existing root item, exactly one value for each declared `{{name}}` text parameter, and any declared existing-item bindings with `--existing NAME=FULL_ID`. Unknown, missing, or unused parameters and unresolved tokens fail validation. See [the template contract](template-format.mara.md) for the version-1 fields and references. Publication and permanent ID assignment belong to the later file-backed run slice.
+Preview returns rendered items under template-local keys and their edges without writing items, runs, claims, or permanent IDs. The caller supplies an existing root item, exactly one value for each declared `{{name}}` text parameter, and any declared existing-item bindings with `--existing NAME=FULL_ID`. Unknown, missing, or unused parameters and unresolved tokens fail validation. See [the template contract](template-format.mara.md) for the version-1 fields and references. Item creation and permanent ID assignment belong to the later run/template-expansion slice. The planned extension allows mixed material items and wisps; current version-1 preview does not yet accept a persistence selector. Material-only creation will also work without a run.
 
 ## Shared file storage
 

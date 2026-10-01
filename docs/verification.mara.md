@@ -36,7 +36,7 @@ Create A and B with B blocked by A, plus independent C. Before A satisfies the p
 
 Instantiate a small template with implementation, review, and a delivery condition. Inspect the created identities and edges, then use ordinary item inspection and dependency selection on each node. Expect the declared ordering and the same graph semantics as manually authored equivalent items. Completing implementation alone must not be represented as completion of remaining steps.
 
-Supply template parameters and preview the resulting bodies, metadata, and graph. Verify preview leaves item files and claims unchanged, then instantiate and compare the semantic output with the preview. Verify later metadata edits preserve the rendered body verbatim.
+Supply template parameters and preview the resulting bodies, metadata, and graph. Verify preview leaves item files and claims unchanged, then instantiate and compare the semantic output with the preview. Verify later metadata edits preserve the rendered body verbatim. Expand a material-only template during planning without a run, then a mixed template with a target run: material files go to `.work/items/` and wisps to run `items/`, with ordinary graph relationships between them. No template-level planning/execution category or application record is created. The per-item persistence selector is a planned format extension, not part of the already delivered preview checks.
 :::
 
 :::mara verification VER-QUIET-RUNTIME
@@ -48,7 +48,7 @@ Supply template parameters and preview the resulting bodies, metadata, and graph
 :verifies: REQ-SIDE-STATE
 :validates: SCN-QUIET-EXECUTION
 
-Capture durable file contents and instantiate temporary execution as separate run, item and application files. Create claims, named sessions, reusable workspace records and handoffs in their documented locations, then restart every Work process. Inspect each entity directly with ordinary file tools and through CLI/MCP; expect matching semantic content and unchanged ownership. No SQLite file or single all-entity snapshot is required, and operational updates do not dirty versioned content. Retain a feature-level digest through ordinary Git commit/squash history before explicit temporary cleanup. Confirm branch merge alone does not copy live operational files into main.
+Capture durable file contents and instantiate temporary execution as separate run and wisp files. Create claims, named sessions, reusable workspace records and handoffs in their documented locations, then restart every Work process. Inspect each entity directly with ordinary file tools and through CLI/MCP; expect matching semantic content and unchanged ownership. No SQLite file or single all-entity snapshot is required, and operational updates do not dirty versioned content. Retain a feature-level digest extension on the root through ordinary Git commit/squash history before explicit temporary cleanup. Confirm branch merge alone does not copy live operational files into main.
 :::
 
 :::mara verification VER-CLAIM-RACE
@@ -60,7 +60,7 @@ Capture durable file contents and instantiate temporary execution as separate ru
 :verifies: REQ-CLAIM-RECOVERY
 :validates: SCN-CONCURRENT-AGENTS
 
-Use independent processes in linked worktrees to claim the same item simultaneously. Assert exactly one owner and an explicit conflict for the loser, even when callers supply different run/worktree contexts. Readers must remain able to inspect progress. Claim distinct items and expect independent ownership. Explicitly release and reassign a claim, then submit former-owner completion and release tokens and expect rejection. Recheck readiness between listing and claiming. Advance time without heartbeats and verify claims do not expire. Exercise explicit controller recovery of abandoned ownership. Exercise concurrent independent CLI and MCP processes with notifications disabled or missed. Kill a process while it holds the shared OS lock; a later process can acquire the lock but cannot claim an already-owned item. With executors stopped, corrupt a claim file in a disposable fixture and verify an explicit storage warning/refusal rather than treating it as unclaimed. Explicit repair or ownership recreation invalidates old tokens and never invents prior owners.
+Use independent processes in linked worktrees to claim the same item simultaneously. Assert exactly one owner and an explicit conflict for the loser, even when callers supply different run/worktree contexts. Readers must remain able to inspect progress. Claim distinct items and expect independent ownership. Explicitly release and reassign a claim, then submit completion and release requests with the former claim ID plus session identity and expect rejection. Recheck readiness between listing and claiming. Advance time without heartbeats and verify claims do not expire. Exercise explicit controller recovery of abandoned ownership. Exercise concurrent independent CLI and MCP processes with notifications disabled or missed. Kill a process while it holds the shared OS lock; a later process can acquire the lock but cannot claim an already-owned item. With executors stopped, corrupt a claim file in a disposable fixture and verify an explicit storage warning/refusal rather than treating it as unclaimed. Explicit repair or ownership recreation rejects former claim/session authorizations and never invents prior owners. Reacquire the same item from the same session and require a new claim ID; the old pair remains rejected. Inspect retained prior claims and verify that new ownership never overwrites their acquisition identity. Reversed or equal caller timestamps cannot select a different winner. No separate secret token or token store is required.
 :::
 
 :::mara verification VER-WORKTREE-ISOLATION
@@ -72,22 +72,22 @@ Use independent processes in linked worktrees to claim the same item simultaneou
 :verifies: REQ-INDEX-REBUILD
 :validates: SCN-REBUILD-INDEX
 
-Create linked worktrees whose same-ID durable item differs in content and completion, including uncommitted changes. Alternate queries and source reloads from each tree. Expect selected-checkout content without completion leakage, while shared claims exclude competing execution across both trees. Restart and reconstruct the in-memory graph with claims, runs, sessions, workspaces and handoffs present; compare authoritative file bytes and require unchanged ownership/context.
+Create linked worktrees whose same-ID durable item differs in content and completion, including uncommitted changes. Alternate queries and source reloads from each tree. Without an association, expect the selected checkout's file. Associate the item with a feature worktree and expect normal inspection/readiness from either checkout to read its body, metadata, relationships and state together from that feature file, exposing the source path. Mutate/close the material item and verify it is saved immediately in that file, with no separate run-state copy and no main-file change. Explicit branch-local inspection can still show main's older file. Restart and dispose of the run: the material file and needed source association survive. An unavailable associated worktree is reported instead of silently falling back to main. Finalizing a finished run must not close an open root. Shared claims exclude competing execution across both trees. Restart and reconstruct the in-memory graph with claims, runs, sessions, workspaces and handoffs present; compare authoritative file bytes and require unchanged ownership/context.
 
 From a control checkout select each worktree by path and inspect its content without switching branches. Exercise branch switching and externally removing an eligible feature worktree; shared run/claim files remain inspectable and cannot be recreated from stale branch-local claim copies. The operational workspace record follows explicit cleanup reporting. In a separate stopped-execution fixture corrupt or remove recognizable initialized store metadata: require a warning for available file inspection/readiness, blocked claims, preserved surviving entity files and an explicit recovery path.
 :::
 
 :::mara verification VER-RUN-RECOVERY
 :mid: 01M3KARN8Y3FYNPDNEKTVK2J1A
-:title: Inject failures during run creation and finalization
-:status: draft
+:title: Inspect partial expansion and preserve results before cleanup
+:status: accepted
 :method: test
 :verifies: REQ-RUN-ATOMICITY
 :verifies: REQ-RUN-FINALIZATION
 
-Inject failure before publishing a template run and expect no partial runnable graph. For finalization, inject interruption before and after durable result persistence and before temporary cleanup. On retry, expect exactly one retained result and no premature loss of the temporary graph. Keep a surviving dependent item to verify cleanup cannot leave an unresolved reference. The selected recovery protocol must define the recoverable intermediate states.
+Validate invalid template inputs without creating files. For a valid five-item expansion, inject failure after three creations. Inspect those files and the returned created-ID mapping and failure; no application record or transaction receipt exists. Remove the partial result as the caller and retry to create the intended graph. Repeat for a mixed material/wisp template, including restart after a killed creator; surviving files remain discoverable without a promise of automatic rollback or duplicate suppression. Ordinary malformed-file or unresolved-reference diagnostics still apply.
 
-Exercise failure after each staged write, operation-intent persistence, commit/visibility publication and cleanup step, including process kill and reported sync failures. Include repeated applications to an existing run and completion coupled with handoff/claim release. Retry using the same operation identity; require no duplicate IDs, lost context or stale-token authorization. During finalization, test a designated output checkout on a different filesystem where available: no cross-filesystem rename atomicity may be assumed. A process-kill test alone is not evidence of power-loss durability.
+For squash, inject interruption before root-digest retention and before wisp cleanup. Squash must not delete temporary content before the digest is retained. Explicit discard is separately tested without a digest in [[VER-SQUASH-DIGEST]]. Inspect and continue using the bounded finalization interface. Keep an outside reference to verify cleanup identifies the blocker. The root's manual completion stays unchanged. Do not assume atomic rename across the surviving checkout and shared storage. A process-kill test is not proof of power-loss durability.
 :::
 
 :::mara verification VER-GRAPH-ERRORS
@@ -148,7 +148,7 @@ Exercise item selection, claiming, run creation, and supplied workspace or PR/CI
 :method: test
 :verifies: REQ-EPHEMERAL-FILES
 
-Create a run with multiple temporary items and template applications. Inspect the separate manifest, item and provenance files directly. Restart Work and rebuild its disposable view without any database or persistent index; expect all content, edges, application mappings and ownership records to remain. In a stopped-execution fixture corrupt one entity file and verify diagnostics identify its path and preserve the other entities. Temporary cleanup remains an explicit lifecycle operation, never a side effect of rebuilding a graph.
+Create a run with multiple wisps and workspace references, including items created by repeated template expansion. Inspect the separate manifest and entity files directly; no application/provenance entity is required. Restart Work and rebuild its disposable view without any database or persistent index; expect all content, edges, workspace references and ownership records to remain. In a stopped-execution fixture corrupt one entity file and verify diagnostics identify its path and preserve the other entities. Temporary cleanup remains an explicit lifecycle operation, never a side effect of rebuilding a graph.
 :::
 
 :::mara verification VER-NESTED-DELIVERY
@@ -217,12 +217,14 @@ Once concrete priority and filter schemas are selected, construct eligible, depe
 
 :::mara verification VER-SQUASH-DIGEST
 :mid: 01M3KPXXBAZ20409CEYQGVGMRD
-:title: Verify retained digest before temporary cleanup
+:title: Verify squash and explicit wisp discard
 :status: accepted
 :method: test
 :verifies: REQ-RUN-FINALIZATION
 
-Supply a completed temporary run and a caller-written summary. Squash must create one ordinary durable completed digest item under the durable root with the exact supplied body. The root's manual completion state must not be implicitly changed. Verify the digest is safely retained before cleanup; interruption and retry must not lose or duplicate it. Reject squash of unfinished work. Keep surviving item references and handoffs with unfinished receivers to verify cleanup cannot strand those references or erase required context. Detailed fault-injection checkpoints follow the selected publication protocol.
+Supply a finished run and caller-written summary while its manual root remains open. Finalization retains the summary verbatim as an extension to that existing root, preserving prior root content and completion state and creating no new digest item or child edge. Verify retention precedes wisp cleanup, including interruption and inspection/continuation. Reject squash of unfinished member work or work with active claims. Keep surviving item references and handoffs with unresolved receivers to verify cleanup identifies blockers and preserves needed context. Root completion remains a separate explicit operation. Exact repeat-call behavior follows the bounded finalization contract.
+
+Exercise explicit discard through real CLI/MCP calls on both completed and abandoned open wisps, with no digest supplied: selected discard removes only the requested wisps, while full disposal removes the run's ephemeral context. Preserve material item files, root state, existing digest and other runs byte-for-byte. Reject active claims and incoming references from surviving work, reporting their IDs; after caller resolution, deletion succeeds. References within the deletion set do not block it. Verify finished runs retain files until explicit cleanup, and interrupted discard reports partial deletion for inspection/continuation without generating a digest.
 :::
 
 :::mara verification VER-WORKSPACE-CLEANUP
@@ -244,7 +246,7 @@ Associate sequential activities and different sessions with a shared workspace; 
 :method: test
 :verifies: DES-CLAIM-CONTEXT
 
-Create a run-scoped implementer name pointing directly to an opaque provider/session reference. Complete its first item and verify the name remains available for a later item, which acquires a new claim. Use the same name in another run and verify scope isolation. Claim one-time fix items with external session references and no named-session registration. Rebind or remove a name and verify this neither transfers an existing claim nor grants the replacement session the former owner's token. Treat availability as a timestamped external observation, not proof that a session remains available. Verify no session is launched or resumed by Work.
+Create a run-scoped implementer name pointing directly to an opaque provider/session reference. Complete its first item and verify the name remains available for a later item, which acquires a new claim. Use the same name in another run and verify scope isolation. Claim one-time fix items with external session references and no named-session registration. Rebind or remove a name and verify this neither transfers an existing claim nor lets the replacement session authorize operations using the former claim. Treat availability as a timestamped external observation, not proof that a session remains available. Verify no session is launched or resumed by Work.
  Successfully squash or explicitly clean finalized execution context and verify its named-session records are removed without terminating external sessions.
 :::
 
@@ -255,7 +257,7 @@ Create a run-scoped implementer name pointing directly to an opaque provider/ses
 :method: test
 :verifies: REQ-SINGLE-RUN
 
-Attempt to initialize execution of the same root item from two linked worktrees concurrently. Expect one run and an explicit existing-run result or conflict, not two executions. Verify read-only inspection from the other caller succeeds. Add supporting template work and independently claim different child items within that run.
+Attempt to initialize execution of the same root item from two linked worktrees concurrently. Expect one current run and an explicit existing-run result or conflict, not two executions. Verify read-only inspection from the other caller succeeds. Add supporting template work and independently claim different child items within that run. A finished but unfinalized run is still the current run. After squash/finalization and, separately, after explicit disposal, start later work on the same root and require a fresh run ID with no old wisps resurrected. Race two starts after disposal and again require one current run. Starting a fresh run must not change the root's recorded completion.
 :::
 
 :::mara verification VER-GRAPH-PROGRESS
@@ -320,9 +322,9 @@ Copy the real .work/items backlog into a disposable initialized Git checkout. Lo
 
 Use disposable Git repositories and linked worktrees to verify the entity layout, one authoritative owner per field/reference, and independent retention rules. Run concurrent CLI/MCP mutations through the shared lock, including contention and process termination. Confirm lock-file presence is not interpreted as ownership and normal cleanup never unlinks/replaces the live lock inode. Test symlink/path substitution and source conflicts without following unsafe replacements or silently overwriting changed content.
 
-Inject failure before and after single-file publication and directory sync; report whether publication may have occurred and retain recovery context. Inspect interrupted multi-file operations before scheduling and require an explicit committed visibility point. Verify a durable-only graph rebuild never clears claims or rewrites operational files. For the foundation, uninitialized, missing/corrupt/unreadable or pending storage must report coordination unavailable instead of a healthy empty store. This is a storage-status check, not a claim-acquisition test. Actual claim refusal and malformed claim-envelope handling belong to [[VER-CLAIM-RACE]] when the claim implementation is delivered. Permission/I/O, malformed entity and lock-contention failures must be distinguishable through both adapters.
+Inject failure before and after single-file publication and directory sync; report whether publication may have occurred and retain recovery context. Inspect partial template expansion as a caller-visible result under [[VER-RUN-RECOVERY]], with ordinary graph diagnostics and no template application receipt. The foundation's own journaled storage operations retain their existing availability/recovery contract. Verify a durable-only graph rebuild never clears claims or rewrites operational files. For the foundation, uninitialized, missing/corrupt/unreadable or pending storage must report coordination unavailable instead of a healthy empty store. This is a storage-status check, not a claim-acquisition test. Actual claim refusal and malformed claim-envelope handling belong to [[VER-CLAIM-RACE]] when the claim implementation is delivered. Permission/I/O, malformed entity and lock-contention failures must be distinguishable through both adapters.
 
-For the foundation, test that detected storage loss is reported and recreation requires explicit action with loss reporting; preserved recovery files must not appear as live entities. Backup creation and restoration are deferred. When later entity-aware restore is implemented, test matching active/retained local identity evidence and refusal without trusted local evidence, with stopped executors and stale-token rejection. Raw external deletion and bypassing advisory locks remain outside the stated exclusion guarantee; this test must not imply otherwise. Use separate evidence for OS-crash/power-loss durability if such guarantees are claimed.
+For the foundation, test that detected storage loss is reported and recreation requires explicit action with loss reporting; preserved recovery files must not appear as live entities. Backup creation and restoration are deferred. When later entity-aware restore is implemented, test matching active/retained local identity evidence and refusal without trusted local evidence, with stopped executors and former-claim/session rejection. Raw external deletion and bypassing advisory locks remain outside the stated exclusion guarantee; this test must not imply otherwise. Use separate evidence for OS-crash/power-loss durability if such guarantees are claimed.
 
 For [[DES-STORE-FOUNDATION]] and [[DES-STORAGE-API]], exercise all four operations through real CLI and MCP subprocesses. Check fresh no-write reads, linked checkout identity, divergent item views across repeated queries/branch switches, independent clone identity, explicit initialization and healthy idempotency. Verify format/identity errors, duplicate keys, unsafe special files, hardlinks, permissions, lock contention and human warnings. Kill a lock holder and confirm descriptor release; recreation/recovery preserve an intact lock inode.
 

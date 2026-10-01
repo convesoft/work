@@ -52,7 +52,7 @@ Execution creates temporary work items and associated operational detail. When t
 :contributes_to: GOAL-LOCAL-WORK
 :involves: ACT-AGENT
 
-Two agents in linked worktrees attempt to claim the same repository work item. Exactly one claim succeeds; both can inspect the current owner and associated workspace. The item has one run, not independent executions in different worktrees or competing runs. Readers may inspect its content and execution state without acquiring execution ownership. Other distinct items can be worked on independently, including parallel children within the same run. After an owner disappears, the controller explicitly releases or reassigns its claim; no timer silently grants ownership to someone else.
+Two agents in linked worktrees attempt to claim the same repository work item. Exactly one claim succeeds; both can inspect the current owner and associated workspace. The item has one current run, not competing executions in different worktrees. A later run may start with a fresh identity after that run is finalized or disposed. Readers may inspect its content and execution state without acquiring execution ownership. Other distinct items can be worked on independently, including parallel children within the same run. After an owner disappears, the controller explicitly releases or reassigns its claim; no timer silently grants ownership to someone else.
 :::
 
 :::mara scenario SCN-REBUILD-INDEX

@@ -28,13 +28,13 @@ Mara items describe the Work product. They are not Work's own issue records: Mar
 
 [[ADR-INITIAL-SCOPE]] includes the work graph, reusable templates, temporary runs, multi-agent claims, and both CLI and MCP over shared operations. The TUI is deferred. External tools execute agents, create worktrees, and perform PR/CI actions; Work tracks and coordinates the work.
 
-[[REQ-GIT-CHECKOUT]] requires a Git working checkout. [[REQ-SINGLE-RUN]] keeps one execution run per root item; [[REQ-CLAIM-EXCLUSION]] excludes competing owners across linked worktrees while allowing read-only inspection. The controller can select another worktree by its filesystem path. [[REQ-GRAPH-PROGRESS]] expresses review findings and repeated rounds through ordinary items and blocking edges, without a structured outcome engine.
+[[REQ-GIT-CHECKOUT]] requires a Git working checkout. [[REQ-SINGLE-RUN]] keeps one current run per root item and permits a fresh run after finalization/disposal; [[REQ-CLAIM-EXCLUSION]] excludes competing owners across linked worktrees while allowing read-only inspection. The controller can select another worktree by its filesystem path. Normal queries resolve the item's associated worktree and read its actual file, including current body, relationships and state; no run-state overlay is stored. Material updates are saved there immediately and reach main through normal merge. Templates can mix material items and wisps, and material-only planning needs no run; this format extension remains planned. [[REQ-GRAPH-PROGRESS]] expresses review findings and repeated rounds through ordinary items and blocking edges, without a structured outcome engine.
 
 | State | Authority and location |
 | --- | --- |
 | Durable work items | Versioned Markdown/YAML under `.work/items/` |
 | Reusable templates | Versioned YAML under `.work/templates/` |
-| Runs, temporary items and template applications | Separate manifests, item documents and provenance files under `<Git common directory>/work/runs/` |
+| Runs, wisps and workspace references | Separate manifests and entity files under `<Git common directory>/work/runs/`; no template application records |
 | Handoff context | Unversioned Markdown under `<Git common directory>/work/handoffs/`, retained until all receiving items finish |
 | Claims | One YAML file per item under shared `work/claims/` |
 | Optional named sessions | Separate YAML files under their run's `sessions/`; one-time sessions need no named registration |
@@ -52,7 +52,7 @@ The durable [bootstrap backlog](../.work/README.md) uses `.work/items/` and [[DE
 
 ## Provenance
 
-Recent refinements include [[REQ-WORK-SELECTION]] for priority, filtering, and atomic claim-next; [[REQ-GRAPH-INSPECTION]] for graph inspection and readiness explanations; parameterized template preview; and [[REQ-EXECUTOR-HINTS]] for optional model/thinking metadata. [[REQ-OPAQUE-BODIES]] keeps acceptance criteria and other narrative opaque to Work. [[DES-CLAIM-CONTEXT]] records ownership and external session references in shared files. [[DES-HANDOFF-RECORDS]] passes temporary context between one or more source and receiving items without affecting readiness. [[DES-SQUASH-DIGEST]] preserves a caller-authored summary as an ordinary completed durable item before temporary cleanup.
+Recent refinements include [[REQ-WORK-SELECTION]] for priority, filtering, and atomic claim-next; [[REQ-GRAPH-INSPECTION]] for graph inspection and readiness explanations; parameterized template preview; and [[REQ-EXECUTOR-HINTS]] for optional model/thinking metadata. [[REQ-OPAQUE-BODIES]] keeps acceptance criteria and other narrative opaque to Work. [[DES-CLAIM-CONTEXT]] records ownership and external session references in shared files. [[DES-HANDOFF-RECORDS]] passes temporary context between one or more source and receiving items without affecting readiness. [[DES-SQUASH-DIGEST]] retains a caller-authored digest extension on the existing root before wisp cleanup, without closing the root. Explicit discard can instead remove selected wisps or dispose of ephemeral run context without a digest, preserving material items and refusing active target claims or unresolved outside references.
 
 This corpus captures product decisions reviewed on 2026-09-28 and revised on 2026-09-30. Explicit user intent establishes the local work tracker, graph and template model, ephemeral operational work, Rust implementation direction, working name `work`, and separate plain files for all authoritative entities. Suggestions remain proposals unless subsequently confirmed.
 
@@ -63,3 +63,7 @@ The shared Git common-directory location and CLI/MCP tracking boundary remain. A
 ## Implementation evidence
 
 The current checkout contains the Cargo workspace, Rust CLI and MCP durable-item operations, read-only template discovery, validation, and symbolic preview, shared file-storage inspection/initialization/recreation/recovery, and automated integration tests. `tests/bootstrap_adoption.rs` exercises durable-item operations on isolated copies of the authored backlog; `tests/templates.rs` and `tests/mcp_protocol.rs` exercise template behavior and CLI/MCP parity. `tests/storage.rs`, `tests/cli_json.rs` and `tests/mcp_protocol.rs` cover the storage foundation, status/warning presentation, and explicit recovery in disposable repositories. [The usage guide](using-work.md) describes the supported commands and current limits. Claims, template publication, runs, and other later slices remain planned. A separate release-preparation item owns the generated changelog and publication evidence. Verification definitions describe repeatable checks, not recorded implementation test results; consult actual test runs for passing evidence.
+
+## Execution implementation contracts
+
+The accepted next slices use [shared execution IO](execution-api.mara.md), [claims](claims.mara.md), [runs and template expansion](runs.mara.md), [execution context](execution-context.mara.md), and [squash/discard](run-finalization.mara.md). These are implementation-ready contracts, not delivered capabilities. [Worker handoffs](../.work/handoffs/beta-execution.md) define ownership, verification and the explicit dispatch stop point.
