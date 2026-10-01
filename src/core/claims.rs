@@ -12,6 +12,7 @@ mod format;
 mod store;
 
 use serde_json::{Value, json};
+use std::path::Path;
 
 use super::coordination::{ExecutionResult, SessionIdentity};
 use super::graph::Evaluation;
@@ -108,7 +109,10 @@ pub struct ClaimReassigned {
 
 impl Claim {
     pub fn parse(raw: &[u8]) -> ExecutionResult<Self> {
-        format::claim(raw)
+        format::claim(raw, Path::new("entity"))
+    }
+    pub(crate) fn parse_at(raw: &[u8], path: &Path) -> ExecutionResult<Self> {
+        format::claim(raw, path).map_err(|error| error.at(path))
     }
     /// Acquisition envelope: optional keys are omitted rather than null.
     pub fn to_json(&self) -> Value {
@@ -130,7 +134,10 @@ impl Claim {
 }
 impl ClaimEnding {
     pub fn parse(raw: &[u8]) -> ExecutionResult<Self> {
-        format::ending(raw)
+        format::ending(raw, Path::new("entity"))
+    }
+    pub(crate) fn parse_at(raw: &[u8], path: &Path) -> ExecutionResult<Self> {
+        format::ending(raw, path).map_err(|error| error.at(path))
     }
     pub fn to_json(&self) -> Value {
         let mut value = json!({"format_version":1,"store_id":self.store_id,
@@ -152,5 +159,38 @@ impl ClaimInspection {
 impl ClaimEnded {
     pub fn to_json(&self) -> Value {
         json!({"claim":self.claim.to_json(),"ending":self.ending.to_json(),"changed":self.changed})
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use crate::core::coordination::encode_path;
+
+    #[test]
+    fn source_path_parsing_changes_only_error_path_context() {
+        let raw = b"format_version: 1\ninvalid: [unterminated\n";
+        let path = Path::new("/store/claims/actual.yaml");
+        for ending in [false, true] {
+            let mut original = if ending {
+                ClaimEnding::parse(raw).map(|_| ())
+            } else {
+                Claim::parse(raw).map(|_| ())
+            }
+            .unwrap_err();
+            let contextual = if ending {
+                ClaimEnding::parse_at(raw, path).map(|_| ())
+            } else {
+                Claim::parse_at(raw, path).map(|_| ())
+            }
+            .unwrap_err();
+            assert_eq!(contextual.code, original.code);
+            assert_eq!(contextual.message, original.message);
+            assert_eq!(contextual.path.as_deref(), Some(path));
+            for diagnostic in original.details["diagnostics"].as_array_mut().unwrap() {
+                diagnostic["path"] = json!(encode_path(path));
+            }
+            assert_eq!(contextual.details, original.details);
+        }
     }
 }

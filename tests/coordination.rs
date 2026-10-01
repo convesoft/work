@@ -143,6 +143,265 @@ fn acquire(root: &Path, id: &str) -> Value {
     ))
 }
 #[test]
+fn active_material_claim_binding_loss_refuses_divergent_cli_mcp_writes_and_retires_only_after_restore()
+ {
+    for case in ["missing", "mismatch", "material_run"] {
+        let f = Fixture::new();
+        let id = f.item();
+        let linked = f.linked();
+        let rel = format!(".work/items/{id}.md");
+        let main = fs::read(f.root.join(&rel)).unwrap();
+        let owner = String::from_utf8(main.clone())
+            .unwrap()
+            .replace("original body", "owner body");
+        fs::write(linked.join(&rel), &owner).unwrap();
+        f.init();
+        let acquisition = acquire(&linked, &id);
+        let claim_id = acquisition["claim"]["id"].as_str().unwrap();
+        let pair = json!({"claim_id":claim_id,"session":session()});
+        let root = f.root.join(".git/work");
+        let binding = root.join(format!("workspaces/items/{id}.yaml"));
+        let original_binding = fs::read(&binding).unwrap();
+        let claim_path = root.join(format!("claims/{claim_id}.yaml"));
+        if case == "material_run" {
+            // Material membership in a run retains workspace evidence too.
+            let mut claim: Value = serde_json::from_slice(&fs::read(&claim_path).unwrap()).unwrap();
+            claim["run_id"] = json!("12345678000040008000000000000000");
+            fs::write(&claim_path, serde_json::to_vec(&claim).unwrap()).unwrap();
+        }
+        let original_claim = fs::read(&claim_path).unwrap();
+        if case == "mismatch" {
+            use work::core::{
+                context::ContextStore, coordination::CoordinationGuard, project::discover,
+            };
+            let project = discover(Some(&f.root)).unwrap();
+            let guard = CoordinationGuard::acquire(&project, true).unwrap();
+            let main_workspace = ContextStore::register(&guard, &f.root).unwrap();
+            let mut value: Value = serde_json::from_slice(&original_binding).unwrap();
+            value["workspace_id"] = json!(main_workspace.id);
+            fs::write(&binding, serde_json::to_vec(&value).unwrap()).unwrap();
+        } else {
+            fs::remove_file(&binding).unwrap();
+        }
+        for (args, tool, input) in [
+            (
+                vec![
+                    "item",
+                    "update",
+                    &id,
+                    "--title",
+                    "must refuse",
+                    "--authorize",
+                    &pair.to_string(),
+                ],
+                "item_update",
+                json!({"id":id,"title":"must refuse","authorization":[pair.clone()]}),
+            ),
+            (
+                vec!["item", "close", &id, "--authorize", &pair.to_string()],
+                "item_close",
+                json!({"id":id,"authorization":[pair.clone()]}),
+            ),
+        ] {
+            let response = cli(&f.root, &args);
+            let transport = mcp(&f.root, tool, input);
+            for error in [&response["error"], &transport["error"]] {
+                assert_eq!(error["code"], "invalid_source", "{case}: {error}");
+                assert!(
+                    error["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|d| d["path"] == binding.to_str().unwrap()),
+                    "{error}"
+                );
+            }
+            assert_eq!(fs::read(f.root.join(&rel)).unwrap(), main);
+            assert_eq!(fs::read(linked.join(&rel)).unwrap(), owner.as_bytes());
+            assert_eq!(fs::read(&claim_path).unwrap(), original_claim);
+            assert!(!root.join(format!("claims/{claim_id}.end.yaml")).exists());
+        }
+        let checked = ok(cli(
+            &f.root,
+            &["item", "inspect", &id, "--view", "checkout"],
+        ));
+        assert_eq!(checked["item"]["body"], "original body");
+        assert_eq!(
+            ok(cli(&f.root, &["item", "inspect", &id, "--raw"]))["source"]["raw_hex"],
+            main.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+        assert_eq!(
+            ok(cli(&f.root, &["claim", "inspect", claim_id]))["current"],
+            true
+        );
+        let diagnosis = ok(cli(&f.root, &["item", "diagnose"]));
+        assert!(
+            diagnosis["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["path"] == binding.to_str().unwrap())
+        );
+        fs::write(&binding, original_binding).unwrap();
+        let update = mcp(
+            &f.root,
+            "item_update",
+            json!({"id":id,"title":"restored binding","authorization":[pair.clone()]}),
+        );
+        assert_eq!(update["item"]["body"], "owner body", "{update}");
+        assert_eq!(update["item"]["title"], "restored binding");
+        let closed = mcp(
+            &f.root,
+            "item_close",
+            json!({"id":id,"authorization":[pair]}),
+        );
+        assert_eq!(closed["item"]["state"], "done", "{closed}");
+        assert!(
+            closed["item"]["claim"].is_null(),
+            "postpublication ownership must reload: {closed}"
+        );
+        assert_eq!(fs::read(f.root.join(&rel)).unwrap(), main);
+        assert_eq!(
+            ok(cli(&f.root, &["claim", "inspect", claim_id]))["ending"]["outcome"],
+            "completed"
+        );
+    }
+}
+
+#[test]
+fn binding_loss_keeps_release_controller_recovery_and_historical_inspection_available() {
+    for controller in [false, true] {
+        let f = Fixture::new();
+        let id = f.item();
+        let linked = f.linked();
+        f.init();
+        let acquisition = acquire(&linked, &id);
+        let claim_id = acquisition["claim"]["id"].as_str().unwrap();
+        let root = f.root.join(".git/work");
+        fs::remove_file(root.join(format!("workspaces/items/{id}.yaml"))).unwrap();
+        let rel = format!(".work/items/{id}.md");
+        let main = fs::read(f.root.join(&rel)).unwrap();
+        let owner = fs::read(linked.join(&rel)).unwrap();
+        let result = if controller {
+            mcp(
+                &f.root,
+                "claim_recover",
+                json!({"claim_id":claim_id,"actor":"controller","reason":"stopped","executors_stopped":true}),
+            )
+        } else {
+            ok(cli(
+                &f.root,
+                &[
+                    "claim",
+                    "release",
+                    claim_id,
+                    "--session-namespace",
+                    "codex",
+                    "--session-id",
+                    "session / opaque:α",
+                ],
+            ))
+        };
+        assert_eq!(result["ending"]["outcome"], "released", "{result}");
+        assert_eq!(fs::read(f.root.join(&rel)).unwrap(), main);
+        assert_eq!(fs::read(linked.join(&rel)).unwrap(), owner);
+        fs::remove_file(root.join(format!(
+            "workspaces/{}.yaml",
+            acquisition["claim"]["workspace_id"].as_str().unwrap()
+        )))
+        .unwrap();
+        let historical = ok(cli(&f.root, &["claim", "inspect", claim_id]));
+        assert_eq!(historical["current"], false);
+        assert_eq!(
+            mcp(&f.root, "claim_inspect", json!({"claim_id":claim_id})),
+            historical
+        );
+    }
+}
+
+#[test]
+fn workspace_free_core_and_wisp_claims_do_not_require_material_bindings() {
+    use work::core::{
+        claims::{ClaimCandidate, ClaimStore},
+        context::ResolvedView,
+        coordination::{CoordinationGuard, SessionIdentity},
+        graph::ItemGraph,
+        items::ItemStore,
+        project::discover,
+    };
+    for run_id in [None, Some("12345678000040008000000000000000".to_owned())] {
+        let f = Fixture::new();
+        let id = f.item();
+        f.init();
+        let project = discover(Some(&f.root)).unwrap();
+        let guard = CoordinationGuard::acquire(&project, true).unwrap();
+        let store = ItemStore::load(&project).unwrap();
+        let candidate = ClaimCandidate {
+            header: store.resolve(&id).unwrap().header.clone().unwrap(),
+            evaluation: ItemGraph::from_store(&store).evaluate(&id).unwrap(),
+            workspace_id: None,
+            run_id,
+            session_record_id: None,
+        };
+        ClaimStore::acquire(
+            &guard,
+            &candidate,
+            "core",
+            &SessionIdentity {
+                namespace: "test".into(),
+                id: "session".into(),
+            },
+        )
+        .unwrap();
+        let view = ResolvedView::load(&guard).unwrap();
+        assert!(view.store.is_valid());
+        assert_eq!(view.sources[&id], f.root);
+        assert_eq!(
+            view.store
+                .resolve(&id)
+                .unwrap()
+                .header
+                .as_ref()
+                .unwrap()
+                .title,
+            "original"
+        );
+        assert!(view.context.bindings.is_empty());
+    }
+}
+
+#[test]
+fn malformed_claim_yaml_uses_real_outer_and_nested_paths_in_cli_and_mcp() {
+    for ending in [false, true] {
+        let f = Fixture::new();
+        let id = f.item();
+        f.init();
+        let acquisition = acquire(&f.root, &id);
+        let claim_id = acquisition["claim"]["id"].as_str().unwrap();
+        let path = f.root.join(format!(
+            ".git/work/claims/{claim_id}{}.yaml",
+            if ending { ".end" } else { "" }
+        ));
+        let malformed = b"format_version: 1\ninvalid: [unterminated\n";
+        fs::write(&path, malformed).unwrap();
+        let error = cli(&f.root, &["claim", "inspect", claim_id])["error"].clone();
+        assert_eq!(error["code"], "invalid_format", "{error}");
+        assert_eq!(error["path"], path.to_str().unwrap());
+        let diagnostics = error["diagnostics"].as_array().unwrap();
+        assert!(!diagnostics.is_empty());
+        for diagnostic in diagnostics {
+            assert_eq!(diagnostic["path"], path.to_str().unwrap());
+            assert!(diagnostic["line"].as_u64().is_some());
+        }
+        assert_eq!(
+            mcp(&f.root, "claim_inspect", json!({"claim_id":claim_id}))["error"],
+            error
+        );
+        assert_eq!(fs::read(path).unwrap(), malformed);
+    }
+}
+
+#[test]
 fn bound_whole_file_is_read_and_mutated_from_main_without_touching_main_item() {
     let f = Fixture::new();
     let id = f.item();

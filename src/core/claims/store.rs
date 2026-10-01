@@ -21,6 +21,12 @@ pub(crate) struct OwnershipSnapshot {
     current: BTreeMap<String, Vec<Claim>>,
 }
 impl OwnershipSnapshot {
+    pub(crate) fn material_claims(&self) -> impl Iterator<Item = &Claim> {
+        self.current
+            .values()
+            .flatten()
+            .filter(|claim| claim.workspace_id.is_some())
+    }
     pub(crate) fn exclusion(&self) -> ExecutionResult<()> {
         for item_id in self.current.keys() {
             self.current(item_id)?;
@@ -115,8 +121,7 @@ impl Snapshot {
             let source = guard.read(&path)?;
             let metadata = &guard.metadata;
             if ended {
-                let ending = ClaimEnding::parse(&source.raw)
-                    .map_err(|e| e.at(guard.root_path().join(&path)))?;
+                let ending = ClaimEnding::parse_at(&source.raw, &guard.root_path().join(&path))?;
                 if ending.claim_id != id {
                     return Err(ExecutionError::new(
                         "invalid_format",
@@ -133,8 +138,7 @@ impl Snapshot {
                 )?;
                 endings.insert(id.to_owned(), ending);
             } else {
-                let claim =
-                    Claim::parse(&source.raw).map_err(|e| e.at(guard.root_path().join(&path)))?;
+                let claim = Claim::parse_at(&source.raw, &guard.root_path().join(&path))?;
                 if claim.id != id {
                     return Err(ExecutionError::new(
                         "invalid_format",

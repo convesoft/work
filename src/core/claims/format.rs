@@ -1,15 +1,21 @@
 use serde_json::Value;
+use std::path::Path;
 
 use super::{Claim, ClaimEnding, ClaimOutcome};
 use crate::core::coordination::{
-    ExecutionError, ExecutionResult, SessionIdentity, exact_keys, parse_yaml, valid_id,
+    ExecutionError, ExecutionResult, SessionIdentity, exact_keys, valid_id,
 };
 
 fn bad(message: impl Into<String>) -> ExecutionError {
     ExecutionError::new("invalid_format", message)
 }
-fn envelope(raw: &[u8], required: &[&str], optional: &[&str]) -> ExecutionResult<Value> {
-    let value = parse_yaml(raw)?;
+fn envelope(
+    raw: &[u8],
+    path: &Path,
+    required: &[&str],
+    optional: &[&str],
+) -> ExecutionResult<Value> {
+    let value = crate::core::storage::format::yaml(raw, path)?;
     let version = value
         .get("format_version")
         .and_then(Value::as_u64)
@@ -111,9 +117,10 @@ fn valid_timestamp(text: &str) -> bool {
         && (h1-b'0')*10+(h2-b'0') <= 23 && (m1-b'0')*10+(m2-b'0') <= 59)
 }
 
-pub(super) fn claim(raw: &[u8]) -> ExecutionResult<Claim> {
+pub(super) fn claim(raw: &[u8], path: &Path) -> ExecutionResult<Claim> {
     let value = envelope(
         raw,
+        path,
         &[
             "format_version",
             "store_id",
@@ -140,9 +147,10 @@ pub(super) fn claim(raw: &[u8]) -> ExecutionResult<Claim> {
         session_record_id: optional_id(&value, "session_record_id")?,
     })
 }
-pub(super) fn ending(raw: &[u8]) -> ExecutionResult<ClaimEnding> {
+pub(super) fn ending(raw: &[u8], path: &Path) -> ExecutionResult<ClaimEnding> {
     let value = envelope(
         raw,
+        path,
         &[
             "format_version",
             "store_id",

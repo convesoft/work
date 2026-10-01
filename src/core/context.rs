@@ -1,6 +1,7 @@
 //! Material source locations, resolved without copying item state.
 //! @mara implements DES-EXECUTION-IO
 //! @mara implements DES-CONTEXT-API
+use super::claims::{ClaimStore, OwnershipSnapshot};
 use super::coordination::*;
 use super::items::{Diagnostic, ItemFile, ItemStore};
 use super::project::{Project, discover};
@@ -265,12 +266,28 @@ pub struct ResolvedView {
     pub context: ContextStore,
     pub sources: BTreeMap<String, PathBuf>,
     pub run_ids: BTreeMap<String, String>,
+    pub(crate) ownership: ExecutionResult<OwnershipSnapshot>,
     snapshots: BTreeMap<PathBuf, ItemStore>,
 }
 impl ResolvedView {
     pub fn load(g: &CoordinationGuard) -> ExecutionResult<Self> {
         let project = g.project().clone();
         let context = ContextStore::load(g)?;
+        let ownership = ClaimStore::ownership_snapshot(g);
+        let mut invalid_bindings = BTreeMap::new();
+        if let Ok(snapshot) = &ownership {
+            for claim in snapshot.material_claims() {
+                let binding = context.bindings.get(&claim.item_id);
+                if binding.map(|b| &b.workspace_id) != claim.workspace_id.as_ref() {
+                    let message = if binding.is_none() {
+                        "active material claim binding is missing"
+                    } else {
+                        "material binding workspace does not match active claim"
+                    };
+                    invalid_bindings.insert(claim.item_id.clone(), message);
+                }
+            }
+        }
         let selected = ItemStore::load_optional_catalog(&project.worktree_root)?;
         // Remove selected-checkout copies before adding any bound sources.
         // A later binding must never erase an earlier binding's diagnostics.
@@ -283,7 +300,13 @@ impl ResolvedView {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .and_then(|name| name.strip_suffix(".md"))
-                    .is_some_and(|id| context.bindings.contains_key(id))
+                    .is_some_and(|id| {
+                        context.bindings.contains_key(id) || invalid_bindings.contains_key(id)
+                    })
+                    && !file
+                        .header
+                        .as_ref()
+                        .is_some_and(|h| invalid_bindings.contains_key(&h.id))
             })
             .cloned()
             .collect();
@@ -291,6 +314,9 @@ impl ResolvedView {
         let mut sources = BTreeMap::new();
         let mut workspace_loads: BTreeMap<PathBuf, ExecutionResult<()>> = BTreeMap::new();
         for b in context.bindings.values() {
+            if invalid_bindings.contains_key(&b.item_id) {
+                continue;
+            }
             let w = &context.workspaces[&b.workspace_id];
             let loaded = workspace_loads.entry(w.path.clone()).or_insert_with(|| {
                 let p = discover(Some(&w.path)).map_err(|e| {
@@ -335,6 +361,12 @@ impl ResolvedView {
             }
             sources.insert(b.item_id.clone(), w.path.clone());
         }
+        for (id, message) in invalid_bindings {
+            files.push(unavailable(
+                g.root_path().join(format!("workspaces/items/{id}.yaml")),
+                message,
+            ));
+        }
         for f in &files {
             if let Some(h) = &f.header {
                 sources
@@ -349,6 +381,7 @@ impl ResolvedView {
             context,
             sources,
             run_ids: BTreeMap::new(),
+            ownership,
             snapshots,
         })
     }

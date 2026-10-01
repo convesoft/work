@@ -114,7 +114,8 @@ impl ExecutionOperations {
             None => Ok(self.physical().inspect(id)?),
             Some(g) => {
                 let v = ResolvedView::load(&g)?;
-                inspect(&g, &v, id)
+                let graph = ItemGraph::from_store(&v.store);
+                inspect_with_snapshot(&v, &graph, &v.ownership, id)
             }
         }
     }
@@ -124,14 +125,13 @@ impl ExecutionOperations {
             Some(g) => {
                 let v = ResolvedView::load(&g)?;
                 let graph = ItemGraph::from_store(&v.store);
-                let ownership = ClaimStore::ownership_snapshot(&g);
                 let mut result: Vec<_> = v
                     .store
                     .files
                     .iter()
                     .filter(|f| f.is_valid())
                     .filter_map(|f| f.header.as_ref())
-                    .map(|h| inspect_with_snapshot(&v, &graph, &ownership, &h.id))
+                    .map(|h| inspect_with_snapshot(&v, &graph, &v.ownership, &h.id))
                     .collect::<ExecutionResult<_>>()?;
                 result.sort_by(|a, b| {
                     a.file
@@ -154,13 +154,12 @@ impl ExecutionOperations {
         if !graph.is_valid() {
             return Err(OperationError::InvalidSource(graph.diagnostics().to_vec()).into());
         }
-        let snapshot = ClaimStore::ownership_snapshot(&g)?;
+        let snapshot = v.ownership.as_ref().map_err(Clone::clone)?;
         snapshot.exclusion()?;
-        let ownership = Ok(snapshot);
         let mut result = Vec::new();
         for file in &v.store.files {
             if let Some(h) = &file.header {
-                let i = inspect_with_snapshot(&v, &graph, &ownership, &h.id)?;
+                let i = inspect_with_snapshot(&v, &graph, &v.ownership, &h.id)?;
                 if i.evaluation.as_ref().is_some_and(|e| e.executable) {
                     result.push(i);
                 }
