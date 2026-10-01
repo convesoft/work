@@ -260,7 +260,7 @@ impl ResolvedView {
     pub fn load(g: &CoordinationGuard) -> ExecutionResult<Self> {
         let project = g.project().clone();
         let context = ContextStore::load(g)?;
-        let selected = ItemStore::load(&project)?;
+        let selected = ItemStore::load_optional_catalog(&project.worktree_root)?;
         let mut files = selected.files.clone();
         let mut snapshots = BTreeMap::from([(project.worktree_root.clone(), selected)]);
         let mut sources = BTreeMap::new();
@@ -332,7 +332,11 @@ impl ResolvedView {
     }
     pub fn recheck(&self) -> ExecutionResult<()> {
         for (root, prior) in &self.snapshots {
-            let now = ItemStore::load_from_root(root)?;
+            let now = if root == &self.project.worktree_root {
+                ItemStore::load_optional_catalog(root)?
+            } else {
+                ItemStore::load_from_root(root)?
+            };
             if prior.files.len() != now.files.len()
                 || prior.files.iter().any(|f| {
                     !now.files.iter().any(|n| {

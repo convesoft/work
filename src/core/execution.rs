@@ -5,7 +5,7 @@ use super::claims::{ClaimAuthorization, ClaimCandidate, ClaimStore, OwnershipSna
 use super::context::{ContextStore, ResolvedView};
 use super::coordination::*;
 use super::graph::ItemGraph;
-use super::items::{Completion, ItemHeader, ItemStore, ManualState, parse_candidate};
+use super::items::{Completion, ItemHeader, ItemStore, LookupError, ManualState, parse_candidate};
 use super::operations::{
     self, CheckoutWriter, DurableOperations, Inspection, MetadataChange, OperationError,
     RawInspection, RelationKind,
@@ -548,11 +548,28 @@ fn candidate(
     v: &ResolvedView,
     input: &str,
 ) -> ExecutionResult<ClaimCandidate> {
+    let id = input.strip_prefix("w-").unwrap_or(input);
+    if id.len() == 32 && !valid_id(id) {
+        return Err(ExecutionError::new(
+            "invalid_argument",
+            "full item ID must be a lowercase UUIDv4",
+        ));
+    }
     require_valid(&v.store)?;
-    let source = v
-        .store
-        .resolve(input)
-        .map_err(|e| ExecutionError::new("not_found", format!("item lookup: {e:?}")))?;
+    let source = v.store.resolve(input).map_err(|error| match error {
+        LookupError::InvalidInput => ExecutionError::new(
+            "invalid_argument",
+            "item ID must be lowercase hexadecimal, optionally prefixed with w-",
+        ),
+        LookupError::NotFound => {
+            ExecutionError::new("not_found", format!("item {input} was not found"))
+        }
+        LookupError::Ambiguous(ids) => ExecutionError::new(
+            "ambiguous_id",
+            format!("item {input} matches {}", ids.join(", ")),
+        ),
+        LookupError::Invalid(diagnostics) => OperationError::InvalidSource(diagnostics).into(),
+    })?;
     let h = source
         .header
         .clone()

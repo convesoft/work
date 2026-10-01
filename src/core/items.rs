@@ -175,6 +175,22 @@ impl ItemStore {
         Self::load_from_open_items(&items_fd, &root.join(".work/items"))
     }
 
+    /// Resolved views may have no selected catalog while bound items live elsewhere.
+    /// Only absent catalog components are empty; the checkout and unsafe/unreadable
+    /// directory errors retain their normal meaning.
+    pub(crate) fn load_optional_catalog(root: &Path) -> io::Result<Self> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut directory = openat(CWD, root, flags, Mode::empty()).map_err(io::Error::from)?;
+        for name in [".work", "items"] {
+            directory = match openat(&directory, name, flags, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(rustix::io::Errno::NOENT) => return Ok(Self::from_candidate_files(Vec::new())),
+                Err(error) => return Err(io::Error::from(error)),
+            };
+        }
+        Self::load_from_open_items(&directory, &root.join(".work/items"))
+    }
+
     pub(crate) fn load_from_open_items(items_fd: &OwnedFd, dir_path: &Path) -> io::Result<Self> {
         let mut names = Vec::new();
         for entry in Dir::read_from(items_fd).map_err(io::Error::from)? {

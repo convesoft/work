@@ -113,6 +113,104 @@ fn session() -> SessionIdentity {
 }
 
 #[test]
+fn claim_acquisition_preserves_cli_and_mcp_lookup_errors_and_valid_references() {
+    let f = Fixture::new();
+    let ids = [
+        "12345678000040008000000000000000",
+        "12345678000040008000000000000001",
+        "abcdef12000040008000000000000000",
+    ];
+    for id in ids {
+        let generated = f.item();
+        let path = f.path.join(format!(".work/items/{generated}.md"));
+        let raw = fs::read_to_string(&path).unwrap().replace(&generated, id);
+        fs::rename(&path, f.path.join(format!(".work/items/{id}.md"))).unwrap();
+        fs::write(f.path.join(format!(".work/items/{id}.md")), raw).unwrap();
+    }
+    f.init();
+    let cases = [
+        ("not-an-id", "invalid_argument", 2),
+        ("w-", "invalid_argument", 2),
+        ("ABCDEF12", "invalid_argument", 2),
+        ("00000000000000000000000000000000", "invalid_argument", 2),
+        ("w-abcdef12000030008000000000000000", "invalid_argument", 2),
+        ("abcdef12000040007000000000000000", "invalid_argument", 2),
+        ("12345678", "ambiguous_id", 3),
+        ("w-12345678", "ambiguous_id", 3),
+        ("eeeeeeee", "not_found", 3),
+        ("w-eeeeeeee", "not_found", 3),
+        ("eeeeeeee000040008000000000000000", "not_found", 3),
+    ];
+    for (input, code, exit) in cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_work"))
+            .arg("--json")
+            .arg("--worktree")
+            .arg(&f.path)
+            .args([
+                "claim",
+                "acquire",
+                input,
+                "--actor",
+                "worker",
+                "--session-namespace",
+                "provider",
+                "--session-id",
+                "session",
+            ])
+            .output()
+            .unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(exit), "{input}: {response}");
+        assert_eq!(response["error"]["code"], code, "{input}: {response}");
+        let response = mcp(
+            &f.path,
+            "claim_acquire",
+            serde_json::json!({"item":input,"actor":"worker","session":{"namespace":"provider","id":"session"}}),
+        );
+        assert_eq!(response["error"]["code"], code, "{input}: {response}");
+        if code == "ambiguous_id" {
+            let message = response["error"]["message"].as_str().unwrap();
+            assert!(message.contains(ids[0]) && message.contains(ids[1]));
+        }
+    }
+    for input in [
+        ids[2],
+        "w-abcdef12000040008000000000000000",
+        "abcdef12",
+        "w-abcdef12",
+    ] {
+        let result = ok(f.claim(input));
+        assert_eq!(result["claim"]["item_id"], ids[2]);
+        let claim_id = result["claim"]["id"].as_str().unwrap();
+        ok(f.cli(&[
+            "claim",
+            "release",
+            claim_id,
+            "--session-namespace",
+            "provider",
+            "--session-id",
+            "session",
+        ]));
+        let result = mcp(
+            &f.path,
+            "claim_acquire",
+            serde_json::json!({"item":input,"actor":"worker","session":{"namespace":"provider","id":"session"}}),
+        );
+        assert_eq!(result["claim"]["item_id"], ids[2]);
+        let claim_id = result["claim"]["id"].as_str().unwrap();
+        ok(f.cli(&[
+            "claim",
+            "release",
+            claim_id,
+            "--session-namespace",
+            "provider",
+            "--session-id",
+            "session",
+        ]));
+    }
+}
+
+#[test]
 fn actual_uninitialized_cli_completion_changes_use_original_durable_operation() {
     let f = Fixture::new();
     let id = f.item();

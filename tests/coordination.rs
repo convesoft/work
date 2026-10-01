@@ -398,3 +398,75 @@ fn option_values_that_resemble_new_flags_remain_literal() {
         assert_eq!(closed["item"]["close_reason"], "--view");
     }
 }
+
+#[test]
+fn bound_items_remain_authoritative_when_selected_catalog_is_absent() {
+    for remove_work in [false, true] {
+        let f = Fixture::new();
+        let id = f.item();
+        let linked = f.linked();
+        f.init();
+        let acquisition = acquire(&linked, &id);
+        let released = mcp(
+            &f.root,
+            "claim_release",
+            json!({"claim_id":acquisition["claim"]["id"],"session":session()}),
+        );
+        assert!(released.get("error").is_none(), "{released}");
+        git(&f.root, &["rm", "-q", &format!(".work/items/{id}.md")]);
+        assert!(!f.root.join(".work/items").exists());
+        if remove_work {
+            fs::remove_dir_all(f.root.join(".work")).unwrap();
+        }
+        let read = ok(cli(&f.root, &["item", "inspect", &id]));
+        assert_eq!(read["item"]["source_worktree"], linked.to_str().unwrap());
+        assert_eq!(
+            mcp(&f.root, "item_inspect", json!({"id":id}))["item"],
+            read["item"]
+        );
+        for (verb, tool) in [("list", "item_list"), ("ready", "item_ready")] {
+            let result = ok(cli(&f.root, &["item", verb]));
+            assert_eq!(result["items"].as_array().unwrap().len(), 1, "{result}");
+            assert_eq!(mcp(&f.root, tool, json!({}))["items"], result["items"]);
+        }
+        let updated = mcp(
+            &f.root,
+            "item_update",
+            json!({"id":id,"title":"bound source updated"}),
+        );
+        assert_eq!(
+            updated["item"]["title"], "bound source updated",
+            "{updated}"
+        );
+        let a = acquire(&f.root, &id);
+        assert_eq!(a["claim"]["item_id"], id);
+        assert!(!f.root.join(".work/items").exists());
+    }
+}
+#[test]
+fn selected_catalog_symlink_and_permission_errors_are_not_empty_views() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let f = Fixture::new();
+    let id = f.item();
+    f.init();
+    let items = f.root.join(".work/items");
+    let retained = f.root.join("retained-items");
+    fs::rename(&items, &retained).unwrap();
+    symlink(&retained, &items).unwrap();
+    assert_eq!(cli(&f.root, &["item", "list"])["ok"], false);
+    assert!(mcp(&f.root, "item_list", json!({})).get("error").is_some());
+    fs::remove_file(&items).unwrap();
+    symlink(f.root.join("missing"), &items).unwrap();
+    assert_eq!(cli(&f.root, &["item", "list"])["ok"], false);
+    fs::remove_file(&items).unwrap();
+    fs::rename(&retained, &items).unwrap();
+    fs::set_permissions(&items, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = cli(&f.root, &["item", "inspect", &id]);
+    let mcp_denied = mcp(&f.root, "item_inspect", json!({"id":id}));
+    fs::set_permissions(&items, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(denied["error"]["code"], "permission_denied", "{denied}");
+    assert_eq!(
+        mcp_denied["error"]["code"], "permission_denied",
+        "{mcp_denied}"
+    );
+}
