@@ -339,3 +339,48 @@ fn checkout_view_survives_missing_bound_source_and_malformed_workspace() {
         }
     }
 }
+
+#[test]
+fn option_values_that_resemble_new_flags_remain_literal() {
+    let f = Fixture::new();
+    for initialized in [false, true] {
+        if initialized {
+            f.init();
+        }
+        let created = ok(cli(
+            &f.root,
+            &[
+                "item",
+                "create",
+                "--title",
+                "--view",
+                "--body",
+                "--authorize",
+                "--label",
+                "--view",
+                "--model",
+                "--authorize",
+            ],
+        ));
+        let id = created["item"]["id"].as_str().unwrap();
+        assert_eq!(created["item"]["title"], "--view");
+        assert_eq!(created["item"]["body"], "--authorize");
+        assert_eq!(created["item"]["labels"], json!(["--view"]));
+        assert_eq!(created["item"]["model"], "--authorize");
+        let updated = ok(cli(
+            &f.root,
+            &[
+                "item",
+                "update",
+                id,
+                "--title",
+                "--authorize",
+                "--label",
+                "--authorize",
+            ],
+        ));
+        assert_eq!(updated["item"]["title"], "--authorize");
+        let closed = ok(cli(&f.root, &["item", "close", id, "--reason", "--view"]));
+        assert_eq!(closed["item"]["close_reason"], "--view");
+    }
+}

@@ -18,6 +18,7 @@ use super::graph::Evaluation;
 use super::items::ItemHeader;
 
 pub use store::ClaimStore;
+pub(crate) use store::OwnershipSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claim {

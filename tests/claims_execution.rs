@@ -1,5 +1,6 @@
 //! Regressions for accepted coordinator review findings, on disposable repos.
 use serde_json::Value;
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -434,4 +435,138 @@ fn reassign_checked_rechecks_both_boundaries_and_reports_ending_if_second_check_
             assert!(record.ending.is_none());
         }
     }
+}
+
+#[test]
+fn batch_list_matches_single_inspection_and_sorts_overlaid_sources_by_full_id() {
+    let f = Fixture::new();
+    let mut ids: Vec<_> = (0..6).map(|_| f.item()).collect();
+    ids.sort();
+    for (id, priority) in [
+        (&ids[0], "1"),
+        (&ids[1], "1"),
+        (&ids[2], "1"),
+        (&ids[3], "0"),
+    ] {
+        ok(f.cli(&["item", "update", id, "--priority", priority]));
+    }
+    ok(f.cli(&["relation", "add", "depends_on", &ids[4], &ids[3]]));
+    ok(f.cli(&["item", "close", &ids[5]]));
+    f.init();
+    // Overlay the lowest ID, which used to append it after all unbound sources.
+    let ended = ok(f.claim(&ids[0]));
+    let ended_id = ended["claim"]["id"].as_str().unwrap();
+    ok(f.cli(&[
+        "claim",
+        "release",
+        ended_id,
+        "--session-namespace",
+        "provider",
+        "--session-id",
+        "session",
+    ]));
+    ok(f.claim(&ids[2]));
+    let list = ok(f.cli(&["item", "list"]));
+    let listed = list["items"].as_array().unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    for item in listed {
+        assert_eq!(
+            *item,
+            ok(f.cli(&["item", "inspect", item["id"].as_str().unwrap()]))["item"]
+        );
+    }
+    let ready = ok(f.cli(&["item", "ready"]));
+    assert_eq!(
+        ready["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![ids[3].as_str(), ids[0].as_str(), ids[1].as_str()]
+    );
+}
+
+#[test]
+fn batch_list_keeps_ownership_warnings_and_readiness_refuses_malformed_claims() {
+    let f = Fixture::new();
+    let one = f.item();
+    let two = f.item();
+    f.init();
+    fs::write(f.root().join("claims/broken.yaml"), b"broken").unwrap();
+    let list = ok(f.cli(&["item", "list"]));
+    assert_eq!(list["items"].as_array().unwrap().len(), 2);
+    for id in [one, two] {
+        let single = ok(f.cli(&["item", "inspect", &id]))["item"].clone();
+        assert_eq!(single["ownership_warning"]["code"], "invalid_format");
+        assert_eq!(single["executable"], false);
+        assert_eq!(
+            *list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["id"] == id)
+                .unwrap(),
+            single
+        );
+    }
+    assert_eq!(f.cli(&["item", "ready"])["error"]["code"], "invalid_format");
+}
+
+#[test]
+fn close_permission_error_retains_last_ending_publication_and_saved_item_partial() {
+    let f = Fixture::new();
+    let id = f.item();
+    f.init();
+    let claim = ok(f.claim(&id));
+    let claim_id = claim["claim"]["id"].as_str().unwrap();
+    let authorization =
+        serde_json::json!({"claim_id":claim_id,"session":session().to_json()}).to_string();
+    let claims_path = f.root().join("claims");
+    let prior_mode = fs::metadata(&claims_path).unwrap().permissions();
+    fs::set_permissions(&claims_path, fs::Permissions::from_mode(0o500)).unwrap();
+    let error = f.cli(&["item", "close", &id, "--authorize", &authorization]);
+    // Restore before assertions, so the disposable repo is removable on failure.
+    fs::set_permissions(&claims_path, prior_mode).unwrap();
+    assert_eq!(error["error"]["code"], "permission_denied", "{error}");
+    assert_eq!(error["error"]["publication"], "not_published", "{error}");
+    assert_eq!(error["error"]["errno"], 13);
+    assert!(
+        error["error"]["path"]
+            .as_str()
+            .unwrap()
+            .contains("/claims/")
+    );
+    let item = serde_json::json!({"id":id,"path":f.path.join(format!(".work/items/{id}.md")).to_str().unwrap()});
+    assert_eq!(error["error"]["published_item"], item);
+    assert_eq!(
+        error["error"]["partial"]["updated"],
+        serde_json::json!([item])
+    );
+    let saved = fs::read(f.path.join(format!(".work/items/{id}.md"))).unwrap();
+    assert_eq!(
+        ok(f.cli(&["item", "inspect", &id]))["item"]["state"],
+        "done"
+    );
+    assert_eq!(ok(f.cli(&["claim", "inspect", claim_id]))["current"], true);
+    assert!(
+        !f.root()
+            .join(format!("claims/{claim_id}.end.yaml"))
+            .exists()
+    );
+    ok(f.cli(&["item", "close", &id, "--authorize", &authorization]));
+    assert_eq!(
+        fs::read(f.path.join(format!(".work/items/{id}.md"))).unwrap(),
+        saved
+    );
+    assert_eq!(
+        ok(f.cli(&["claim", "inspect", claim_id]))["ending"]["outcome"],
+        "completed"
+    );
 }

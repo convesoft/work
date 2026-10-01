@@ -1201,7 +1201,7 @@ pub(crate) fn inspect_store(store: &ItemStore, id: &str) -> Result<Inspection, O
     inspect_with_graph(store, &graph, id)
 }
 
-fn inspect_with_graph(
+pub(crate) fn inspect_with_graph(
     store: &ItemStore,
     graph: &ItemGraph,
     id: &str,

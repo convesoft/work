@@ -1,7 +1,7 @@
 //! Coordinator facade: resolved source files and repository-wide ownership.
 //! @mara implements DES-EXECUTION-IO
 //! @mara implements DES-CLAIM-API
-use super::claims::{ClaimAuthorization, ClaimCandidate, ClaimStore};
+use super::claims::{ClaimAuthorization, ClaimCandidate, ClaimStore, OwnershipSnapshot};
 use super::context::{ContextStore, ResolvedView};
 use super::coordination::*;
 use super::graph::ItemGraph;
@@ -71,13 +71,25 @@ impl ExecutionOperations {
             None => Ok(self.physical().list()?),
             Some(g) => {
                 let v = ResolvedView::load(&g)?;
-                v.store
+                let graph = ItemGraph::from_store(&v.store);
+                let ownership = ClaimStore::ownership_snapshot(&g);
+                let mut result: Vec<_> = v
+                    .store
                     .files
                     .iter()
                     .filter(|f| f.is_valid())
                     .filter_map(|f| f.header.as_ref())
-                    .map(|h| inspect(&g, &v, &h.id))
-                    .collect()
+                    .map(|h| inspect_with_snapshot(&v, &graph, &ownership, &h.id))
+                    .collect::<ExecutionResult<_>>()?;
+                result.sort_by(|a, b| {
+                    a.file
+                        .header
+                        .as_ref()
+                        .unwrap()
+                        .id
+                        .cmp(&b.file.header.as_ref().unwrap().id)
+                });
+                Ok(result)
             }
         }
     }
@@ -86,12 +98,15 @@ impl ExecutionOperations {
             return Ok(self.physical().ready()?);
         };
         let v = ResolvedView::load(&g)?;
-        require_valid(&v.store)?;
-        ClaimStore::list(&g, None, true)?;
+        let graph = ItemGraph::from_store(&v.store);
+        if !graph.is_valid() {
+            return Err(OperationError::InvalidSource(graph.diagnostics().to_vec()).into());
+        }
+        let ownership = Ok(ClaimStore::ownership_snapshot(&g)?);
         let mut result = Vec::new();
         for file in &v.store.files {
             if let Some(h) = &file.header {
-                let i = inspect(&g, &v, &h.id)?;
+                let i = inspect_with_snapshot(&v, &graph, &ownership, &h.id)?;
                 if i.evaluation.as_ref().is_some_and(|e| e.executable) {
                     result.push(i);
                 }
@@ -234,11 +249,7 @@ impl ExecutionOperations {
                 &claim.session,
                 h.close_reason.as_deref().unwrap_or(""),
             )
-            .map_err(|mut e| {
-                e.details["published_item"] = json!({"id":h.id,"path":encode_path(&before.path)});
-                e.details["publication"] = json!("published");
-                e
-            })?;
+            .map_err(|e| completion_error(e, &h.id, &before.path))?;
         }
         let v = ResolvedView::load(&g)?;
         let mut result = inspect(&g, &v, &h.id)?;
@@ -538,8 +549,22 @@ pub(crate) fn inspect(
     v: &ResolvedView,
     id: &str,
 ) -> ExecutionResult<Inspection> {
-    let mut i = operations::inspect_store(&v.store, id)?;
-    let (claim, warning) = match ClaimStore::current(g, id) {
+    let graph = ItemGraph::from_store(&v.store);
+    let ownership = ClaimStore::ownership_snapshot(g);
+    inspect_with_snapshot(v, &graph, &ownership, id)
+}
+fn inspect_with_snapshot(
+    v: &ResolvedView,
+    graph: &ItemGraph,
+    ownership: &ExecutionResult<OwnershipSnapshot>,
+    id: &str,
+) -> ExecutionResult<Inspection> {
+    let mut i = operations::inspect_with_graph(&v.store, graph, id)?;
+    let claim = match ownership {
+        Ok(snapshot) => snapshot.current(id),
+        Err(error) => Err(error.clone()),
+    };
+    let (claim, warning) = match claim {
         Ok(c) => (c, None),
         Err(e) => (
             None,
@@ -558,6 +583,22 @@ pub(crate) fn inspect(
         i.context["ownership_warning"] = w;
     }
     Ok(i)
+}
+
+fn completion_error(mut error: ExecutionError, id: &str, path: &Path) -> ExecutionError {
+    let item = json!({"id":id,"path":encode_path(path)});
+    error.details["published_item"] = item.clone();
+    let mut partial =
+        error.details.get("partial").cloned().unwrap_or_else(
+            || json!({"created":[],"updated":[],"deleted":[],"uncertain_paths":[]}),
+        );
+    let mut updated = partial["updated"].as_array().cloned().unwrap_or_default();
+    if !updated.contains(&item) {
+        updated.push(item);
+    }
+    partial["updated"] = json!(updated);
+    error.details["partial"] = partial;
+    error
 }
 
 #[cfg(test)]
@@ -680,5 +721,36 @@ mod tests {
             error.details["partial"]["uncertain_paths"],
             json!(["/store/claims/new-claim.yaml"])
         );
+    }
+
+    #[test]
+    fn completion_partial_preserves_each_last_publication_and_underlying_error() {
+        for publication in ["not_published", "possible", "published"] {
+            let mut cause = ExecutionError::new("io", "ending publication interrupted")
+                .at("/store/claims/ending.yaml");
+            cause.details = json!({"publication":publication,"errno":5,"partial":{
+                "created":[{"id":"ending","path":"/store/claims/ending.yaml"}],
+                "updated":[],"deleted":[],"uncertain_paths":["/store/claims/ending.yaml"]}});
+            let error = completion_error(cause, "item", Path::new("/checkout/.work/items/item.md"));
+            assert_eq!(error.code, "io");
+            assert_eq!(error.details["errno"], 5);
+            assert_eq!(error.path.unwrap(), Path::new("/store/claims/ending.yaml"));
+            assert_eq!(error.details["publication"], publication);
+            assert_eq!(
+                error.details["partial"]["created"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                error.details["partial"]["uncertain_paths"],
+                json!(["/store/claims/ending.yaml"])
+            );
+            assert_eq!(
+                error.details["partial"]["updated"],
+                json!([error.details["published_item"]])
+            );
+        }
     }
 }

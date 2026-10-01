@@ -16,6 +16,22 @@ use crate::core::items::{Completion, ManualState};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClaimStore;
 
+/// One operation's ownership projection; never retained across guard lifetimes.
+pub(crate) struct OwnershipSnapshot {
+    current: BTreeMap<String, Vec<Claim>>,
+}
+impl OwnershipSnapshot {
+    pub(crate) fn current(&self, item_id: &str) -> ExecutionResult<Option<Claim>> {
+        let Some(claims) = self.current.get(item_id) else {
+            return Ok(None);
+        };
+        if claims.len() > 1 {
+            return Err(conflict(item_id, &claims.iter().collect::<Vec<_>>()));
+        }
+        Ok(claims.first().cloned())
+    }
+}
+
 struct Snapshot {
     records: BTreeMap<String, ClaimInspection>,
     sources: Vec<(PathBuf, EntitySource)>,
@@ -343,6 +359,22 @@ fn end_checked(
 }
 
 impl ClaimStore {
+    pub(crate) fn ownership_snapshot(
+        guard: &CoordinationGuard,
+    ) -> ExecutionResult<OwnershipSnapshot> {
+        let mut current = BTreeMap::<String, Vec<Claim>>::new();
+        for record in Snapshot::load(guard)?
+            .records
+            .into_values()
+            .filter(|record| record.current)
+        {
+            current
+                .entry(record.claim.item_id.clone())
+                .or_default()
+                .push(record.claim);
+        }
+        Ok(OwnershipSnapshot { current })
+    }
     pub fn validate_candidate(candidate: &ClaimCandidate) -> ExecutionResult<()> {
         candidate_valid(candidate)
     }

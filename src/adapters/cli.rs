@@ -291,6 +291,26 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
                 _ => return Err(usage("--view resolved|checkout")),
             };
             words.drain(i..i + 2);
+        } else if matches!(
+            words[i].as_str(),
+            "--title"
+                | "--body"
+                | "--completion"
+                | "--priority"
+                | "--parent"
+                | "--label"
+                | "--model"
+                | "--thinking"
+                | "--reason"
+                | "--source"
+                | "--root"
+                | "--param"
+                | "--existing"
+        ) {
+            // Existing option values are opaque text, even when they resemble
+            // a newly added authorization/view option. The command parser
+            // remains responsible for missing or invalid values.
+            i += 2;
         } else {
             i += 1;
         }
