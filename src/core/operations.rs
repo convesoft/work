@@ -1592,20 +1592,36 @@ impl CheckoutWriter {
         let staged =
             self.ops
                 .stage_with_mode(&self.items, &raw, expected.map(source_mode).transpose()?)?;
-        let staged_identity = fingerprint_at(&self.items, &staged)?;
-        self.ops
-            .check_snapshot(&self.lock, &self.items, &self.snapshot)?;
-        rename_in_dir(
-            &self.items,
-            &staged,
-            &path,
-            if expected.is_some() {
-                RenameFlags::EXCHANGE
-            } else {
-                RenameFlags::NOREPLACE
-            },
-        )
-        .map_err(exchange_error)?;
+        let prepare = (|| {
+            #[cfg(test)]
+            super::storage::files::inject("checkout_after_stage", &path)
+                .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+            let identity = fingerprint_at(&self.items, &staged)?;
+            self.ops
+                .check_snapshot(&self.lock, &self.items, &self.snapshot)?;
+            #[cfg(test)]
+            super::storage::files::inject("checkout_before_rename", &path)
+                .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+            rename_in_dir(
+                &self.items,
+                &staged,
+                &path,
+                if expected.is_some() {
+                    RenameFlags::EXCHANGE
+                } else {
+                    RenameFlags::NOREPLACE
+                },
+            )
+            .map_err(exchange_error)?;
+            Ok(identity)
+        })();
+        let staged_identity = match prepare {
+            Ok(identity) => identity,
+            Err(error) => {
+                remove_stage(&self.items, &staged);
+                return Err(error);
+            }
+        };
         (|| {
             if let Some(old) = expected {
                 self.ops.verify_exchange(
@@ -1620,6 +1636,9 @@ impl CheckoutWriter {
             self.ops.sync_items(&self.items)?;
             self.ops.ensure_selected_dir(&self.lock, &self.items)?;
             self.snapshot = self.ops.load_from_dir(&self.items)?;
+            #[cfg(test)]
+            super::storage::files::inject("checkout_after_publish", &path)
+                .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
             Ok(expected.map(|_| staged.clone()))
         })()
         .map_err(|cause| OperationError::Published {
@@ -1650,6 +1669,82 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with(".operation-"))
             .count()
+    }
+
+    #[test]
+    fn checkout_writer_removes_unpublished_stage_on_snapshot_conflict() {
+        let (root, id) = fixture();
+        let mut writer = CheckoutWriter::open(&root).unwrap();
+        let old = writer.snapshot.resolve(&id).unwrap().clone();
+        let mut header = old.header.clone().unwrap();
+        header.title = "proposed".into();
+        let mut external = old.raw.clone();
+        external.extend_from_slice(b" external edit");
+        let path = old.path.clone();
+        let changed = external.clone();
+        let hook = super::super::storage::files::on_next("checkout_after_stage", move || {
+            fs::write(path, changed).unwrap();
+        });
+        let error = writer.publish(&header, b"Body", Some(&old)).unwrap_err();
+        drop(hook);
+        assert!(matches!(error, OperationError::Conflict(_)));
+        assert!(error.published_item().is_none());
+        assert_eq!(fs::read(&old.path).unwrap(), external);
+        assert_eq!(staged_count(&root), 0);
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkout_writer_removes_unpublished_stage_on_actual_rename_failure() {
+        let (root, id) = fixture();
+        let mut writer = CheckoutWriter::open(&root).unwrap();
+        let old = writer.snapshot.resolve(&id).unwrap().clone();
+        let mut header = old.header.clone().unwrap();
+        header.title = "proposed".into();
+        let path = old.path.clone();
+        let hook = super::super::storage::files::on_next("checkout_before_rename", move || {
+            fs::remove_file(path).unwrap();
+        });
+        let error = writer.publish(&header, b"Body", Some(&old)).unwrap_err();
+        drop(hook);
+        assert!(matches!(error, OperationError::Conflict(_)));
+        assert!(error.published_item().is_none());
+        assert!(!old.path.exists());
+        assert_eq!(staged_count(&root), 0);
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkout_writer_retains_published_recovery_on_success_and_failure() {
+        for fail in [false, true] {
+            let (root, id) = fixture();
+            let mut writer = CheckoutWriter::open(&root).unwrap();
+            let old = writer.snapshot.resolve(&id).unwrap().clone();
+            let mut header = old.header.clone().unwrap();
+            header.title = "published".into();
+            let hook =
+                fail.then(|| super::super::storage::files::fail_next("checkout_after_publish"));
+            let result = writer.publish(&header, b"Body", Some(&old));
+            drop(hook);
+            let recovery = if fail {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.published_item(),
+                    Some((id.as_str(), old.path.as_path()))
+                );
+                assert_eq!(error.code(), "io");
+                error.previous_source_path().unwrap().to_owned()
+            } else {
+                result.unwrap().unwrap()
+            };
+            assert_eq!(fs::read(&recovery).unwrap(), old.raw);
+            assert_eq!(fs::read(&old.path).unwrap(), serialize(&header, b"Body"));
+            assert_eq!(staged_count(&root), 1);
+            drop(writer);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

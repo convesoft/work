@@ -205,8 +205,8 @@ impl ExecutionOperations {
         v.recheck()?;
         g.verify()?;
         let recovery = writer.publish(&h, &body, None)?;
-        let v = ResolvedView::load(&g)?;
-        let mut result = inspect(&g, &v, &h.id)?;
+        let mut result = reload_valid_inspection(&g, &h.id)
+            .map_err(|e| published_reload_error(e, &h.id, &path, recovery.as_deref(), true))?;
         result.recovery_path = recovery;
         Ok(result)
     }
@@ -292,7 +292,8 @@ impl ExecutionOperations {
         let mut writer = CheckoutWriter::open(root)?;
         v.recheck()?;
         g.verify()?;
-        let recovery = if before.header.as_ref() == Some(&h) {
+        let changed = before.header.as_ref() != Some(&h);
+        let recovery = if !changed {
             None
         } else {
             writer.publish(&h, body, Some(&before))?
@@ -304,10 +305,21 @@ impl ExecutionOperations {
                 &claim.session,
                 h.close_reason.as_deref().unwrap_or(""),
             )
-            .map_err(|e| completion_error(e, &h.id, &before.path))?;
+            .map_err(|e| {
+                let mut error = completion_error(e, &h.id, &before.path);
+                if let Some(path) = &recovery {
+                    error.details["previous_source_path"] = json!(encode_path(path));
+                }
+                error
+            })?;
         }
-        let v = ResolvedView::load(&g)?;
-        let mut result = inspect(&g, &v, &h.id)?;
+        let mut result = reload_valid_inspection(&g, &h.id).map_err(|e| {
+            if changed {
+                published_reload_error(e, &h.id, &before.path, recovery.as_deref(), false)
+            } else {
+                e
+            }
+        })?;
         result.recovery_path = recovery;
         Ok(result)
     }
@@ -649,18 +661,49 @@ fn inspect_with_snapshot(
     Ok(i)
 }
 
-fn completion_error(mut error: ExecutionError, id: &str, path: &Path) -> ExecutionError {
+fn reload_valid_inspection(g: &CoordinationGuard, id: &str) -> ExecutionResult<Inspection> {
+    let view = ResolvedView::load(g)?;
+    require_valid(&view.store)?;
+    inspect(g, &view, id)
+}
+
+fn published_reload_error(
+    mut error: ExecutionError,
+    id: &str,
+    path: &Path,
+    recovery: Option<&Path>,
+    created: bool,
+) -> ExecutionError {
+    // The item write succeeded; a later read's default publication status
+    // describes that read, rather than the saved item.
+    error.details["publication"] = json!("published");
+    if let Some(path) = recovery {
+        error.details["previous_source_path"] = json!(encode_path(path));
+    }
+    saved_item_error(error, id, path, if created { "created" } else { "updated" })
+}
+
+fn completion_error(error: ExecutionError, id: &str, path: &Path) -> ExecutionError {
+    saved_item_error(error, id, path, "updated")
+}
+
+fn saved_item_error(
+    mut error: ExecutionError,
+    id: &str,
+    path: &Path,
+    bucket: &str,
+) -> ExecutionError {
     let item = json!({"id":id,"path":encode_path(path)});
     error.details["published_item"] = item.clone();
     let mut partial =
         error.details.get("partial").cloned().unwrap_or_else(
             || json!({"created":[],"updated":[],"deleted":[],"uncertain_paths":[]}),
         );
-    let mut updated = partial["updated"].as_array().cloned().unwrap_or_default();
-    if !updated.contains(&item) {
-        updated.push(item);
+    let mut records = partial[bucket].as_array().cloned().unwrap_or_default();
+    if !records.contains(&item) {
+        records.push(item);
     }
-    partial["updated"] = json!(updated);
+    partial[bucket] = json!(records);
     error.details["partial"] = partial;
     error
 }
@@ -697,6 +740,175 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn initialized_create_reports_saved_item_on_every_final_reload_failure() {
+        for failure in ["graph", "load", "inspect"] {
+            let fixture = Fixture::new();
+            let parent = fixture_item(&fixture);
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let root = fixture.root.clone();
+            let workspaces = fixture.ops.project.git_common_dir.join("work/workspaces");
+            let parent_path = root.join(format!(".work/items/{parent}.md"));
+            let hook = super::super::storage::files::on_next("checkout_after_publish", move || {
+                match failure {
+                    "graph" => fs::remove_file(parent_path).unwrap(),
+                    "load" => fs::write(workspaces.join("unexpected"), b"invalid").unwrap(),
+                    "inspect" => {
+                        for entry in fs::read_dir(root.join(".work/items")).unwrap() {
+                            fs::remove_file(entry.unwrap().path()).unwrap();
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            let error = fixture
+                .ops
+                .create(
+                    "child".into(),
+                    b"child body".to_vec(),
+                    MetadataChange {
+                        parent: Some(Some(parent)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            drop(hook);
+            assert_eq!(
+                error.code,
+                match failure {
+                    "graph" => "invalid_source",
+                    "load" => "invalid_format",
+                    _ => "not_found",
+                }
+            );
+            assert_eq!(error.details["publication"], "published");
+            let saved = &error.details["published_item"];
+            let id = saved["id"].as_str().unwrap();
+            let path = fixture.root.join(format!(".work/items/{id}.md"));
+            assert_eq!(saved["path"], encode_path(&path));
+            assert_eq!(error.details["partial"]["created"], json!([saved]));
+            if failure != "inspect" {
+                assert_eq!(
+                    super::super::items::ItemStore::load_from_root(&fixture.root)
+                        .unwrap()
+                        .resolve(id)
+                        .unwrap()
+                        .header
+                        .as_ref()
+                        .unwrap()
+                        .title,
+                    "child"
+                );
+            }
+            if failure == "load" {
+                assert_eq!(
+                    error.path,
+                    Some(
+                        fixture
+                            .ops
+                            .project
+                            .git_common_dir
+                            .join("work/workspaces/unexpected")
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn initialized_mutation_reports_saved_item_and_recovery_on_every_final_reload_failure() {
+        for failure in ["graph", "load", "inspect"] {
+            let fixture = Fixture::new();
+            let parent = fixture_item(&fixture);
+            let child = fixture
+                .ops
+                .create(
+                    "child".into(),
+                    b"child body".to_vec(),
+                    MetadataChange {
+                        parent: Some(Some(parent.clone())),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let id = child.file.header.as_ref().unwrap().id.clone();
+            let path = child.file.path.clone();
+            let original = fs::read(&path).unwrap();
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let parent_path = fixture.root.join(format!(".work/items/{parent}.md"));
+            let child_path = path.clone();
+            let workspaces = fixture.ops.project.git_common_dir.join("work/workspaces");
+            let hook = super::super::storage::files::on_next("checkout_after_publish", move || {
+                match failure {
+                    "graph" => fs::remove_file(parent_path).unwrap(),
+                    "load" => fs::write(workspaces.join("unexpected"), b"invalid").unwrap(),
+                    "inspect" => fs::remove_file(child_path).unwrap(),
+                    _ => unreachable!(),
+                }
+            });
+            let error = fixture
+                .ops
+                .update(
+                    &id,
+                    MetadataChange {
+                        title: Some("saved change".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            drop(hook);
+            assert_eq!(
+                error.code,
+                match failure {
+                    "graph" => "invalid_source",
+                    "load" => "invalid_format",
+                    _ => "not_found",
+                }
+            );
+            assert_eq!(error.details["publication"], "published");
+            assert_eq!(
+                error.details["published_item"],
+                json!({"id":id,"path":encode_path(&path)})
+            );
+            assert_eq!(
+                error.details["partial"]["updated"],
+                json!([error.details["published_item"]])
+            );
+            let recovery = error.details["previous_source_path"].as_str().unwrap();
+            assert_eq!(fs::read(recovery).unwrap(), original);
+            if failure != "inspect" {
+                assert_eq!(
+                    super::super::items::ItemStore::load_from_root(&fixture.root)
+                        .unwrap()
+                        .resolve(&id)
+                        .unwrap()
+                        .header
+                        .as_ref()
+                        .unwrap()
+                        .title,
+                    "saved change"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn published_reload_error_preserves_underlying_diagnostics_and_errno() {
+        let mut cause = ExecutionError::new("io", "reload interrupted").at("/store/workspaces");
+        cause.details = json!({"publication":"not_published","errno":5,"diagnostics":["original"]});
+        let error = published_reload_error(cause, "item", Path::new("/items/item.md"), None, true);
+        assert_eq!(error.code, "io");
+        assert_eq!(error.message, "reload interrupted");
+        assert_eq!(error.path.as_deref(), Some(Path::new("/store/workspaces")));
+        assert_eq!(error.details["errno"], 5);
+        assert_eq!(error.details["diagnostics"], json!(["original"]));
+        assert_eq!(error.details["publication"], "published");
     }
 
     #[test]
@@ -826,6 +1038,7 @@ mod tests {
             .create("item".into(), Vec::new(), MetadataChange::default())
             .unwrap();
         let id = item.file.header.as_ref().unwrap().id.clone();
+        let original = item.file.raw.clone();
         Storage::new(ops.project.clone()).initialize().unwrap();
         let session = SessionIdentity {
             namespace: "provider".into(),
@@ -848,6 +1061,8 @@ mod tests {
         assert_eq!(error.code, "io");
         assert_eq!(error.details["errno"], 5);
         assert_eq!(error.details["publication"], "possible");
+        let recovery = error.details["previous_source_path"].as_str().unwrap();
+        assert_eq!(fs::read(recovery).unwrap(), original);
         assert_eq!(error.path.as_deref(), Some(ending.as_path()));
         assert_eq!(
             error.details["partial"]["uncertain_paths"],
