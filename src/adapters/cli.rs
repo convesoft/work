@@ -841,10 +841,25 @@ pub(super) fn resolve_view(ops: &ExecutionOperations, input: &str) -> Result<Str
             "invalid_argument",
             "item ID must be lowercase hexadecimal, optionally prefixed with w-",
         )),
-        Err(LookupError::NotFound) => Err(CliError::new(
-            "not_found",
-            format!("item {input} was not found"),
-        )),
+        Err(LookupError::NotFound) => {
+            // An unavailable bound source has no parsed header. Its resolved
+            // diagnostic still owns this full ID; a healthy checkout copy
+            // must not replace that evidence.
+            let diagnostics: Vec<_> = store
+                .files
+                .iter()
+                .filter(|file| file.path.file_stem().and_then(|s| s.to_str()) == Some(candidate))
+                .flat_map(|file| file.diagnostics.clone())
+                .collect();
+            if diagnostics.is_empty() {
+                Err(CliError::new(
+                    "not_found",
+                    format!("item {input} was not found"),
+                ))
+            } else {
+                Err(invalid_source(diagnostics))
+            }
+        }
         Err(LookupError::Ambiguous(ids)) => Err(CliError::new(
             "ambiguous_id",
             format!("item {input} matches {}", ids.join(", ")),

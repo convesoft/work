@@ -350,12 +350,37 @@ fn end_checked(
     };
     snapshot.recheck(guard)?;
     recheck()?;
-    guard.create(&ending_path(&claim.id), &yaml_bytes(&ending.to_json()))?;
+    guard
+        .create(&ending_path(&claim.id), &yaml_bytes(&ending.to_json()))
+        .map_err(|error| ending_error(guard, &ending, error))?;
     Ok(ClaimEnded {
         claim: claim.clone(),
         ending,
         changed: true,
     })
+}
+
+fn ending_error(
+    guard: &CoordinationGuard,
+    ending: &ClaimEnding,
+    mut error: ExecutionError,
+) -> ExecutionError {
+    let path = crate::core::coordination::encode_path(
+        &guard.root_path().join(ending_path(&ending.claim_id)),
+    );
+    let created = if error.details["publication"] == "published" {
+        vec![json!({"id":ending.claim_id,"path":path})]
+    } else {
+        Vec::new()
+    };
+    let uncertain = if error.details["publication"] == "possible" {
+        vec![path]
+    } else {
+        Vec::new()
+    };
+    error.details["partial"] =
+        json!({"created":created,"updated":[],"deleted":[],"uncertain_paths":uncertain});
+    error
 }
 
 impl ClaimStore {
@@ -929,5 +954,106 @@ mod tests {
                 &guard.root_path().join(acquisition_path(&replacement))
             )])
         );
+    }
+
+    #[test]
+    fn ending_sync_failure_retains_uncertainty_for_release_and_reassignment() {
+        for reassign in [false, true] {
+            let fixture = Fixture::new();
+            let guard = fixture.guard();
+            let claim = claim(&guard);
+            guard
+                .create(&acquisition_path(&claim.id), &yaml_bytes(&claim.to_json()))
+                .unwrap();
+            let failure = crate::core::storage::files::fail_next("publication_sync");
+            let error = if reassign {
+                let candidate = ClaimCandidate {
+                    header: crate::core::operations::default_header(
+                        claim.item_id.clone(),
+                        "item".into(),
+                    ),
+                    evaluation: crate::core::graph::Evaluation {
+                        id: claim.item_id.clone(),
+                        effective_done: false,
+                        executable: true,
+                        blockers: Vec::new(),
+                    },
+                    workspace_id: None,
+                    run_id: None,
+                    session_record_id: None,
+                };
+                ClaimStore::reassign(
+                    &guard,
+                    &claim.id,
+                    &candidate,
+                    "controller",
+                    &claim.session,
+                    "stopped",
+                    true,
+                )
+                .unwrap_err()
+            } else {
+                ClaimStore::release(&guard, &claim.id, &claim.session, "").unwrap_err()
+            };
+            drop(failure);
+            let ending = guard.root_path().join(ending_path(&claim.id));
+            assert!(ending.exists());
+            assert_eq!(error.code, "io");
+            assert_eq!(error.details["errno"], 5);
+            assert_eq!(error.details["publication"], "possible");
+            assert_eq!(error.path.as_deref(), Some(ending.as_path()));
+            assert_eq!(
+                error.details["partial"]["uncertain_paths"],
+                json!([crate::core::coordination::encode_path(&ending)])
+            );
+            assert!(
+                error.details["partial"]["created"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!ClaimStore::inspect(&guard, &claim.id).unwrap().current);
+            assert_eq!(ClaimStore::list(&guard, None, false).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn known_published_ending_is_reported_once_with_underlying_provenance() {
+        let fixture = Fixture::new();
+        let guard = fixture.guard();
+        let claim = claim(&guard);
+        let ending = ClaimEnding {
+            store_id: claim.store_id.clone(),
+            recovery_generation: claim.recovery_generation.clone(),
+            claim_id: claim.id.clone(),
+            item_id: claim.item_id.clone(),
+            ended_at: now_timestamp(),
+            actor: "worker".into(),
+            reason: "".into(),
+            outcome: ClaimOutcome::Released,
+            recovery: false,
+        };
+        let path = guard.root_path().join(ending_path(&claim.id));
+        let mut cause =
+            ExecutionError::new("io", "verification failed after publication").at(&path);
+        cause.details = json!({"publication":"published","errno":5});
+        let error = ending_error(&guard, &ending, cause);
+        assert_eq!(error.path.as_deref(), Some(path.as_path()));
+        assert_eq!(error.details["errno"], 5);
+        assert_eq!(error.details["publication"], "published");
+        assert_eq!(
+            error.details["partial"]["created"],
+            json!([{"id":claim.id,"path":crate::core::coordination::encode_path(&path)}])
+        );
+        let replacement = new_id().unwrap();
+        let error = reassignment_error(&guard, &claim.id, &replacement, false, error);
+        assert_eq!(
+            error.details["partial"]["created"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(error.details["partial"]["created"][0]["id"], claim.id);
     }
 }

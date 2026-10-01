@@ -309,7 +309,21 @@ fn checkout_view_survives_missing_bound_source_and_malformed_workspace() {
     f.init();
     acquire(&linked, &id);
     fs::remove_file(linked.join(format!(".work/items/{id}.md"))).unwrap();
-    assert!(cli(&f.root, &["item", "inspect", &id])["error"].is_object());
+    let missing = cli(&f.root, &["item", "inspect", &id]);
+    assert_eq!(missing["error"]["code"], "invalid_source");
+    let source = linked.join(format!(".work/items/{id}.md"));
+    assert!(
+        missing["error"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["path"] == source.to_str().unwrap()),
+        "{missing}"
+    );
+    assert_eq!(
+        mcp(&f.root, "item_inspect", json!({"id":id}))["error"],
+        missing["error"]
+    );
     for damaged in [false, true] {
         if damaged {
             let dir = f.root.join(".git/work/workspaces");

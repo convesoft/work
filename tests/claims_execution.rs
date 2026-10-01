@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -568,5 +569,119 @@ fn close_permission_error_retains_last_ending_publication_and_saved_item_partial
     assert_eq!(
         ok(f.cli(&["claim", "inspect", claim_id]))["ending"]["outcome"],
         "completed"
+    );
+}
+
+#[test]
+#[ignore]
+fn coordination_lock_process_helper() {
+    let Some(path) = std::env::var_os("WORK_CLAIMS_LOCK_CHECKOUT") else {
+        return;
+    };
+    let project = discover(Some(Path::new(&path))).unwrap();
+    let _guard = CoordinationGuard::acquire(&project, true).unwrap();
+    fs::write(
+        PathBuf::from(std::env::var_os("WORK_CLAIMS_LOCK_READY").unwrap()),
+        b"ready",
+    )
+    .unwrap();
+    let release = PathBuf::from(std::env::var_os("WORK_CLAIMS_LOCK_RELEASE").unwrap());
+    wait_until(|| release.exists());
+}
+fn mcp(path: &Path, name: &str, arguments: Value) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_work"))
+        .arg("mcp")
+        .current_dir(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin,"{}",serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})).unwrap();
+    writeln!(stdin,"{}",serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":arguments}})).unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_str(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    result["result"]["structuredContent"].clone()
+}
+#[test]
+fn independent_lock_holder_preserves_cli_mcp_mutation_contention_and_read_warnings() {
+    let f = Fixture::new();
+    let id = f.item();
+    f.init();
+    let before = fs::read(f.path.join(format!(".work/items/{id}.md"))).unwrap();
+    let ready = f.path.join("lock-ready");
+    let release = f.path.join("lock-release");
+    let holder = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "coordination_lock_process_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("WORK_CLAIMS_LOCK_CHECKOUT", &f.path)
+        .env("WORK_CLAIMS_LOCK_READY", &ready)
+        .env("WORK_CLAIMS_LOCK_RELEASE", &release)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until(|| ready.exists());
+    let cli_output = Command::new(env!("CARGO_BIN_EXE_work"))
+        .arg("--json")
+        .arg("--worktree")
+        .arg(&f.path)
+        .args(["item", "update", &id, "--title", "blocked by lock"])
+        .output()
+        .unwrap();
+    let cli_error: Value = serde_json::from_slice(&cli_output.stdout).unwrap();
+    let mcp_error = mcp(
+        &f.path,
+        "item_update",
+        serde_json::json!({"id":id,"title":"blocked by lock"}),
+    );
+    let claim_error = f.claim(&id);
+    let read = f.cli(&["item", "list"]);
+    fs::write(release, b"release").unwrap();
+    let holder_output = holder.wait_with_output().unwrap();
+    assert!(
+        holder_output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&holder_output.stdout),
+        String::from_utf8_lossy(&holder_output.stderr)
+    );
+    assert_eq!(cli_output.status.code(), Some(5), "{cli_error}");
+    let path = f.root().join("coordination.lock");
+    for error in [&cli_error["error"], &mcp_error["error"]] {
+        assert_eq!(error["code"], "storage_busy", "{error}");
+        assert_eq!(error["path"], path.to_str().unwrap());
+        assert_eq!(error["diagnostics"][0]["code"], "storage_busy");
+        assert_eq!(error["diagnostics"][0]["path"], error["path"]);
+        assert!(!error["message"].as_str().unwrap().contains("recovery"));
+    }
+    assert_eq!(claim_error["error"]["code"], cli_error["error"]["code"]);
+    assert_eq!(claim_error["error"]["path"], cli_error["error"]["path"]);
+    assert_eq!(read["ok"], true);
+    assert_eq!(read["result"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(read["result"]["storage_warning"]["code"], "storage_busy");
+    assert_eq!(
+        fs::read(f.path.join(format!(".work/items/{id}.md"))).unwrap(),
+        before
+    );
+    assert_eq!(
+        ok(f.cli(&["item", "update", &id, "--title", "after lock release"]))["item"]["title"],
+        "after lock release"
     );
 }

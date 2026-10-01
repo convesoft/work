@@ -44,6 +44,16 @@ impl ExecutionOperations {
             {
                 return Ok(None);
             }
+            if let Some(warning) = &s.storage_warning
+                && warning.code == super::storage::StorageErrorCode::StorageBusy
+            {
+                let mut error = ExecutionError::new(warning.code.code(), warning.message.clone());
+                error.path = warning.path.clone();
+                error.details = json!({"publication":"not_published","diagnostics":s.diagnostics.iter()
+                    .map(|d|json!({"code":d.code.code(),"message":d.message,"path":d.path.as_deref().map(encode_path),"line":d.line}))
+                    .collect::<Vec<_>>()});
+                return Err(error);
+            }
             return Err(ExecutionError::new(
                 "recovery_required",
                 "coordination unavailable; storage requires explicit recovery",
@@ -752,5 +762,52 @@ mod tests {
                 json!([error.details["published_item"]])
             );
         }
+    }
+
+    #[test]
+    fn completion_sync_failure_reports_uncertain_ending_and_successfully_saved_item() {
+        let mut fixture = Fixture::new();
+        let ops = &mut fixture.ops;
+        let item = ops
+            .create("item".into(), Vec::new(), MetadataChange::default())
+            .unwrap();
+        let id = item.file.header.as_ref().unwrap().id.clone();
+        Storage::new(ops.project.clone()).initialize().unwrap();
+        let session = SessionIdentity {
+            namespace: "provider".into(),
+            id: "session".into(),
+        };
+        let (claim, _) = ops.acquire(&id, "worker", &session).unwrap();
+        let claim_id = claim["id"].as_str().unwrap().to_owned();
+        ops.authorization.push(ClaimAuthorization {
+            claim_id: claim_id.clone(),
+            session,
+        });
+        let failure = super::super::storage::files::fail_next("publication_sync");
+        let error = ops.close(&id, None).unwrap_err();
+        drop(failure);
+        let ending = ops
+            .project
+            .git_common_dir
+            .join(format!("work/claims/{claim_id}.end.yaml"));
+        assert!(ending.exists());
+        assert_eq!(error.code, "io");
+        assert_eq!(error.details["errno"], 5);
+        assert_eq!(error.details["publication"], "possible");
+        assert_eq!(error.path.as_deref(), Some(ending.as_path()));
+        assert_eq!(
+            error.details["partial"]["uncertain_paths"],
+            json!([encode_path(&ending)])
+        );
+        assert_eq!(
+            error.details["partial"]["updated"],
+            json!([error.details["published_item"]])
+        );
+        assert_eq!(
+            ops.inspect(&id).unwrap().file.header.unwrap().state,
+            Some(ManualState::Done)
+        );
+        let guard = CoordinationGuard::acquire(&ops.project, false).unwrap();
+        assert!(!ClaimStore::inspect(&guard, &claim_id).unwrap().current);
     }
 }
