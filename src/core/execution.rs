@@ -154,7 +154,9 @@ impl ExecutionOperations {
         if !graph.is_valid() {
             return Err(OperationError::InvalidSource(graph.diagnostics().to_vec()).into());
         }
-        let ownership = Ok(ClaimStore::ownership_snapshot(&g)?);
+        let snapshot = ClaimStore::ownership_snapshot(&g)?;
+        snapshot.exclusion()?;
+        let ownership = Ok(snapshot);
         let mut result = Vec::new();
         for file in &v.store.files {
             if let Some(h) = &file.header {

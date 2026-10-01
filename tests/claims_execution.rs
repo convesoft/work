@@ -910,3 +910,47 @@ fn invalid_candidate_inputs_keep_argument_errors_before_and_after_storage_init()
         assert_eq!(ItemStore::load(&f.project).unwrap().files.len(), 1);
     }
 }
+
+#[test]
+fn readiness_reports_global_ownership_conflicts_with_or_without_other_candidates() {
+    for unrelated in [false, true] {
+        let f = Fixture::new();
+        let item = f.item();
+        let other = unrelated.then(|| f.item());
+        f.init();
+        let first = ok(f.claim(&item))["claim"].clone();
+        let mut second = first.clone();
+        let second_id = work::core::coordination::new_id().unwrap();
+        second["id"] = serde_json::json!(second_id);
+        let path = f.root().join(format!("claims/{second_id}.yaml"));
+        let raw = serde_json::to_vec(&second).unwrap();
+        fs::write(&path, &raw).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_work"))
+            .args(["--json", "--worktree"])
+            .arg(&f.path)
+            .args(["item", "ready"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(5));
+        let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let protocol = mcp(&f.path, "item_ready", serde_json::json!({}));
+        for result in [&cli, &protocol] {
+            assert_eq!(result["error"]["code"], "claim_conflict", "{result}");
+            let ids = result["error"]["claim_ids"].as_array().unwrap();
+            assert_eq!(ids.len(), 2);
+            assert!(ids.contains(&first["id"]));
+            assert!(ids.contains(&second["id"]));
+        }
+        if let Some(other) = other {
+            assert_eq!(f.claim(&other)["error"]["code"], "claim_conflict");
+        }
+        assert_eq!(fs::read(path).unwrap(), raw);
+        assert_eq!(
+            ok(f.cli(&["claim", "list", "--current"]))["claims"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+}

@@ -21,6 +21,12 @@ pub(crate) struct OwnershipSnapshot {
     current: BTreeMap<String, Vec<Claim>>,
 }
 impl OwnershipSnapshot {
+    pub(crate) fn exclusion(&self) -> ExecutionResult<()> {
+        for item_id in self.current.keys() {
+            self.current(item_id)?;
+        }
+        Ok(())
+    }
     pub(crate) fn current(&self, item_id: &str) -> ExecutionResult<Option<Claim>> {
         let Some(claims) = self.current.get(item_id) else {
             return Ok(None);
