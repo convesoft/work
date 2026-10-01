@@ -300,3 +300,42 @@ fn cli_and_mcp_compete_for_one_owner_then_release_without_item_source() {
         false
     );
 }
+
+#[test]
+fn checkout_view_survives_missing_bound_source_and_malformed_workspace() {
+    let f = Fixture::new();
+    let id = f.item();
+    let linked = f.linked();
+    f.init();
+    acquire(&linked, &id);
+    fs::remove_file(linked.join(format!(".work/items/{id}.md"))).unwrap();
+    assert!(cli(&f.root, &["item", "inspect", &id])["error"].is_object());
+    for damaged in [false, true] {
+        if damaged {
+            let dir = f.root.join(".git/work/workspaces");
+            let p = fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.extension().is_some_and(|e| e == "yaml"))
+                .unwrap();
+            fs::write(p, "broken: [").unwrap();
+        }
+        let read = ok(cli(
+            &f.root,
+            &["item", "inspect", &id, "--view", "checkout"],
+        ));
+        assert_eq!(read["item"]["body"], "original body");
+        assert_eq!(
+            mcp(&f.root, "item_inspect", json!({"id":id,"view":"checkout"}))["item"],
+            read["item"]
+        );
+        for (verb, tool) in [("list", "item_list"), ("ready", "item_ready")] {
+            let values = ok(cli(&f.root, &["item", verb, "--view", "checkout"]));
+            assert_eq!(values["items"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                mcp(&f.root, tool, json!({"view":"checkout"}))["items"],
+                values["items"]
+            );
+        }
+    }
+}

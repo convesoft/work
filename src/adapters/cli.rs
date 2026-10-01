@@ -464,8 +464,8 @@ fn item_command(
     args: &[String],
 ) -> Result<Value, CliError> {
     match verb {
-        "list" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.list()?)?})),
-        "ready" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.ready()?)?})),
+        "list" if args.is_empty() => Ok(json!({"items":items_view(ops,&ops.list()?)?})),
+        "ready" if args.is_empty() => Ok(json!({"items":items_view(ops,&ops.ready()?)?})),
         "diagnose" if args.is_empty() => {
             let store = ops.view()?;
             let graph = ItemGraph::from_store(&store);
@@ -475,7 +475,7 @@ fn item_command(
         }
         "inspect" if args.len() == 1 => {
             let candidate = args[0].strip_prefix("w-").unwrap_or(&args[0]);
-            let id = match resolve(project, &args[0]) {
+            let id = match resolve_view(ops, &args[0]) {
                 Ok(id) => id,
                 Err(error) if error.code == "not_found" && candidate.len() == 32 => {
                     if let Ok(raw) = ops.inspect_raw(candidate) {
@@ -485,7 +485,7 @@ fn item_command(
                 }
                 Err(error) => return Err(error),
             };
-            Ok(json!({"item":one_item_value(project,&ops.inspect(&id)?)?}))
+            Ok(json!({"item":one_item_view(ops,&ops.inspect(&id)?)?}))
         }
         "inspect" if args.len() == 2 && args[1] == "--raw" => {
             let raw = ops.inspect_raw(&args[0])?;
@@ -804,6 +804,9 @@ fn valid_line(value: &str) -> bool {
 }
 
 pub(super) fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
+    resolve_view(&ExecutionOperations::new(project.clone()), input)
+}
+pub(super) fn resolve_view(ops: &ExecutionOperations, input: &str) -> Result<String, CliError> {
     let candidate = input.strip_prefix("w-").unwrap_or(input);
     if candidate.len() == 32 && !valid_full_id(candidate) {
         return Err(CliError::new(
@@ -811,7 +814,7 @@ pub(super) fn resolve(project: &Project, input: &str) -> Result<String, CliError
             "full item ID must be a lowercase UUIDv4",
         ));
     }
-    let store = ExecutionOperations::new(project.clone()).view()?;
+    let store = ops.view()?;
     match store.resolve(input) {
         Ok(file) => Ok(file.header.as_ref().unwrap().id.clone()),
         Err(LookupError::InvalidInput) => Err(CliError::new(
@@ -841,7 +844,13 @@ fn valid_full_id(value: &str) -> bool {
 }
 
 pub(super) fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
-    let store = ExecutionOperations::new(project.clone()).view()?;
+    one_item_view(&ExecutionOperations::new(project.clone()), item)
+}
+pub(super) fn one_item_view(
+    ops: &ExecutionOperations,
+    item: &Inspection,
+) -> Result<Value, CliError> {
+    let store = ops.view()?;
     item_value(&display_prefixes(&store), item)
 }
 
@@ -855,8 +864,11 @@ pub(super) fn mutation_item_value(project: &Project, item: &Inspection) -> Resul
         .map_err(|error| with_published_item(error, &header.id, &item.file.path))
 }
 
-pub(super) fn items_value(project: &Project, items: &[Inspection]) -> Result<Vec<Value>, CliError> {
-    let store = ExecutionOperations::new(project.clone()).view()?;
+pub(super) fn items_view(
+    ops: &ExecutionOperations,
+    items: &[Inspection],
+) -> Result<Vec<Value>, CliError> {
+    let store = ops.view()?;
     let prefixes = display_prefixes(&store);
     items
         .iter()

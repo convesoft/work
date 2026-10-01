@@ -185,8 +185,10 @@ impl ContextStore {
         }
         let id = new_id()?;
         let value = json!({"format_version":1,"store_id":g.metadata.store_id,"recovery_generation":g.metadata.recovery_generation,"id":id,"path":encode_path(&p.worktree_root),"state":"open","created_at":now_timestamp()});
-        g.create(
+        create_context(
+            g,
             &Path::new("workspaces").join(format!("{id}.yaml")),
+            &id,
             &yaml_bytes(&value),
         )?;
         Ok(Workspace {
@@ -212,7 +214,7 @@ impl ContextStore {
         let path = Path::new("workspaces/items").join(format!("{id}.yaml"));
         let v = json!({"format_version":1,"store_id":g.metadata.store_id,"recovery_generation":g.metadata.recovery_generation,"item_id":id,"workspace_id":workspace.id});
         match g.optional(&path)? {
-            None => g.create(&path, &yaml_bytes(&v)),
+            None => create_context(g, &path, id, &yaml_bytes(&v)),
             Some(old) => {
                 if parse_yaml(&old.raw)? == v {
                     Ok(())
@@ -225,6 +227,26 @@ impl ContextStore {
             }
         }
     }
+}
+// Report the bounded setup write when publication itself fails. Successful
+// setup entities are accumulated by the coordinator; no receipt is persisted.
+fn create_context(g: &CoordinationGuard, path: &Path, id: &str, raw: &[u8]) -> ExecutionResult<()> {
+    g.create(path, raw).map_err(|mut error| {
+        let path = encode_path(&g.root_path().join(path));
+        let created = if error.details["publication"] == "published" {
+            vec![json!({"id":id,"path":path})]
+        } else {
+            Vec::new()
+        };
+        let uncertain = if error.details["publication"] == "possible" {
+            vec![path]
+        } else {
+            Vec::new()
+        };
+        error.details["partial"] =
+            json!({"created":created,"updated":[],"deleted":[],"uncertain_paths":uncertain});
+        error
+    })
 }
 pub struct ResolvedView {
     pub project: Project,

@@ -74,6 +74,7 @@ impl ExecutionOperations {
                 v.store
                     .files
                     .iter()
+                    .filter(|f| f.is_valid())
                     .filter_map(|f| f.header.as_ref())
                     .map(|h| inspect(&g, &v, &h.id))
                     .collect()
@@ -140,6 +141,7 @@ impl ExecutionOperations {
         Ok(result)
     }
     pub fn update(&self, id: &str, change: MetadataChange) -> ExecutionResult<Inspection> {
+        let fallback = change.clone();
         self.mutate(
             id,
             false,
@@ -147,7 +149,7 @@ impl ExecutionOperations {
                 *h = operations::apply_change(h.clone(), change);
                 Ok(())
             },
-            |ops| ops.update(id, MetadataChange::default()),
+            |ops| ops.update(id, fallback),
         )
     }
     pub fn close(&self, id: &str, reason: Option<String>) -> ExecutionResult<Inspection> {
@@ -195,30 +197,9 @@ impl ExecutionOperations {
         fallback: impl FnOnce(&DurableOperations) -> Result<Inspection, OperationError>,
     ) -> ExecutionResult<Inspection> {
         let Some(g) = self.guard(true)? else {
-            // Apply the same requested edit through the original facade in fresh stores.
-            let before = self.physical().inspect(id)?;
-            let mut h = before.file.header.clone().unwrap();
-            edit(&mut h)?;
-            if complete {
-                return Ok(fallback(&self.physical())?);
-            }
-            let old = before.file.header.as_ref().unwrap();
-            if old.state != h.state {
-                return Ok(self.physical().reopen(id)?);
-            }
-            let change = MetadataChange {
-                title: Some(h.title),
-                completion: Some(h.completion),
-                priority: Some(h.priority),
-                parent: Some(h.parent),
-                depends_on: Some(h.depends_on),
-                related: Some(h.related),
-                discovered_from: Some(h.discovered_from),
-                labels: Some(h.labels),
-                model: Some(h.model),
-                thinking: Some(h.thinking),
-            };
-            return Ok(self.physical().update(id, change)?);
+            // The original operation loads and applies only its requested edit
+            // under the checkout lock, preserving concurrent unrelated changes.
+            return Ok(fallback(&self.physical())?);
         };
         let v = ResolvedView::load(&g)?;
         require_valid(&v.store)?;
@@ -374,13 +355,21 @@ impl ExecutionOperations {
     ) -> ExecutionResult<(Value, Inspection)> {
         let g = CoordinationGuard::acquire(&self.project, true)?;
         let v = ResolvedView::load(&g)?;
-        let candidate = candidate(&g, &v, input)?;
-        let result = ClaimStore::acquire(&g, &candidate, actor, session)?;
-        let current = ResolvedView::load(&g)?;
-        Ok((
-            result.claim.to_json(),
-            inspect(&g, &current, &candidate.header.id)?,
-        ))
+        let mut candidate = candidate(&g, &v, input)?;
+        ClaimStore::validate_acquire(&g, &candidate, actor, session)?;
+        let mut created = Vec::new();
+        let result = (|| {
+            prepare_claim_context(&g, &v, &mut candidate, &mut created)?;
+            let result =
+                ClaimStore::acquire_checked(&g, &candidate, actor, session, || v.recheck())?;
+            created.push(json!({"id":result.claim.id,"path":encode_path(&g.root_path().join(format!("claims/{}.yaml",result.claim.id)))}));
+            let current = ResolvedView::load(&g)?;
+            Ok((
+                result.claim.to_json(),
+                inspect(&g, &current, &candidate.header.id)?,
+            ))
+        })();
+        result.map_err(|error| with_setup_progress(error, &created))
     }
     pub fn reassign(
         &self,
@@ -393,12 +382,38 @@ impl ExecutionOperations {
         let g = CoordinationGuard::acquire(&self.project, true)?;
         let old = ClaimStore::inspect(&g, id)?;
         let v = ResolvedView::load(&g)?;
-        let candidate = candidate(&g, &v, &old.claim.item_id)?;
-        let result = ClaimStore::reassign(&g, id, &candidate, actor, session, reason, stopped)?;
-        Ok((
-            result.claim.to_json(),
-            inspect(&g, &v, &candidate.header.id)?,
-        ))
+        let mut candidate = candidate(&g, &v, &old.claim.item_id)?;
+        ClaimStore::validate_reassign(&g, id, &candidate, actor, session, reason, stopped)?;
+        let mut created = Vec::new();
+        let result = (|| {
+            prepare_claim_context(&g, &v, &mut candidate, &mut created)?;
+            let result = ClaimStore::reassign_checked(
+                &g,
+                id,
+                &candidate,
+                actor,
+                session,
+                reason,
+                stopped,
+                || v.recheck(),
+            )?;
+            for (id, name) in [
+                (
+                    &result.previous_claim_id,
+                    format!("{}.end.yaml", result.previous_claim_id),
+                ),
+                (&result.claim.id, format!("{}.yaml", result.claim.id)),
+            ] {
+                created.push(
+                    json!({"id":id,"path":encode_path(&g.root_path().join("claims").join(name))}),
+                );
+            }
+            Ok((
+                result.claim.to_json(),
+                inspect(&g, &v, &candidate.header.id)?,
+            ))
+        })();
+        result.map_err(|error| with_setup_progress(error, &created))
     }
 }
 pub(crate) fn require_valid(store: &ItemStore) -> ExecutionResult<()> {
@@ -425,7 +440,12 @@ pub(crate) fn validate_candidate(
         path.to_owned(),
         operations::serialize(h, body),
     ));
-    require_valid(&ItemStore::from_candidate_files(files))
+    let graph = ItemGraph::from_store(&ItemStore::from_candidate_files(files));
+    if graph.is_valid() {
+        Ok(())
+    } else {
+        Err(OperationError::InvalidCandidate(graph.diagnostics().to_vec()).into())
+    }
 }
 fn candidate(
     g: &CoordinationGuard,
@@ -444,23 +464,40 @@ fn candidate(
     let evaluation = ItemGraph::from_store(&v.store)
         .evaluate(&h.id)
         .map_err(|e| ExecutionError::new("not_ready", format!("{e:?}")))?;
-    if !evaluation.executable {
-        return Err(ExecutionError::new(
-            "not_ready",
-            "item has unresolved lifecycle prerequisites",
-        ));
-    }
+    let candidate = ClaimCandidate {
+        header: h,
+        evaluation,
+        workspace_id: None,
+        run_id: None,
+        session_record_id: None,
+    };
+    ClaimStore::validate_candidate(&candidate)?;
+    g.verify()?;
+    Ok(candidate)
+}
+
+fn prepare_claim_context(
+    g: &CoordinationGuard,
+    v: &ResolvedView,
+    candidate: &mut ClaimCandidate,
+    created: &mut Vec<Value>,
+) -> ExecutionResult<()> {
+    let id = &candidate.header.id;
     let root = v
         .sources
-        .get(&h.id)
+        .get(id)
         .ok_or_else(|| ExecutionError::new("source_unavailable", "material source is missing"))?;
     v.recheck()?;
-    let workspace = if let Some(b) = v.context.bindings.get(&h.id) {
-        v.context.workspaces[&b.workspace_id].clone()
+    let workspace = if let Some(binding) = v.context.bindings.get(id) {
+        v.context.workspaces[&binding.workspace_id].clone()
     } else {
-        let w = ContextStore::register(g, root)?;
-        ContextStore::bind(g, &h.id, &w)?;
-        w
+        let workspace = ContextStore::register(g, root)?;
+        if !v.context.workspaces.contains_key(&workspace.id) {
+            created.push(json!({"id":workspace.id,"path":encode_path(&g.root_path().join(format!("workspaces/{}.yaml",workspace.id)))}));
+        }
+        ContextStore::bind(g, id, &workspace)?;
+        created.push(json!({"id":id,"path":encode_path(&g.root_path().join(format!("workspaces/items/{id}.yaml")))}));
+        workspace
     };
     if workspace.state != "open" {
         return Err(ExecutionError::new(
@@ -468,15 +505,33 @@ fn candidate(
             "source workspace is closing",
         ));
     }
-    v.recheck()?;
-    g.verify()?;
-    Ok(ClaimCandidate {
-        header: h,
-        evaluation,
-        workspace_id: Some(workspace.id),
-        run_id: None,
-        session_record_id: None,
-    })
+    candidate.workspace_id = Some(workspace.id);
+    Ok(())
+}
+fn with_setup_progress(mut error: ExecutionError, created: &[Value]) -> ExecutionError {
+    if !error.details.is_object() {
+        error.details = json!({"cause_details":error.details});
+    }
+    let mut partial =
+        error.details.get("partial").cloned().unwrap_or_else(
+            || json!({"created":[],"updated":[],"deleted":[],"uncertain_paths":[]}),
+        );
+    let mut all_created = created.to_vec();
+    if let Some(records) = partial["created"].as_array() {
+        for record in records {
+            if !all_created.contains(record) {
+                all_created.push(record.clone());
+            }
+        }
+    }
+    partial["created"] = json!(all_created);
+    error.details["partial"] = partial;
+    // Preserve publication from the last attempted write, even when setup
+    // files have already been published. A pre-publication check has no write.
+    if error.details.get("publication").is_none() {
+        error.details["publication"] = json!("not_published");
+    }
+    error
 }
 pub(crate) fn inspect(
     g: &CoordinationGuard,
@@ -503,4 +558,127 @@ pub(crate) fn inspect(
         i.context["ownership_warning"] = w;
     }
     Ok(i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::project::discover;
+    use super::*;
+    use std::{fs, path::PathBuf, process::Command};
+
+    struct Fixture {
+        root: PathBuf,
+        ops: ExecutionOperations,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("work-claim-execution-core-{}", new_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["init", "-q"])
+                    .arg(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            fs::create_dir_all(root.join(".work/items")).unwrap();
+            let ops = ExecutionOperations::new(discover(Some(&root)).unwrap());
+            Self { root, ops }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn uninitialized_fallback_does_not_inspect_or_edit_an_unlocked_header() {
+        let fixture = Fixture::new();
+        let item = fixture
+            .ops
+            .create(
+                "original".into(),
+                b"body".to_vec(),
+                MetadataChange::default(),
+            )
+            .unwrap();
+        let id = &item.file.header.as_ref().unwrap().id;
+        fixture
+            .ops
+            .mutate(
+                id,
+                false,
+                |_| panic!("fallback must not reconstruct an unlocked header"),
+                |ops| {
+                    ops.update(
+                        id,
+                        MetadataChange {
+                            priority: Some(0),
+                            ..MetadataChange::default()
+                        },
+                    )
+                },
+            )
+            .unwrap();
+        let final_item = fixture.ops.inspect(id).unwrap();
+        assert_eq!(final_item.file.header.as_ref().unwrap().title, "original");
+        assert_eq!(final_item.file.header.as_ref().unwrap().priority, 0);
+    }
+
+    #[test]
+    fn binding_failure_reports_the_workspace_already_created_by_setup() {
+        let fixture = Fixture::new();
+        Storage::new(fixture.ops.project.clone())
+            .initialize()
+            .unwrap();
+        let guard = CoordinationGuard::acquire(&fixture.ops.project, true).unwrap();
+        let workspace = ContextStore::register(&guard, &fixture.root).unwrap();
+        let id = new_id().unwrap();
+        let workspace_record = json!({"id":workspace.id,"path":encode_path(&guard.root_path().join(format!("workspaces/{}.yaml",workspace.id)))});
+        guard.ensure_dir(Path::new("workspaces/items")).unwrap();
+        guard
+            .create(
+                &Path::new("workspaces/items").join(format!("{id}.yaml")),
+                b"different",
+            )
+            .unwrap();
+        let cause = ContextStore::bind(&guard, &id, &workspace).unwrap_err();
+        let error = with_setup_progress(cause, std::slice::from_ref(&workspace_record));
+        assert_eq!(error.code, "invalid_format");
+        assert_eq!(error.details["publication"], "not_published");
+        assert_eq!(
+            error.details["partial"]["created"],
+            json!([workspace_record])
+        );
+        assert!(
+            guard
+                .root_path()
+                .join(format!("workspaces/{}.yaml", workspace.id))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn setup_progress_merges_claim_partial_and_preserves_uncertain_last_publication() {
+        let workspace = json!({"id":"workspace","path":"/store/workspaces/workspace.yaml"});
+        let ending = json!({"id":"old-claim","path":"/store/claims/old-claim.end.yaml"});
+        let mut cause = ExecutionError::new("io", "replacement sync interrupted");
+        cause.details = json!({"publication":"possible","errno":5,"partial":{
+            "created":[ending],"updated":[],"deleted":[],"uncertain_paths":["/store/claims/new-claim.yaml"]}});
+        let error = with_setup_progress(cause, std::slice::from_ref(&workspace));
+        assert_eq!(error.code, "io");
+        assert_eq!(error.details["errno"], 5);
+        assert_eq!(error.details["publication"], "possible");
+        assert_eq!(
+            error.details["partial"]["created"],
+            json!([workspace, ending])
+        );
+        assert_eq!(
+            error.details["partial"]["uncertain_paths"],
+            json!(["/store/claims/new-claim.yaml"])
+        );
+    }
 }

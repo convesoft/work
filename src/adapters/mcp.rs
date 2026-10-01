@@ -488,8 +488,8 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         "discover" => Ok(
             json!({"worktree_root":cli::encode_path(&project.worktree_root),"git_common_dir":cli::encode_path(&project.git_common_dir)}),
         ),
-        "item_list" => Ok(json!({"items":cli::items_value(&project,&ops.list()?)?})),
-        "item_ready" => Ok(json!({"items":cli::items_value(&project,&ops.ready()?)?})),
+        "item_list" => Ok(json!({"items":cli::items_view(&ops,&ops.list()?)?})),
+        "item_ready" => Ok(json!({"items":cli::items_view(&ops,&ops.ready()?)?})),
         "template_list" => cli::template_command(&project, "list", &[]),
         "template_validate" => {
             cli::template_command(&project, "validate", &[required(args, "name").to_owned()])
@@ -533,7 +533,7 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         "item_inspect" => {
             let input = required(args, "id");
             let candidate = input.strip_prefix("w-").unwrap_or(input);
-            let id = match cli::resolve(&project, input) {
+            let id = match cli::resolve_view(&ops, input) {
                 Ok(id) => id,
                 Err(error) if error.value()["code"] == "not_found" && candidate.len() == 32 => {
                     if let Ok(raw) = ops.inspect_raw(candidate) {
@@ -543,7 +543,7 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
                 }
                 Err(error) => return Err(error),
             };
-            Ok(json!({"item":cli::one_item_value(&project,&ops.inspect(&id)?)?}))
+            Ok(json!({"item":cli::one_item_view(&ops,&ops.inspect(&id)?)?}))
         }
         "item_inspect_raw" => {
             let id = required(args, "id");

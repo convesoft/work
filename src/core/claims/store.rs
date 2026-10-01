@@ -297,6 +297,30 @@ fn end(
     outcome: ClaimOutcome,
     recovery: bool,
 ) -> ExecutionResult<ClaimEnded> {
+    end_checked(
+        guard,
+        snapshot,
+        claim,
+        actor,
+        reason,
+        outcome,
+        recovery,
+        || Ok(()),
+    )
+}
+// The callback is the coordinator's material-source check, separate from the
+// retained claim-source checks owned here.
+#[allow(clippy::too_many_arguments)]
+fn end_checked(
+    guard: &CoordinationGuard,
+    snapshot: &Snapshot,
+    claim: &Claim,
+    actor: &str,
+    reason: &str,
+    outcome: ClaimOutcome,
+    recovery: bool,
+    recheck: impl FnOnce() -> ExecutionResult<()>,
+) -> ExecutionResult<ClaimEnded> {
     let ending = ClaimEnding {
         store_id: claim.store_id.clone(),
         recovery_generation: claim.recovery_generation.clone(),
@@ -309,6 +333,7 @@ fn end(
         recovery,
     };
     snapshot.recheck(guard)?;
+    recheck()?;
     guard.create(&ending_path(&claim.id), &yaml_bytes(&ending.to_json()))?;
     Ok(ClaimEnded {
         claim: claim.clone(),
@@ -318,6 +343,38 @@ fn end(
 }
 
 impl ClaimStore {
+    pub fn validate_candidate(candidate: &ClaimCandidate) -> ExecutionResult<()> {
+        candidate_valid(candidate)
+    }
+    /// Read-only gate before coordinator workspace/binding setup.
+    pub fn validate_acquire(
+        guard: &CoordinationGuard,
+        candidate: &ClaimCandidate,
+        actor: &str,
+        session: &SessionIdentity,
+    ) -> ExecutionResult<()> {
+        acquisition_snapshot(guard, candidate, actor, session).map(|_| ())
+    }
+    pub fn validate_reassign(
+        guard: &CoordinationGuard,
+        claim_id: &str,
+        candidate: &ClaimCandidate,
+        actor: &str,
+        session: &SessionIdentity,
+        reason: &str,
+        executors_stopped: bool,
+    ) -> ExecutionResult<()> {
+        reassignment_snapshot(
+            guard,
+            claim_id,
+            candidate,
+            actor,
+            session,
+            reason,
+            executors_stopped,
+        )
+        .map(|_| ())
+    }
     pub fn list(
         guard: &CoordinationGuard,
         item_id: Option<&str>,
@@ -379,17 +436,22 @@ impl ClaimStore {
         actor: &str,
         session: &SessionIdentity,
     ) -> ExecutionResult<ClaimAcquired> {
-        actor_valid(actor)?;
-        session.validate()?;
-        candidate_valid(candidate)?;
-        let snapshot = Snapshot::load(guard)?;
-        snapshot.exclusion()?;
-        if let Some(claim) = snapshot.current(&candidate.header.id)? {
-            return Err(conflict(&candidate.header.id, &[claim]));
-        }
+        Self::acquire_checked(guard, candidate, actor, session, || Ok(()))
+    }
+    pub fn acquire_checked(
+        guard: &CoordinationGuard,
+        candidate: &ClaimCandidate,
+        actor: &str,
+        session: &SessionIdentity,
+        recheck: impl FnOnce() -> ExecutionResult<()>,
+    ) -> ExecutionResult<ClaimAcquired> {
+        let snapshot = acquisition_snapshot(guard, candidate, actor, session)?;
         let claim = new_claim(guard, candidate, actor, session)?;
         snapshot.recheck(guard)?;
-        guard.create(&acquisition_path(&claim.id), &yaml_bytes(&claim.to_json()))?;
+        recheck()?;
+        guard
+            .create(&acquisition_path(&claim.id), &yaml_bytes(&claim.to_json()))
+            .map_err(|error| acquisition_error(guard, &claim, error))?;
         Ok(ClaimAcquired {
             claim,
             item: candidate.header.clone(),
@@ -493,25 +555,38 @@ impl ClaimStore {
         reason: &str,
         executors_stopped: bool,
     ) -> ExecutionResult<ClaimReassigned> {
-        argument_id(claim_id)?;
-        recovery_valid(actor, reason, executors_stopped)?;
-        session.validate()?;
-        candidate_valid(candidate)?;
-        let snapshot = Snapshot::load(guard)?;
-        snapshot.exclusion()?;
-        let record = snapshot
-            .records
-            .get(claim_id)
-            .ok_or_else(|| stale(claim_id))?;
-        if !record.current {
-            return Err(stale(claim_id));
-        }
-        if record.claim.item_id != candidate.header.id {
-            return Err(ExecutionError::new(
-                "invalid_argument",
-                "reassignment candidate must match the old item",
-            ));
-        }
+        Self::reassign_checked(
+            guard,
+            claim_id,
+            candidate,
+            actor,
+            session,
+            reason,
+            executors_stopped,
+            || Ok(()),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn reassign_checked(
+        guard: &CoordinationGuard,
+        claim_id: &str,
+        candidate: &ClaimCandidate,
+        actor: &str,
+        session: &SessionIdentity,
+        reason: &str,
+        executors_stopped: bool,
+        mut recheck: impl FnMut() -> ExecutionResult<()>,
+    ) -> ExecutionResult<ClaimReassigned> {
+        let snapshot = reassignment_snapshot(
+            guard,
+            claim_id,
+            candidate,
+            actor,
+            session,
+            reason,
+            executors_stopped,
+        )?;
+        let record = snapshot.inspect(claim_id)?;
         // Generate and validate the replacement before ending ownership.
         let claim = new_claim(guard, candidate, actor, session)?;
         if guard.optional(&acquisition_path(&claim.id))?.is_some()
@@ -522,7 +597,7 @@ impl ClaimStore {
                 "generated claim ID collision",
             ));
         }
-        end(
+        end_checked(
             guard,
             &snapshot,
             &record.claim,
@@ -530,8 +605,10 @@ impl ClaimStore {
             reason,
             ClaimOutcome::Reassigned,
             true,
+            &mut recheck,
         )
         .map_err(|error| reassignment_error(guard, claim_id, &claim.id, false, error))?;
+        recheck().map_err(|error| reassignment_error(guard, claim_id, &claim.id, true, error))?;
         publish_replacement(guard, claim_id, &claim)?;
         Ok(ClaimReassigned {
             previous_claim_id: claim_id.to_owned(),
@@ -540,6 +617,76 @@ impl ClaimStore {
             changed: true,
         })
     }
+}
+
+fn acquisition_snapshot(
+    guard: &CoordinationGuard,
+    candidate: &ClaimCandidate,
+    actor: &str,
+    session: &SessionIdentity,
+) -> ExecutionResult<Snapshot> {
+    actor_valid(actor)?;
+    session.validate()?;
+    candidate_valid(candidate)?;
+    let snapshot = Snapshot::load(guard)?;
+    snapshot.exclusion()?;
+    if let Some(claim) = snapshot.current(&candidate.header.id)? {
+        return Err(conflict(&candidate.header.id, &[claim]));
+    }
+    Ok(snapshot)
+}
+fn reassignment_snapshot(
+    guard: &CoordinationGuard,
+    claim_id: &str,
+    candidate: &ClaimCandidate,
+    actor: &str,
+    session: &SessionIdentity,
+    reason: &str,
+    executors_stopped: bool,
+) -> ExecutionResult<Snapshot> {
+    argument_id(claim_id)?;
+    recovery_valid(actor, reason, executors_stopped)?;
+    session.validate()?;
+    candidate_valid(candidate)?;
+    let snapshot = Snapshot::load(guard)?;
+    snapshot.exclusion()?;
+    let record = snapshot
+        .records
+        .get(claim_id)
+        .ok_or_else(|| stale(claim_id))?;
+    if !record.current {
+        return Err(stale(claim_id));
+    }
+    if record.claim.item_id != candidate.header.id {
+        return Err(ExecutionError::new(
+            "invalid_argument",
+            "reassignment candidate must match the old item",
+        ));
+    }
+    Ok(snapshot)
+}
+fn acquisition_error(
+    guard: &CoordinationGuard,
+    claim: &Claim,
+    mut error: ExecutionError,
+) -> ExecutionError {
+    let path = crate::core::coordination::encode_path(
+        &guard.root_path().join(acquisition_path(&claim.id)),
+    );
+    let created = if error.details["publication"] == "published" {
+        vec![json!({"id":claim.id,"path":path})]
+    } else {
+        Vec::new()
+    };
+    let uncertain = if error.details["publication"] == "possible" {
+        vec![path]
+    } else {
+        Vec::new()
+    };
+    error.details["partial"] =
+        json!({"created":created,"updated":[],"deleted":[],"uncertain_paths":uncertain});
+    error.details["claim_id"] = json!(claim.id);
+    error
 }
 
 fn publish_replacement(
