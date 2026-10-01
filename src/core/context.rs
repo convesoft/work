@@ -278,9 +278,10 @@ impl ResolvedView {
             .collect();
         let mut snapshots = BTreeMap::from([(project.worktree_root.clone(), selected)]);
         let mut sources = BTreeMap::new();
+        let mut workspace_loads: BTreeMap<PathBuf, ExecutionResult<()>> = BTreeMap::new();
         for b in context.bindings.values() {
             let w = &context.workspaces[&b.workspace_id];
-            let loaded = (|| {
+            let loaded = workspace_loads.entry(w.path.clone()).or_insert_with(|| {
                 let p = discover(Some(&w.path)).map_err(|e| {
                     ExecutionError::new("source_unavailable", e.to_string()).at(&w.path)
                 })?;
@@ -295,7 +296,7 @@ impl ResolvedView {
                     snapshots.insert(w.path.clone(), ItemStore::load(&p)?);
                 }
                 Ok(())
-            })();
+            });
             match loaded {
                 Ok(()) => {
                     let found: Vec<_> = snapshots[&w.path]

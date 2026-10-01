@@ -3,7 +3,9 @@
 use super::operations::OperationError;
 use super::project::Project;
 use super::storage::files::{Directory, Locked, Source};
-use super::storage::{Publication, Storage, StorageError, StorageErrorCode, StoreMetadata};
+use super::storage::{
+    Publication, Storage, StorageError, StorageErrorCode, StorageInspection, StoreMetadata,
+};
 use serde_json::{Value, json};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -136,9 +138,22 @@ pub struct CoordinationGuard {
 }
 impl CoordinationGuard {
     pub fn acquire(project: &Project, exclusive: bool) -> ExecutionResult<Self> {
-        let common = Directory::open(&project.git_common_dir)?;
-        let locked = Locked::open(common, exclusive, false)?;
+        Self::acquire_with_storage(project, exclusive).map_err(|failure| {
+            let (error, _) = *failure;
+            error
+        })
+    }
+    pub(crate) fn acquire_with_storage(
+        project: &Project,
+        exclusive: bool,
+    ) -> Result<Self, Box<(ExecutionError, StorageInspection)>> {
         let storage = Storage::new(project.clone());
+        let unavailable = |error: StorageError| {
+            let inspection = storage.unavailable_inspection(error.clone());
+            Box::new((error.into(), inspection))
+        };
+        let common = Directory::open(&project.git_common_dir).map_err(unavailable)?;
+        let locked = Locked::open(common, exclusive, false).map_err(unavailable)?;
         let mut inspection = storage.empty_inspection();
         let refusal = storage.inspect_locked_evidence(&locked, &mut inspection);
         if let Some(error) = refusal
@@ -147,7 +162,7 @@ impl CoordinationGuard {
                 StorageErrorCode::PermissionDenied | StorageErrorCode::Io
             )
         {
-            return Err(error.into());
+            return Err(Box::new((error.into(), inspection)));
         }
         if !inspection.coordination_available {
             let mut e = ExecutionError::new(
@@ -156,7 +171,7 @@ impl CoordinationGuard {
             )
             .at(&inspection.path);
             e.details["diagnostics"]=json!(inspection.diagnostics.iter().map(|d|json!({"code":d.code.code(),"message":d.message,"path":d.path.as_deref().map(encode_path)})).collect::<Vec<_>>());
-            return Err(e);
+            return Err(Box::new((e, inspection)));
         }
         Ok(Self {
             metadata: inspection.metadata.expect("available storage has metadata"),

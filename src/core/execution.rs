@@ -11,9 +11,7 @@ use super::operations::{
     RawInspection, RelationKind,
 };
 use super::project::Project;
-use super::storage::{
-    Storage, StorageDiagnostic, StorageErrorCode, StorageInspection, StorageState,
-};
+use super::storage::{Storage, StorageErrorCode, StorageInspection, StorageState};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::path::Path;
@@ -92,24 +90,17 @@ impl ExecutionOperations {
         }
         #[cfg(test)]
         super::storage::files::inject("execution_guard_acquire", &s.lock_path)?;
-        match CoordinationGuard::acquire(&self.project, write) {
+        match CoordinationGuard::acquire_with_storage(&self.project, write) {
             Ok(guard) => Ok(Some(guard)),
-            Err(error) if !write && error.code == "storage_busy" => {
-                let mut storage = s;
-                let diagnostic = StorageDiagnostic {
-                    code: StorageErrorCode::StorageBusy,
-                    message: error.message,
-                    path: error.path,
-                    line: None,
-                };
-                storage.state = StorageState::RecoveryRequired;
-                storage.coordination_available = false;
-                storage.storage_warning = Some(diagnostic.clone());
-                storage.diagnostics.push(diagnostic);
+            Err(failure) if !write => {
+                let (_, storage) = *failure;
                 self.capture_read_storage(storage);
                 Ok(None)
             }
-            Err(error) => Err(error),
+            Err(failure) => {
+                let (error, _) = *failure;
+                Err(error)
+            }
         }
     }
     pub fn view(&self) -> ExecutionResult<ItemStore> {
@@ -276,6 +267,20 @@ impl ExecutionOperations {
         edit: impl FnOnce(&mut ItemHeader) -> ExecutionResult<()>,
         fallback: impl FnOnce(&DurableOperations) -> Result<Inspection, OperationError>,
     ) -> ExecutionResult<Inspection> {
+        self.mutate_selected(
+            complete,
+            |_| Ok((id.to_owned(), ())),
+            |h, ()| edit(h),
+            fallback,
+        )
+    }
+    fn mutate_selected<T>(
+        &self,
+        complete: bool,
+        select: impl FnOnce(&ItemStore) -> ExecutionResult<(String, T)>,
+        edit: impl FnOnce(&mut ItemHeader, T) -> ExecutionResult<()>,
+        fallback: impl FnOnce(&DurableOperations) -> Result<Inspection, OperationError>,
+    ) -> ExecutionResult<Inspection> {
         let Some(g) = self.guard(true)? else {
             // The original operation loads and applies only its requested edit
             // under the checkout lock, preserving concurrent unrelated changes.
@@ -283,9 +288,10 @@ impl ExecutionOperations {
         };
         let v = ResolvedView::load(&g)?;
         require_valid(&v.store)?;
+        let (id, selected) = select(&v.store)?;
         let before = v
             .store
-            .resolve(id)
+            .resolve(&id)
             .map_err(|e| ExecutionError::new("not_found", format!("item lookup: {e:?}")))?
             .clone();
         let mut h = before
@@ -293,7 +299,7 @@ impl ExecutionOperations {
             .clone()
             .ok_or_else(|| ExecutionError::new("invalid_source", "invalid item"))?;
         let claim = ClaimStore::authorize(&g, &h.id, &self.authorization)?;
-        edit(&mut h)?;
+        edit(&mut h, selected)?;
         let body = before.body.as_deref().unwrap();
         validate_candidate(&v.store, &before.path, &h, body)?;
         let root = v.sources.get(&h.id).ok_or_else(|| {
@@ -356,36 +362,37 @@ impl ExecutionOperations {
         target: &str,
         add: bool,
     ) -> ExecutionResult<Inspection> {
-        let view = self.view()?;
-        let graph = ItemGraph::from_store(&view);
-        let mut source = id.to_owned();
-        let mut other = target.to_owned();
-        if matches!(kind, RelationKind::Related) {
-            if add
-                && graph
-                    .relations(id)
-                    .is_ok_and(|r| r.related.contains(&other))
-            {
-                return Err(ExecutionError::new(
-                    "already_exists",
-                    "related edge already exists",
-                ));
-            }
-            if !add
-                && !view
-                    .resolve(id)
-                    .ok()
-                    .and_then(|f| f.header.as_ref())
-                    .is_some_and(|h| h.related.contains(&other))
-            {
-                source = target.into();
-                other = id.into();
-            }
-        }
-        self.mutate(
-            &source,
+        self.mutate_selected(
             false,
-            |h| {
+            |view| {
+                let graph = ItemGraph::from_store(view);
+                let mut source = id.to_owned();
+                let mut other = target.to_owned();
+                if matches!(kind, RelationKind::Related) {
+                    if add
+                        && graph
+                            .relations(id)
+                            .is_ok_and(|r| r.related.contains(&other))
+                    {
+                        return Err(ExecutionError::new(
+                            "already_exists",
+                            "related edge already exists",
+                        ));
+                    }
+                    if !add
+                        && !view
+                            .resolve(id)
+                            .ok()
+                            .and_then(|f| f.header.as_ref())
+                            .is_some_and(|h| h.related.contains(&other))
+                    {
+                        source = target.into();
+                        other = id.into();
+                    }
+                }
+                Ok((source, other))
+            },
+            |h, other| {
                 if h.id == other {
                     return Err(ExecutionError::new("invalid_argument", "self relationship"));
                 }
@@ -428,9 +435,9 @@ impl ExecutionOperations {
             },
             |ops| {
                 if add {
-                    ops.relation_add(&source, kind, &other)
+                    ops.relation_add(id, kind, target)
                 } else {
-                    ops.relation_remove(&source, kind, &other)
+                    ops.relation_remove(id, kind, target)
                 }
             },
         )
@@ -1380,6 +1387,223 @@ mod tests {
         let next = ExecutionOperations::new(fixture.ops.project.clone());
         assert!(next.ready().unwrap().is_empty());
         assert!(next.take_read_storage().is_none());
+    }
+
+    #[test]
+    fn changed_foundation_at_second_acquisition_falls_back_with_actual_snapshot_for_all_reads() {
+        use std::os::unix::fs::PermissionsExt;
+        for unavailable in ["missing", "corrupt", "unreadable"] {
+            for operation in ["list", "inspect", "ready", "write"] {
+                let fixture = Fixture::new();
+                let id = fixture_item(&fixture);
+                Storage::new(fixture.ops.project.clone())
+                    .initialize()
+                    .unwrap();
+                let metadata = fixture.ops.project.git_common_dir.join("work/store.yaml");
+                let raw = fs::read(&metadata).unwrap();
+                let mode = fs::metadata(&metadata).unwrap().permissions().mode();
+                let item_path = fixture.root.join(format!(".work/items/{id}.md"));
+                let item = fs::read(&item_path).unwrap();
+                let changed = metadata.clone();
+                let hook =
+                    super::super::storage::files::on_next("execution_guard_acquire", move || {
+                        match unavailable {
+                            "missing" => fs::remove_file(changed).unwrap(),
+                            "corrupt" => fs::write(changed, b"invalid metadata").unwrap(),
+                            "unreadable" => {
+                                fs::set_permissions(changed, fs::Permissions::from_mode(0o000))
+                                    .unwrap()
+                            }
+                            _ => unreachable!(),
+                        }
+                    });
+                if operation == "write" {
+                    let error = fixture
+                        .ops
+                        .update(
+                            &id,
+                            MetadataChange {
+                                title: Some("refused".into()),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap_err();
+                    assert_eq!(
+                        error.code,
+                        if unavailable == "unreadable" {
+                            "permission_denied"
+                        } else {
+                            "recovery_required"
+                        }
+                    );
+                    assert!(fixture.ops.take_read_storage().is_none());
+                } else {
+                    let values = match operation {
+                        "list" => fixture.ops.list().unwrap(),
+                        "inspect" => vec![fixture.ops.inspect(&id).unwrap()],
+                        "ready" => fixture.ops.ready().unwrap(),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(values.len(), 1);
+                    assert_eq!(values[0].file.header.as_ref().unwrap().id, id);
+                    // Restore healthy storage and read again before consuming
+                    // the first unavailable snapshot; no cross-request cache.
+                    if unavailable == "unreadable" {
+                        fs::set_permissions(&metadata, fs::Permissions::from_mode(mode)).unwrap();
+                    }
+                    fs::write(&metadata, &raw).unwrap();
+                    fs::set_permissions(&metadata, fs::Permissions::from_mode(mode)).unwrap();
+                    assert_eq!(fixture.ops.list().unwrap().len(), 1);
+                    let snapshot = fixture.ops.take_read_storage().unwrap();
+                    assert!(!snapshot.coordination_available);
+                    assert_eq!(snapshot.state, StorageState::RecoveryRequired);
+                    assert!(snapshot.metadata.is_none());
+                    let warning = snapshot.storage_warning.unwrap();
+                    assert_eq!(warning.path.as_deref(), Some(metadata.as_path()));
+                    assert_eq!(
+                        warning.code,
+                        match unavailable {
+                            "missing" => StorageErrorCode::StorageMissing,
+                            "corrupt" => StorageErrorCode::InvalidFormat,
+                            "unreadable" => StorageErrorCode::PermissionDenied,
+                            _ => unreachable!(),
+                        }
+                    );
+                    assert!(snapshot.diagnostics.contains(&warning));
+                    assert!(fixture.ops.take_read_storage().is_none());
+                }
+                drop(hook);
+                assert_eq!(fs::read(item_path).unwrap(), item);
+            }
+        }
+    }
+
+    #[test]
+    fn related_removal_selects_and_authorizes_locked_snapshot_after_opposite_endpoint_rewrite() {
+        for authorize_new_source in [false, true] {
+            let mut fixture = Fixture::new();
+            let first = fixture_item(&fixture);
+            let second = fixture_item(&fixture);
+            fixture
+                .ops
+                .relation_add(&first, RelationKind::Related, &second)
+                .unwrap();
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let session = test_session();
+            let (first_claim, _) = fixture
+                .ops
+                .acquire(&first, "first owner", &session)
+                .unwrap();
+            let (second_claim, _) = fixture
+                .ops
+                .acquire(&second, "second owner", &session)
+                .unwrap();
+            let first_auth = ClaimAuthorization {
+                claim_id: first_claim["id"].as_str().unwrap().into(),
+                session: session.clone(),
+            };
+            let second_auth = ClaimAuthorization {
+                claim_id: second_claim["id"].as_str().unwrap().into(),
+                session,
+            };
+            if authorize_new_source {
+                fixture.ops.authorization.push(second_auth.clone());
+            }
+            let mut concurrent = ExecutionOperations::new(fixture.ops.project.clone());
+            concurrent.authorization = vec![first_auth, second_auth];
+            let a = first.clone();
+            let b = second.clone();
+            let hook =
+                super::super::storage::files::on_next("execution_guard_acquire", move || {
+                    concurrent
+                        .relation_remove(&a, RelationKind::Related, &b)
+                        .unwrap();
+                    concurrent
+                        .relation_add(&b, RelationKind::Related, &a)
+                        .unwrap();
+                });
+            let result = fixture
+                .ops
+                .relation_remove(&first, RelationKind::Related, &second);
+            drop(hook);
+            if authorize_new_source {
+                let saved = result.unwrap();
+                assert_eq!(saved.file.header.as_ref().unwrap().id, second);
+                assert!(saved.file.header.unwrap().related.is_empty());
+            } else {
+                assert_eq!(result.unwrap_err().code, "claim_conflict");
+            }
+            let store = ItemStore::load(&fixture.ops.project).unwrap();
+            assert!(
+                store
+                    .resolve(&first)
+                    .unwrap()
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .related
+                    .is_empty()
+            );
+            assert_eq!(
+                store
+                    .resolve(&second)
+                    .unwrap()
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .related
+                    .is_empty(),
+                authorize_new_source
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_selector_runs_under_the_same_exclusive_guard_as_source_authorization() {
+        let fixture = Fixture::new();
+        let first = fixture_item(&fixture);
+        let second = fixture_item(&fixture);
+        fixture
+            .ops
+            .relation_add(&second, RelationKind::Related, &first)
+            .unwrap();
+        Storage::new(fixture.ops.project.clone())
+            .initialize()
+            .unwrap();
+        let saved = fixture
+            .ops
+            .mutate_selected(
+                false,
+                |store| {
+                    assert_eq!(
+                        CoordinationGuard::acquire(&fixture.ops.project, true)
+                            .err()
+                            .unwrap()
+                            .code,
+                        "storage_busy"
+                    );
+                    assert_eq!(
+                        store
+                            .resolve(&second)
+                            .unwrap()
+                            .header
+                            .as_ref()
+                            .unwrap()
+                            .related,
+                        vec![first.clone()]
+                    );
+                    Ok((second.clone(), first.clone()))
+                },
+                |header, target| {
+                    header.related.retain(|id| id != &target);
+                    Ok(())
+                },
+                |_| panic!("initialized mutation must use guarded selection"),
+            )
+            .unwrap();
+        assert_eq!(saved.file.header.unwrap().id, second);
     }
 
     #[test]

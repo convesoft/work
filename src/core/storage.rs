@@ -204,6 +204,11 @@ impl Storage {
             pending_operations: Vec::new(),
         }
     }
+    pub(crate) fn unavailable_inspection(&self, error: StorageError) -> StorageInspection {
+        let mut inspection = self.empty_inspection();
+        warn(&mut inspection, error);
+        inspection
+    }
     /// Read-only health. Unavailable coordination is data, not an empty owner set.
     pub fn inspect(&self) -> Result<StorageInspection, StorageError> {
         let mut result = self.empty_inspection();
