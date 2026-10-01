@@ -889,3 +889,55 @@ fn complete_claim_item_filters_do_not_require_a_live_bound_source() {
         );
     }
 }
+
+#[test]
+fn bound_header_id_overrides_misnamed_selected_copy_without_hiding_bound_damage() {
+    let f = Fixture::new();
+    let id = f.item();
+    let linked = f.linked();
+    let source = linked.join(format!(".work/items/{id}.md"));
+    let original = fs::read_to_string(&source).unwrap();
+    fs::write(&source, original.replace("original body", "bound body")).unwrap();
+    f.init();
+    let claimed = acquire(&linked, &id);
+    ok(cli(
+        &linked,
+        &[
+            "claim",
+            "release",
+            claimed["claim"]["id"].as_str().unwrap(),
+            "--session-namespace",
+            "codex",
+            "--session-id",
+            "session / opaque:α",
+        ],
+    ));
+    let stale = f.root.join(".work/items/misnamed.md");
+    fs::rename(f.root.join(format!(".work/items/{id}.md")), &stale).unwrap();
+    let stale_bytes = fs::read(&stale).unwrap();
+    let inspection = ok(cli(&f.root, &["item", "inspect", &id]));
+    assert_eq!(inspection["item"]["body"], "bound body");
+    assert_eq!(inspection["item"]["path"], source.to_str().unwrap());
+    assert_eq!(
+        mcp(&f.root, "item_inspect", json!({"id":id}))["item"],
+        inspection["item"]
+    );
+    let ready = ok(cli(&f.root, &["item", "ready"]));
+    assert_eq!(ready["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        mcp(&f.root, "item_ready", json!({}))["items"],
+        ready["items"]
+    );
+    let acquired = acquire(&f.root, &id);
+    assert_eq!(acquired["item"]["body"], "bound body");
+    assert_eq!(acquired["item"]["path"], source.to_str().unwrap());
+    assert_eq!(fs::read(&stale).unwrap(), stale_bytes);
+    // The same corruption in the authoritative checkout must still be diagnosed.
+    fs::rename(&source, linked.join(".work/items/misnamed.md")).unwrap();
+    let invalid = cli(&f.root, &["item", "ready"]);
+    assert_eq!(invalid["error"]["code"], "invalid_source");
+    assert_eq!(
+        mcp(&f.root, "item_ready", json!({}))["error"],
+        invalid["error"]
+    );
+}

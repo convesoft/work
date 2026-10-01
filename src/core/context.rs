@@ -303,10 +303,9 @@ impl ResolvedView {
                     .is_some_and(|id| {
                         context.bindings.contains_key(id) || invalid_bindings.contains_key(id)
                     })
-                    && !file
-                        .header
-                        .as_ref()
-                        .is_some_and(|h| invalid_bindings.contains_key(&h.id))
+                    && !file.header.as_ref().is_some_and(|h| {
+                        context.bindings.contains_key(&h.id) || invalid_bindings.contains_key(&h.id)
+                    })
             })
             .cloned()
             .collect();
