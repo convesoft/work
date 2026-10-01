@@ -261,7 +261,21 @@ impl ResolvedView {
         let project = g.project().clone();
         let context = ContextStore::load(g)?;
         let selected = ItemStore::load_optional_catalog(&project.worktree_root)?;
-        let mut files = selected.files.clone();
+        // Remove selected-checkout copies before adding any bound sources.
+        // A later binding must never erase an earlier binding's diagnostics.
+        let mut files: Vec<_> = selected
+            .files
+            .iter()
+            .filter(|file| {
+                !file
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_suffix(".md"))
+                    .is_some_and(|id| context.bindings.contains_key(id))
+            })
+            .cloned()
+            .collect();
         let mut snapshots = BTreeMap::from([(project.worktree_root.clone(), selected)]);
         let mut sources = BTreeMap::new();
         for b in context.bindings.values() {
@@ -282,10 +296,6 @@ impl ResolvedView {
                 }
                 Ok(())
             })();
-            files.retain(|f| {
-                f.header.as_ref().is_none_or(|h| h.id != b.item_id)
-                    && f.path.file_stem().and_then(|s| s.to_str()) != Some(&b.item_id)
-            });
             match loaded {
                 Ok(()) => {
                     let found: Vec<_> = snapshots[&w.path]

@@ -470,3 +470,63 @@ fn selected_catalog_symlink_and_permission_errors_are_not_empty_views() {
         "{mcp_denied}"
     );
 }
+
+#[test]
+fn malformed_bound_sources_remain_diagnostics_independent_of_binding_order() {
+    for corrupt_first in [true, false] {
+        let f = Fixture::new();
+        let mut ids = [f.item(), f.item()];
+        ids.sort();
+        let linked = f.linked();
+        f.init();
+        for (index, id) in ids.iter().enumerate() {
+            let root = if index == 0 { &linked } else { &f.root };
+            let claim = acquire(root, id);
+            let release = mcp(
+                root,
+                "claim_release",
+                json!({"claim_id":claim["claim"]["id"],"session":session()}),
+            );
+            assert!(release.get("error").is_none(), "{release}");
+        }
+        let corrupt = if corrupt_first { 0 } else { 1 };
+        let healthy = 1 - corrupt;
+        let root = if corrupt == 0 { &linked } else { &f.root };
+        let path = root.join(format!(".work/items/{}.md", ids[corrupt]));
+        let malformed = fs::read_to_string(&path)
+            .unwrap()
+            .replace(&ids[corrupt], &ids[healthy]);
+        fs::write(&path, &malformed).unwrap();
+        let diagnostics = ok(cli(&f.root, &["item", "diagnose"]));
+        assert!(
+            diagnostics["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["path"] == path.to_str().unwrap()),
+            "{diagnostics}"
+        );
+        assert_eq!(
+            mcp(&f.root, "item_diagnose", json!({}))["diagnostics"],
+            diagnostics["diagnostics"]
+        );
+        assert_eq!(
+            cli(&f.root, &["item", "ready"])["error"]["code"],
+            "invalid_source"
+        );
+        let claimed = mcp(
+            &f.root,
+            "claim_acquire",
+            json!({"item":ids[healthy],"actor":"worker","session":session()}),
+        );
+        assert_eq!(claimed["error"]["code"], "invalid_source", "{claimed}");
+        assert_eq!(
+            cli(
+                &f.root,
+                &["item", "update", &ids[healthy], "--title", "refused"]
+            )["error"]["code"],
+            "ambiguous_id"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+    }
+}
