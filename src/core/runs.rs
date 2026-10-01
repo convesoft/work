@@ -481,6 +481,17 @@ impl RunStore {
         header: &ItemHeader,
         body: &[u8],
     ) -> ExecutionResult<PathBuf> {
+        Self::replace_wisp_with_recovery(guard, run_id, expected, header, body)
+            .map(|(path, _)| path)
+    }
+
+    pub(crate) fn replace_wisp_with_recovery(
+        guard: &CoordinationGuard,
+        run_id: &str,
+        expected: &EntitySource,
+        header: &ItemHeader,
+        body: &[u8],
+    ) -> ExecutionResult<(PathBuf, Option<PathBuf>)> {
         let store = Self::load(guard)?;
         let record = store.get(run_id)?;
         if record.manifest.phase != RunPhase::Active {
@@ -500,8 +511,8 @@ impl RunStore {
         if !parse_candidate(path.clone(), raw.clone()).is_valid() {
             return Err(fail("invalid_format", "invalid wisp fields").at(path));
         }
-        guard.replace(&relative, expected, &raw)?;
-        Ok(path)
+        let recovery = guard.replace_with_recovery(&relative, expected, &raw)?;
+        Ok((path, recovery))
     }
 
     /// Run-side publication hook for an already validated expansion plan. Main

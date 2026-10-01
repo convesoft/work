@@ -360,7 +360,9 @@ fn operational_files(f: &Fixture) -> std::collections::BTreeMap<PathBuf, Vec<u8>
     }
     let mut files = std::collections::BTreeMap::new();
     collect(&f.root.join(".git/work"), &mut files);
-    collect(&f.root.join(".work/items"), &mut files);
+    if f.root.join(".work/items").exists() {
+        collect(&f.root.join(".work/items"), &mut files);
+    }
     files
 }
 
@@ -719,4 +721,222 @@ fn frozen_target_expansion_is_lifecycle_conflict_while_preview_stays_read_only()
         assert_eq!(failed["error"]["code"], "invalid_argument", "{failed}");
         assert_eq!(operational_files(&f), before);
     }
+}
+
+#[test]
+fn fresh_template_only_clone_previews_without_writes_and_expands_materials_in_cli_and_mcp() {
+    for transport in ["cli", "mcp"] {
+        let origin = Fixture::new();
+        template(
+            &origin,
+            "plan",
+            "format_version: 2\nname: plan\nitems: [{key: a, title: Alpha}, {key: b, title: Beta}]\nedges: [{from: 'local:b', kind: depends_on, to: 'local:a'}]\n",
+        );
+        git(&origin.root, &["add", ".work/templates"]);
+        git(
+            &origin.root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "template-only",
+            ],
+        );
+        let f = Fixture {
+            root: origin.root.join("fresh"),
+        };
+        git(
+            &origin.root,
+            &[
+                "clone",
+                "-q",
+                origin.root.to_str().unwrap(),
+                f.root.to_str().unwrap(),
+            ],
+        );
+        assert!(!f.root.join(".work/items").exists());
+        f.init();
+        let before = operational_files(&f);
+        let preview = ok(cli(&f.root, &["template", "preview", "plan"]));
+        assert_eq!(
+            preview,
+            mcp(&f.root, "template_preview", json!({"name":"plan"}))
+        );
+        assert_eq!(operational_files(&f), before);
+        assert!(!f.root.join(".work/items").exists());
+        assert!(!f.root.join(".work/operations.lock").exists());
+        let (exit, failed) = cli_status(
+            &f.root,
+            &["template", "expand", "plan", "--param", "unknown=value"],
+        );
+        assert_eq!(exit, 2, "{failed}");
+        assert_eq!(failed["error"]["code"], "invalid_argument");
+        let failed = mcp(
+            &f.root,
+            "template_expand",
+            json!({"name":"plan","parameters":{"unknown":"value"}}),
+        );
+        assert_eq!(failed["error"]["code"], "invalid_argument", "{failed}");
+        assert_eq!(operational_files(&f), before);
+        assert!(!f.root.join(".work/items").exists());
+        assert!(!f.root.join(".work/operations.lock").exists());
+        let result = if transport == "cli" {
+            ok(cli(&f.root, &["template", "expand", "plan"]))
+        } else {
+            mcp(&f.root, "template_expand", json!({"name":"plan"}))
+        };
+        assert!(result["error"].is_null(), "{result}");
+        assert!(result["run_id"].is_null());
+        assert_eq!(result["changed"], true);
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let a = items[0]["id"].as_str().unwrap();
+        let b = items[1]["id"].as_str().unwrap();
+        assert_ne!(a, b);
+        for item in items {
+            let id = item["id"].as_str().unwrap();
+            assert!(work::core::coordination::valid_id(id));
+            assert_eq!(item["persistence"], "material");
+            let path = f.root.join(format!(".work/items/{id}.md"));
+            assert_eq!(item["path"], path.to_str().unwrap());
+            assert!(path.is_file());
+            let binding: Value = serde_json::from_slice(
+                &fs::read(f.root.join(format!(".git/work/workspaces/items/{id}.yaml"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(binding["item_id"], id);
+            let workspace_id = binding["workspace_id"].as_str().unwrap();
+            assert!(
+                f.root
+                    .join(format!(".git/work/workspaces/{workspace_id}.yaml"))
+                    .is_file()
+            );
+            let inspected = ok(cli(&f.root, &["item", "inspect", id]));
+            assert_eq!(
+                inspected["item"]["source_worktree"],
+                f.root.to_str().unwrap()
+            );
+            assert!(inspected["item"]["run_id"].is_null());
+            assert_eq!(inspected, mcp(&f.root, "item_inspect", json!({"id":id})));
+        }
+        assert_eq!(
+            ok(cli(&f.root, &["item", "inspect", b]))["item"]["depends_on"],
+            json!([a])
+        );
+        assert_eq!(
+            ok(cli(&f.root, &["item", "ready"]))["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            fs::read_dir(f.root.join(".git/work/runs")).unwrap().count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn wisp_update_returns_actual_previous_inode_and_noop_has_no_recovery_in_cli_and_mcp() {
+    for transport in ["cli", "mcp"] {
+        let f = Fixture::new();
+        let root = f.item();
+        f.init();
+        let started = ok(cli(&f.root, &["run", "start", &root]));
+        let run = started["run"]["id"].as_str().unwrap();
+        template(
+            &f,
+            "seed",
+            "format_version: 2\nname: seed\nitems: [{key: a, title: Original, persistence: wisp}]\n",
+        );
+        let expanded = ok(cli(&f.root, &["template", "expand", "seed", "--run", run]));
+        let id = expanded["items"][0]["id"].as_str().unwrap();
+        let path = f.root.join(format!(".git/work/runs/{run}/items/{id}.md"));
+        let original = fs::read(&path).unwrap();
+        let mut outside_editor = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let update = || {
+            if transport == "cli" {
+                ok(cli(&f.root, &["item", "update", id, "--title", "Saved"]))
+            } else {
+                mcp(&f.root, "item_update", json!({"id":id,"title":"Saved"}))
+            }
+        };
+        let result = update();
+        assert!(result["error"].is_null(), "{result}");
+        assert_eq!(result["item"]["title"], "Saved");
+        let recovery = work::core::coordination::decode_path(
+            result["item"]["recovery_path"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovery.parent(), path.parent());
+        assert!(
+            recovery
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with(".storage-")
+        );
+        assert_eq!(fs::read(&recovery).unwrap(), original);
+        let saved = fs::read(&path).unwrap();
+        outside_editor.write_all(b"late editor bytes").unwrap();
+        outside_editor.sync_all().unwrap();
+        assert_eq!(
+            fs::read(&recovery).unwrap(),
+            [original, b"late editor bytes".to_vec()].concat()
+        );
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        let before = operational_files(&f);
+        let noop = update();
+        assert!(noop["error"].is_null(), "{noop}");
+        assert!(noop["item"]["recovery_path"].is_null());
+        assert_eq!(operational_files(&f), before);
+    }
+}
+
+#[test]
+fn expansion_refuses_missing_bound_source_without_recreating_its_catalog() {
+    let f = Fixture::new();
+    f.item();
+    f.init();
+    let linked = f.linked();
+    template(
+        &f,
+        "plan",
+        "format_version: 2\nname: plan\nitems: [{key: a, title: Initial}]\n",
+    );
+    // Linked checkout material publication records its authoritative binding.
+    template(
+        &f,
+        "extend",
+        "format_version: 2\nname: extend\nexisting: [seed]\nitems: [{key: a, title: New}]\nedges: [{from: 'existing:seed', kind: depends_on, to: 'local:a'}]\n",
+    );
+    fs::create_dir_all(linked.join(".work/templates")).unwrap();
+    fs::copy(
+        f.root.join(".work/templates/plan.yaml"),
+        linked.join(".work/templates/plan.yaml"),
+    )
+    .unwrap();
+    let initial = ok(cli(&linked, &["template", "expand", "plan"]));
+    let id = initial["items"][0]["id"].as_str().unwrap();
+    fs::remove_dir_all(linked.join(".work/items")).unwrap();
+    let before = operational_files(&f);
+    let binding = format!("seed={id}");
+    let failed = cli(
+        &f.root,
+        &["template", "expand", "extend", "--existing", &binding],
+    );
+    assert_eq!(failed["error"]["code"], "invalid_source", "{failed}");
+    let failed = mcp(
+        &f.root,
+        "template_expand",
+        json!({"name":"extend","existing":{"seed":id}}),
+    );
+    assert_eq!(failed["error"]["code"], "invalid_source", "{failed}");
+    assert!(!linked.join(".work/items").exists());
+    assert_eq!(operational_files(&f), before);
 }

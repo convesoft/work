@@ -1047,6 +1047,10 @@ fn print_human(value: &Value) {
             "git_common_dir={}",
             value["git_common_dir"].as_str().unwrap_or("")
         );
+    } else if value.get("run_id").is_some() && value.get("updated").is_some_and(Value::is_array) {
+        // Expansion records have keys and publication paths, not inspected-item
+        // titles. Show their complete mapping and affected existing files.
+        println!("{}", serde_json::to_string_pretty(value).unwrap());
     } else if let Some(items) = value.get("items").and_then(Value::as_array) {
         for item in items {
             println!(

@@ -320,16 +320,21 @@ impl ExecutionOperations {
                 .membership(&h.id)
                 .ok_or_else(|| ExecutionError::new("source_unavailable", "wisp run missing"))?;
             let expected = &run.wisp_sources[&h.id];
-            super::runs::RunStore::replace_wisp(&g, &run.manifest.id, expected, &h, body).map_err(
-                |error| {
-                    if error.details["publication"] == "published" {
-                        saved_item_error(error, &h.id, &before.path, "updated")
-                    } else {
-                        error
-                    }
-                },
-            )?;
-            None
+            let (_, recovery) = super::runs::RunStore::replace_wisp_with_recovery(
+                &g,
+                &run.manifest.id,
+                expected,
+                &h,
+                body,
+            )
+            .map_err(|error| {
+                if error.details["publication"] == "published" {
+                    saved_item_error(error, &h.id, &before.path, "updated")
+                } else {
+                    error
+                }
+            })?;
+            recovery
         } else {
             None
         };
@@ -2147,6 +2152,7 @@ mod tests {
         let header = operations::default_header(new_id().unwrap(), "original wisp".into());
         let path =
             super::super::runs::RunStore::create_wisp(&guard, run_id, &header, b"body").unwrap();
+        let original = fs::read(&path).unwrap();
         let lock = guard.root_path().join("coordination.lock");
         drop(guard);
         let lock_for_hook = lock.clone();
@@ -2180,6 +2186,9 @@ mod tests {
                 .contains("saved wisp")
         );
         assert_eq!(error.details["recovery_paths"].as_array().unwrap().len(), 1);
+        let previous = error.details["previous_source_path"].as_str().unwrap();
+        assert_eq!(error.details["recovery_paths"][0], previous);
+        assert_eq!(fs::read(decode_path(previous).unwrap()).unwrap(), original);
     }
     #[test]
     fn shared_item_lookup_preserves_invalid_source_diagnostics() {
@@ -2205,6 +2214,199 @@ mod tests {
                         .unwrap()
                         .contains("filename must be"))
             );
+        }
+    }
+
+    fn fixture_wisp(fixture: &Fixture) -> (String, PathBuf) {
+        let root = fixture_item(fixture);
+        Storage::new(fixture.ops.project.clone())
+            .initialize()
+            .unwrap();
+        let started = fixture.ops.run_start(&root, None, None).unwrap();
+        let guard = CoordinationGuard::acquire(&fixture.ops.project, true).unwrap();
+        let mut header = operations::default_header(new_id().unwrap(), "original wisp".into());
+        header.parent = Some(root);
+        let path = super::super::runs::RunStore::create_wisp(
+            &guard,
+            started["run"]["id"].as_str().unwrap(),
+            &header,
+            b"wisp body",
+        )
+        .unwrap();
+        (header.id, path)
+    }
+
+    #[test]
+    fn wisp_mutation_reload_failures_preserve_actual_retained_source() {
+        for failure in ["graph", "load"] {
+            let fixture = Fixture::new();
+            let (id, path) = fixture_wisp(&fixture);
+            let original = fs::read(&path).unwrap();
+            let before = fixture.ops.inspect(&id).unwrap();
+            let parent = before.file.header.unwrap().parent.unwrap();
+            let parent_path = fixture.root.join(format!(".work/items/{parent}.md"));
+            let unexpected = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join("work/workspaces/unexpected");
+            let damage = unexpected.clone();
+            let hook =
+                super::super::storage::files::on_next(
+                    "after_directory_sync",
+                    move || match failure {
+                        "graph" => fs::remove_file(parent_path).unwrap(),
+                        "load" => fs::write(damage, b"invalid").unwrap(),
+                        _ => unreachable!(),
+                    },
+                );
+            let error = fixture
+                .ops
+                .update(
+                    &id,
+                    MetadataChange {
+                        title: Some("saved wisp".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            drop(hook);
+            assert_eq!(
+                error.code,
+                match failure {
+                    "graph" => "invalid_source",
+                    "load" => "invalid_format",
+                    _ => "not_found",
+                },
+                "{error:?}"
+            );
+            assert_eq!(error.details["publication"], "published");
+            assert_eq!(
+                error.details["published_item"],
+                json!({"id":id,"path":encode_path(&path)})
+            );
+            assert_eq!(
+                error.details["partial"]["updated"],
+                json!([error.details["published_item"]])
+            );
+            let retained =
+                decode_path(error.details["previous_source_path"].as_str().unwrap()).unwrap();
+            assert_eq!(retained.parent(), path.parent());
+            assert_eq!(fs::read(retained).unwrap(), original);
+            if failure == "load" {
+                assert_eq!(error.path, Some(unexpected));
+            }
+        }
+    }
+
+    #[test]
+    fn wisp_completion_failures_keep_recovery_and_last_attempted_ending_publication() {
+        for status in ["not_published", "possible", "published"] {
+            let mut fixture = Fixture::new();
+            let (id, path) = fixture_wisp(&fixture);
+            let original = fs::read(&path).unwrap();
+            let session = test_session();
+            let (claim, _) = fixture.ops.acquire(&id, "worker", &session).unwrap();
+            let claim_id = claim["id"].as_str().unwrap().to_owned();
+            fixture.ops.authorization.push(ClaimAuthorization {
+                claim_id: claim_id.clone(),
+                session,
+            });
+            let ending = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join(format!("work/claims/{claim_id}.end.yaml"));
+            let lock = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join("work/coordination.lock");
+            let substituted = lock.clone();
+            let installed = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let retained_fault = installed.clone();
+            let hook = super::super::storage::files::on_nth(
+                "after_directory_sync",
+                if status == "published" { 2 } else { 1 },
+                move || {
+                    if status == "published" {
+                        fs::rename(&substituted, substituted.with_extension("retained")).unwrap();
+                        fs::write(substituted, b"").unwrap();
+                    } else {
+                        *installed.borrow_mut() = Some(super::super::storage::files::fail_next(
+                            if status == "possible" {
+                                "publication_sync"
+                            } else {
+                                "before_publication"
+                            },
+                        ));
+                    }
+                },
+            );
+            let error = fixture.ops.close(&id, None).unwrap_err();
+            drop(hook);
+            drop(retained_fault);
+            assert_eq!(error.details["publication"], status, "{error:?}");
+            assert_eq!(
+                error.code,
+                if status == "published" {
+                    "conflict"
+                } else {
+                    "io"
+                }
+            );
+            assert_eq!(
+                error.path.as_deref(),
+                Some(if status == "published" {
+                    lock.as_path()
+                } else {
+                    ending.as_path()
+                })
+            );
+            assert_eq!(
+                error.details["errno"],
+                if status == "published" {
+                    Value::Null
+                } else {
+                    json!(5)
+                }
+            );
+            assert_eq!(
+                error.details["partial"]["updated"],
+                json!([{"id":id,"path":encode_path(&path)}])
+            );
+            assert_eq!(
+                error.details["partial"]["uncertain_paths"],
+                if status == "possible" {
+                    json!([encode_path(&ending)])
+                } else {
+                    json!([])
+                }
+            );
+            assert_eq!(
+                error.details["partial"]["created"],
+                if status == "published" {
+                    json!([{"id":claim_id,"path":encode_path(&ending)}])
+                } else {
+                    json!([])
+                }
+            );
+            assert_eq!(ending.is_file(), status != "not_published");
+            let recovery =
+                decode_path(error.details["previous_source_path"].as_str().unwrap()).unwrap();
+            assert_eq!(fs::read(recovery).unwrap(), original);
+            assert!(
+                String::from_utf8(fs::read(&path).unwrap())
+                    .unwrap()
+                    .contains("state: done")
+            );
+            if status == "not_published" {
+                // Retry saves only the ending; the unchanged wisp must not be
+                // exchanged again or invent a new previous-source path.
+                let noop = fixture.ops.close(&id, None).unwrap();
+                assert!(noop.recovery_path.is_none());
+                assert!(ending.is_file());
+            }
         }
     }
 }

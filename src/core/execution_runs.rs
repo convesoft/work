@@ -325,7 +325,18 @@ impl ExecutionOperations {
         }
         let mut writers = BTreeMap::new();
         for root in roots {
-            writers.insert(root.clone(), CheckoutWriter::open(&root)?);
+            let writer = if root == self.project.worktree_root
+                && plan
+                    .items
+                    .iter()
+                    .any(|item| item.persistence == Persistence::Material)
+                && !v.sources.values().any(|source| source == &root)
+            {
+                CheckoutWriter::open_destination(&root)?
+            } else {
+                CheckoutWriter::open(&root)?
+            };
+            writers.insert(root, writer);
         }
         v.recheck(&g)?;
         g.verify()?;
