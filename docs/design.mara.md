@@ -26,7 +26,7 @@ Work items are graph nodes with relationships expressing process constraints. A 
 All authoritative Work state lives in separate Markdown/YAML entity files:
 
 - Versioned project files own durable intent, relationships and retained feature outcomes.
-- Shared unversioned execution files own run manifests, wisps, active-run execution state and handoff context.
+- Shared unversioned execution files own run manifests, wisps, workspace references and handoff context.
 - Shared unversioned operational files own claims, workspace associations, optional named sessions and recoverable operation metadata.
 
 [[DES-SHARED-FILES]] defines location and checkout isolation; [[DES-ENTITY-LIFECYCLES]] defines each entity's place and retention. There is no database or single repository-wide entity snapshot. In-memory graph/lookup data is disposable and derived from these files. Process restart does not discard operational ownership. Rebuilding a derived view never resets claims or erases execution context.
@@ -90,7 +90,7 @@ Readiness and blocking derive from lifecycle prerequisites; ownership derives fr
 
 A template creates predefined items and relationships. Each item is material (durable) or a wisp (temporary), and one template can mix both. There is no planning/execution category on the template. Material items go to the selected checkout's `.work/items/`; wisps go to a target run's `items/`. A material-only expansion needs no run. A template containing wisps needs a target run; exact CLI/MCP selection and the per-item format extension must be specified before implementation.
 
-An item has one run; callers cannot create competing independent executions for it. A run groups the root's execution, wisps and active execution state. Run membership is operational grouping, not an implicit parent relationship or an extra graph task. Normal queries use the active-run state as specified by [[REQ-WORKTREE-VIEWS]]. Sessions and workspaces may span items. External controllers choose dispatch and parallelism; Work does not launch agents.
+A root has one current run; callers cannot create competing executions. After it is finalized or disposed, a fresh run ID can represent later work on that root. A run groups execution, wisps and workspace references. Run membership is operational grouping, not an implicit parent relationship or an extra graph task. Normal queries resolve each material item's associated worktree and read the actual item file there under [[REQ-WORKTREE-VIEWS]]; runs contain no duplicate material-state layer. Sessions and workspaces may span items. External controllers choose dispatch and parallelism; Work does not launch agents.
 
 Repeated expansion can add findings, fixes and new review rounds through ordinary items and blocking edges. It creates no application record, provenance entity or idempotency receipt. Preview uses local keys; creation assigns permanent IDs and returns their mapping as an operation result. Validate the prospective graph before writing; if writing stops partway, report known created items and leave inspection, deletion and retry to the caller under [[REQ-RUN-ATOMICITY]]. No atomic multi-file publication or automatic retry deduplication is promised. Here, publication means creating item files, not creating an additional lifecycle entity.
 
@@ -124,7 +124,7 @@ Work tracks and coordinates work; external tools run agents, create worktrees, a
 
 Store each run under `<resolved Git common directory>/work/runs/<run-id>/`, with a `run.yaml` manifest, separate `items/` wisp files, and optional `sessions/` records. No `applications/` directory or template application entity is required. Linked worktrees share this location; independent clones do not.
 
-The manifest owns run/root identity and source/output checkout context. Wisps own their metadata, relationships and bodies. Active-run state for durable items must have an explicit file representation without copying durable bodies or embedding all entities into the manifest; the exact envelope belongs to the run implementation. Handoffs, claims and workspace records remain independent entities with their own lifecycles.
+The manifest owns run/root identity and source/output checkout context. Wisps own their metadata, relationships and bodies. Material items keep their body, metadata, relationships and state in their associated worktree files. Shared workspace references resolve those files; there is no run-owned copy of material state. Handoffs, claims and workspace records remain independent entities with their own lifecycles.
 
 [[DES-FILE-COORDINATION]] defines locking and individual file safety. Template expansion may leave a partial result for caller inspection and cleanup under [[REQ-RUN-ATOMICITY]]; it requires no committed-manifest visibility protocol. For squash, retain required results as a root digest extension before removing temporary context. Explicit discard may instead remove run-owned wisps without a digest under [[DES-SQUASH-DIGEST]]; finishing a run alone does not delete them.
 :::
@@ -221,7 +221,7 @@ Explicit discard is the alternative when temporary detail need not be retained. 
 :satisfies: REQ-SIDE-STATE
 :satisfies: REQ-EXTERNAL-EXECUTION
 
-Keep one YAML file per workspace under shared `workspaces/` as defined in [[DES-ENTITY-LIFECYCLES]], identifying an externally managed path/worktree with optional branch and commit context. A workspace can be reused by multiple activities and shared across sessions; it is not owned by a session or claim. Record a default workspace for a run and allow an item to override it. A claim records its resolved execution workspace. Associations survive individual completion and claim release.
+Keep one YAML file per workspace under shared `workspaces/` as defined in [[DES-ENTITY-LIFECYCLES]], identifying an externally managed path/worktree with optional branch and commit context. A workspace can be reused by multiple activities and shared across sessions; it is not owned by a session or claim. Record a default workspace for a run and allow an item to override it. A claim records its resolved execution workspace. Associations survive individual completion and claim release. For material items they resolve the whole authoritative item file under [[REQ-WORKTREE-VIEWS]]; run finalization/disposal must preserve any association still needed to locate material progress. Update or remove that association explicitly when work moves or workspace cleanup establishes a surviving source. No material state is copied into workspace or run records.
 
 Sharing records does not lock the underlying filesystem: item claims exclude competing ownership of an item, not concurrent writes by different items. External tooling controls execution concurrency; shared-resource locks remain deferred.
 

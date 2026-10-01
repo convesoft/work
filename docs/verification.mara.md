@@ -72,7 +72,7 @@ Use independent processes in linked worktrees to claim the same item simultaneou
 :verifies: REQ-INDEX-REBUILD
 :validates: SCN-REBUILD-INDEX
 
-Create linked worktrees whose same-ID durable item differs in content and completion, including uncommitted changes. Alternate queries and source reloads from each tree. Without active-run state, expect the selected checkout's recorded state. Add active-run state and expect normal inspection/readiness from both checkouts to use it, while retaining each checkout's own body and relationships and exposing the recorded/effective state source. Querying the overlay must not rewrite durable files. Finalizing a finished run must not close an open root. Shared claims exclude competing execution across both trees. Restart and reconstruct the in-memory graph with claims, runs, sessions, workspaces and handoffs present; compare authoritative file bytes and require unchanged ownership/context.
+Create linked worktrees whose same-ID durable item differs in content and completion, including uncommitted changes. Alternate queries and source reloads from each tree. Without an association, expect the selected checkout's file. Associate the item with a feature worktree and expect normal inspection/readiness from either checkout to read its body, metadata, relationships and state together from that feature file, exposing the source path. Mutate/close the material item and verify it is saved immediately in that file, with no separate run-state copy and no main-file change. Explicit branch-local inspection can still show main's older file. Restart and dispose of the run: the material file and needed source association survive. An unavailable associated worktree is reported instead of silently falling back to main. Finalizing a finished run must not close an open root. Shared claims exclude competing execution across both trees. Restart and reconstruct the in-memory graph with claims, runs, sessions, workspaces and handoffs present; compare authoritative file bytes and require unchanged ownership/context.
 
 From a control checkout select each worktree by path and inspect its content without switching branches. Exercise branch switching and externally removing an eligible feature worktree; shared run/claim files remain inspectable and cannot be recreated from stale branch-local claim copies. The operational workspace record follows explicit cleanup reporting. In a separate stopped-execution fixture corrupt or remove recognizable initialized store metadata: require a warning for available file inspection/readiness, blocked claims, preserved surviving entity files and an explicit recovery path.
 :::
@@ -148,7 +148,7 @@ Exercise item selection, claiming, run creation, and supplied workspace or PR/CI
 :method: test
 :verifies: REQ-EPHEMERAL-FILES
 
-Create a run with multiple wisps and active execution state, including items created by repeated template expansion. Inspect the separate manifest and entity files directly; no application/provenance entity is required. Restart Work and rebuild its disposable view without any database or persistent index; expect all content, edges, active execution state and ownership records to remain. In a stopped-execution fixture corrupt one entity file and verify diagnostics identify its path and preserve the other entities. Temporary cleanup remains an explicit lifecycle operation, never a side effect of rebuilding a graph.
+Create a run with multiple wisps and workspace references, including items created by repeated template expansion. Inspect the separate manifest and entity files directly; no application/provenance entity is required. Restart Work and rebuild its disposable view without any database or persistent index; expect all content, edges, workspace references and ownership records to remain. In a stopped-execution fixture corrupt one entity file and verify diagnostics identify its path and preserve the other entities. Temporary cleanup remains an explicit lifecycle operation, never a side effect of rebuilding a graph.
 :::
 
 :::mara verification VER-NESTED-DELIVERY
@@ -257,7 +257,7 @@ Create a run-scoped implementer name pointing directly to an opaque provider/ses
 :method: test
 :verifies: REQ-SINGLE-RUN
 
-Attempt to initialize execution of the same root item from two linked worktrees concurrently. Expect one run and an explicit existing-run result or conflict, not two executions. Verify read-only inspection from the other caller succeeds. Add supporting template work and independently claim different child items within that run.
+Attempt to initialize execution of the same root item from two linked worktrees concurrently. Expect one current run and an explicit existing-run result or conflict, not two executions. Verify read-only inspection from the other caller succeeds. Add supporting template work and independently claim different child items within that run. A finished but unfinalized run is still the current run. After squash/finalization and, separately, after explicit disposal, start later work on the same root and require a fresh run ID with no old wisps resurrected. Race two starts after disposal and again require one current run. Starting a fresh run must not change the root's recorded completion.
 :::
 
 :::mara verification VER-GRAPH-PROGRESS

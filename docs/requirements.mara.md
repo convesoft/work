@@ -86,14 +86,16 @@ For the same item identity within one Git repository and its linked worktrees, s
 
 :::mara requirement REQ-WORKTREE-VIEWS
 :mid: 01M3KAQ0TDAY6227Q9RFQZMJK1
-:title: Combine selected definitions with active-run state
+:title: Resolve current material items from their associated worktrees
 :status: accepted
 :kind: quality
 :derives_from: SCN-CONCURRENT-AGENTS
 
-A query shall use the selected checkout's durable item definition, body and relationships. When an item has active-run execution state, normal inspection and readiness shall use that shared state, consistently across linked worktrees. Without active-run state, use the selected checkout's recorded lifecycle state. Responses shall distinguish effective execution state from the durable state recorded in that checkout; reading the overlay does not rewrite a branch's files.
+For an actively associated material item, normal inspection, readiness and item mutations shall resolve that item's worktree and use its actual `.work/items/<id>.md` file, including uncommitted changes. Body, metadata, relationships and recorded lifecycle state come from the same resolved file. Material changes are saved there when made, not buffered in a separate run-state overlay or flushed only at finalization. The run/workspace association identifies the location; it does not own a second copy of the item's state.
 
-The controller can inspect another worktree by filesystem path, including uncommitted content, without switching its checkout. The selected path determines durable definitions; the Git common directory determines claims, runs and effective execution state. Branch divergence does not create independent claim identities. Run finalization does not implicitly close the root; root completion is a separate lifecycle operation.
+Without an item worktree association, use the selected checkout's durable file view. Expose the resolved source worktree/path so the caller can distinguish current execution content from an explicitly inspected branch-local copy. Explicit source inspection can still read another checkout by path without switching the caller's checkout. An unavailable associated source must be reported rather than silently replaced with stale main content.
+
+Claims remain repository-wide. Squash or discard removes temporary context without resetting material progress or implicitly closing the root. Material files reach main through normal Git merge; Work does not synchronize their contents automatically. Workspace associations follow [[DES-WORKSPACE-ASSOCIATIONS]] and must retain enough source-location context until explicit reassociation or workspace cleanup.
 :::
 
 :::mara requirement REQ-CLAIM-RECOVERY
@@ -185,7 +187,7 @@ Retired proposal: Work would interpret structured external observations and enfo
 :kind: constraint
 :derives_from: SCN-QUIET-EXECUTION
 
-Wisp content and graph relationships, run metadata and active-run execution state shall be stored in inspectable filesystem documents until explicitly finalized. Each entity shall have its own file and defined retention; a process restart, derived-view rebuild or feature-worktree removal shall not discard the shared execution files.
+Wisp content and graph relationships, run metadata and workspace references shall be stored in inspectable filesystem documents until explicitly finalized. Each entity shall have its own file and defined retention; a process restart, derived-view rebuild or feature-worktree removal shall not discard the shared execution files.
 :::
 
 :::mara requirement REQ-CLI-MCP-PARITY
@@ -310,12 +312,14 @@ Workspace cleanup shall be represented by an ordinary explicit work item. Comple
 
 :::mara requirement REQ-SINGLE-RUN
 :mid: 01M3KVG3GE1YS3FYYM9Z5512MN
-:title: Keep one run per root item
+:title: Keep one current run per root and allow later runs
 :status: accepted
 :kind: functional
 :derives_from: SCN-CONCURRENT-AGENTS
 
-An item shall have one run rather than independent executions per worktree or caller. Requests to start another run for the same root shall identify the existing run or return an explicit conflict. Other callers may read its progress. Supporting template applications and parallel work on distinct child items belong to that existing execution scope. Finalization metadata and behavior after squash remain to be specified without introducing competing runs.
+A root item shall have at most one current run across linked worktrees and callers. While that run is retained and not finalized or disposed, another start shall identify it or return an explicit conflict, including when its work is already finished. Supporting template expansion and parallel work on distinct members belong to that same execution scope.
+
+After the prior run is finalized or explicitly disposed, the same root may start a new run with a fresh run ID. Do not reuse the old identity, resurrect discarded wisps or permit competing current runs. Starting another run does not implicitly reopen or complete the durable root.
 :::
 
 :::mara requirement REQ-GRAPH-PROGRESS

@@ -6,12 +6,12 @@ The product model and initial scope are established. The remaining work below co
 
 | Choice | What remains unresolved | Affected contract |
 | --- | --- | --- |
-| File formats | Item/template formats are defined. The entity layout and lifetimes are settled; exact envelopes for emitted claims and retirement, runs and active execution state, sessions, workspaces and handoffs still need fields and ID rules. The per-item material/wisp selector is a planned template extension; it is not implemented in current preview | [[DES-ENTITY-LIFECYCLES]], [[DES-ITEM-FORMAT]], [[DES-TEMPLATE-FORMAT]] |
-| Worktree views and claims | Source-change detection, claim mutation integration with checkout-local locks, and representation of the surviving output checkout. Selected durable definitions plus shared active-run state, path selection, one run per item and repository-wide exclusion are settled | [[DES-FILE-COORDINATION]], [[REQ-SINGLE-RUN]], [[REQ-WORKTREE-VIEWS]] |
+| File formats | Item/template formats are defined. The entity layout and lifetimes are settled; exact envelopes for emitted claims and retirement, runs and workspace references, sessions, workspaces and handoffs still need fields and ID rules. The per-item material/wisp selector is a planned template extension; it is not implemented in current preview | [[DES-ENTITY-LIFECYCLES]], [[DES-ITEM-FORMAT]], [[DES-TEMPLATE-FORMAT]] |
+| Worktree views and claims | Source-change detection, claim mutation integration with checkout-local locks, and representation of the surviving output checkout. Reading and writing the whole material item in its associated worktree, explicit path inspection, one current run per root with later fresh runs, and repository-wide claim exclusion are settled | [[DES-FILE-COORDINATION]], [[REQ-SINGLE-RUN]], [[REQ-WORKTREE-VIEWS]] |
 | Ownership recovery | Foundation initialization, detectable loss, explicit recreation and status-only scope are defined in [[DES-STORE-FOUNDATION]] and [[DES-STORAGE-API]]. Claim ID plus session identity replaces separate ownership tokens. New acquisitions retain distinct claim identities; exact release/retirement encoding remains to be defined. Backup/restore is deferred until relevant entity formats exist. No automatic expiry or mandatory heartbeat | [[REQ-CLAIM-RECOVERY]], [[DES-FILE-COORDINATION]] |
 | Session reuse | Assignment-hint and optional availability-observation serialization. Names are run-scoped and removed during successful finalization cleanup; one-time workers need no named registration | [[DES-CLAIM-CONTEXT]] |
 | Workspace cleanup protocol | Cleanup-target representation and recovery after physical deletion but before reporting success. Check users and mark closing before removal, reject new assignments, execute from a surviving checkout, and retain failure context | [[REQ-WORKSPACE-CLEANUP]], [[DES-WORKSPACE-ASSOCIATIONS]] |
-| Run file protocol | Exact run/state envelopes and CLI/MCP creation results. Mixed templates create material items in the selected checkout and wisps inside a run; material-only expansion needs no run. No application records or atomic multi-file publication: agents inspect partial files, remove them and retry. A run finishes when member obligations resolve and no active claims remain; the root is separate | [[REQ-RUN-ATOMICITY]], [[DES-TEMPLATE-RUNS]], [[DES-FILE-COORDINATION]] |
+| Run file protocol | Exact run/workspace-reference envelopes and CLI/MCP creation results. Mixed templates create material items in the selected checkout and wisps inside a run; material-only expansion needs no run. No application records or atomic multi-file publication: agents inspect partial files, remove them and retry. A run finishes when member obligations resolve and no active claims remain; the root is separate | [[REQ-RUN-ATOMICITY]], [[DES-TEMPLATE-RUNS]], [[DES-FILE-COORDINATION]] |
 | Squash and cleanup | Exact representation and repeat-call behavior of the caller-authored root digest extension. Squash retains it before cleanup without creating a digest item or closing the root. Explicit discard needs no digest and may abandon unfinished wisps; its exact CLI/MCP and disposal representation remain to be specified. Both paths refuse active target claims and outside references needing the deletion set | [[REQ-RUN-FINALIZATION]], [[DES-SQUASH-DIGEST]] |
 | Handoff operations | Concurrent receiver changes and recoverable save/release/cleanup. Cancellation resolves a receiver; reopening does not resurrect deleted notes | [[DES-HANDOFF-RECORDS]] |
 | Selection metadata | Scope/filter operation schema remains open; [[DES-TEMPLATE-FORMAT]] settles model/thinking template defaults. Version 1 defines priority 0–4 with ID tie-breaking, exact case-sensitive labels, and no parent inheritance | [[DES-ITEM-FORMAT]], [[REQ-WORK-SELECTION]], [[REQ-EXECUTOR-HINTS]] |
@@ -31,13 +31,15 @@ Snooze/defer scheduling, arbitrary promotion of temporary items, general batch e
 
 :::mara risk RISK-DIVERGENT-VIEWS
 :mid: 01M3KAW7AX5F7AF33GXDF9955F
-:title: Distinguish selected definitions from shared execution state
+:title: Resolve the correct worktree without mixing item versions
 :status: accepted
 :treatment: open
 :affects: REQ-DURABLE-FILES
 :affects: DES-SHARED-FILES
 
-Linked worktrees can hold different durable definitions of the same item. A global definition cache keyed only by item ID could mix bodies or relationships from different branches. Keep durable definitions scoped to the selected checkout. Active-run execution state is intentionally shared and takes precedence in normal lifecycle queries; expose its source and distinguish it from the checkout's recorded state. Neither reading shared state nor finalizing a run rewrites or implicitly closes the root. Resolve source-change detection before implementing cross-worktree selection. Obligation: [[REQ-WORKTREE-VIEWS]].
+Linked worktrees can hold different versions of the same material item. A global definition cache keyed only by item ID can return stale main content or combine state from one worktree with a body from another. Resolve the item's associated worktree before loading its whole file, and expose that source to the caller. With no association, use the selected checkout. Keep explicit branch-local inspection available; do not treat an unavailable associated worktree as permission to substitute stale content.
+
+Material mutations are saved in that worktree immediately. Run finalization/disposal must neither reset them nor lose the source association needed to find them. Reassociation and external workspace cleanup retain their existing explicit lifecycles. Obligation: [[REQ-WORKTREE-VIEWS]].
 :::
 
 :::mara risk RISK-FILE-DB-CONSISTENCY
