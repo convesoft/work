@@ -53,8 +53,22 @@ impl From<StorageError> for ExecutionError {
 impl From<OperationError> for ExecutionError {
     fn from(e: OperationError) -> Self {
         let mut result = Self::new(e.code(), e.to_string());
+        result.details["publication"] = json!(if e.published_item().is_some() {
+            "published"
+        } else {
+            "not_published"
+        });
         if let Some((id, path)) = e.published_item() {
-            result.details["published_item"] = json!({"id":id,"path":encode_path(path)});
+            let item = json!({"id":id,"path":encode_path(path)});
+            result.details["published_item"] = item.clone();
+            let mut partial = json!({"created":[],"updated":[],"deleted":[],"uncertain_paths":[]});
+            let bucket = if e.previous_source_path().is_some() {
+                "updated"
+            } else {
+                "created"
+            };
+            partial[bucket] = json!([item]);
+            result.details["partial"] = partial;
         }
         if let Some(path) = e.previous_source_path() {
             result.details["previous_source_path"] = json!(encode_path(path));
@@ -263,8 +277,21 @@ impl CoordinationGuard {
         self.writable()?;
         let (dir, name) = self.parent(path)?;
         let stage = format!(".storage-{}", new_id()?);
-        dir.publish(&name, raw, expected, &stage)?;
-        self.verify()
+        let retained = dir.publish(&name, raw, expected, &stage)?;
+        self.verify().map_err(|mut error| {
+            // Publication and directory sync completed before this final lock check.
+            error.details["publication"] = json!("published");
+            error.details["published_path"] = json!(encode_path(&dir.path.join(&name)));
+            if let Some(path) = retained {
+                let mut paths = error.details["recovery_paths"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                paths.push(json!(encode_path(&path)));
+                error.details["recovery_paths"] = json!(paths);
+            }
+            error
+        })
     }
     pub fn delete(&self, path: &Path, expected: &EntitySource) -> ExecutionResult<()> {
         self.writable()?;
@@ -395,4 +422,193 @@ pub fn decode_path(s: &str) -> ExecutionResult<PathBuf> {
         ));
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use crate::core::{
+        claims::{ClaimAuthorization, ClaimStore},
+        context::ContextStore,
+        execution::ExecutionOperations,
+        operations::MetadataChange,
+        project::discover,
+        storage::files,
+    };
+    use std::{fs, process::Command};
+    struct Fixture {
+        root: PathBuf,
+        ops: ExecutionOperations,
+        item: String,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "work-coordination-publication-{}",
+                new_id().unwrap()
+            ));
+            fs::create_dir_all(root.join(".work/items")).unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["init", "-q"])
+                    .arg(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let ops = ExecutionOperations::new(discover(Some(&root)).unwrap());
+            let item = ops
+                .create("task".into(), b"body".to_vec(), MetadataChange::default())
+                .unwrap()
+                .file
+                .header
+                .unwrap()
+                .id;
+            Storage::new(ops.project.clone()).initialize().unwrap();
+            Self { root, ops, item }
+        }
+        fn session() -> SessionIdentity {
+            SessionIdentity {
+                namespace: "test".into(),
+                id: "owner".into(),
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+    fn substitute_lock(path: PathBuf) {
+        fs::rename(&path, path.with_extension("retained")).unwrap();
+        fs::write(path, b"").unwrap();
+    }
+    #[test]
+    fn final_guard_failure_reports_synced_creation_and_replacement() {
+        for replace in [false, true] {
+            let f = Fixture::new();
+            let g = CoordinationGuard::acquire(&f.ops.project, true).unwrap();
+            let path = Path::new("claims/test.yaml");
+            let source = if replace {
+                g.create(path, b"before").unwrap();
+                Some(g.read(path).unwrap())
+            } else {
+                None
+            };
+            let lock = g.root_path().join("coordination.lock");
+            let hook = files::on_next("after_directory_sync", move || substitute_lock(lock));
+            let error = match &source {
+                Some(source) => g.replace(path, source, b"after"),
+                None => g.create(path, b"after"),
+            }
+            .unwrap_err();
+            drop(hook);
+            assert_eq!(error.code, "conflict");
+            assert_eq!(error.details["publication"], "published");
+            assert_eq!(
+                error.details["published_path"],
+                encode_path(&g.root_path().join(path))
+            );
+            assert_eq!(error.path, Some(g.root_path().join("coordination.lock")));
+            assert_eq!(fs::read(g.root_path().join(path)).unwrap(), b"after");
+            if replace {
+                let retained = error.details["recovery_paths"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
+                assert_eq!(fs::read(decode_path(retained).unwrap()).unwrap(), b"before");
+            }
+        }
+    }
+    #[test]
+    fn acquisition_final_guard_failure_reports_installed_claim() {
+        let f = Fixture::new();
+        {
+            let g = CoordinationGuard::acquire(&f.ops.project, true).unwrap();
+            let workspace = ContextStore::register(&g, &f.root).unwrap();
+            ContextStore::bind(&g, &f.item, &workspace).unwrap();
+        }
+        let lock = f.ops.project.git_common_dir.join("work/coordination.lock");
+        let hook = files::on_next("after_directory_sync", move || substitute_lock(lock));
+        let error = f
+            .ops
+            .acquire(&f.item, "actor", &Fixture::session())
+            .unwrap_err();
+        drop(hook);
+        assert_eq!(error.details["publication"], "published");
+        let created = error.details["partial"]["created"].as_array().unwrap();
+        assert_eq!(created.len(), 1);
+        let path = decode_path(created[0]["path"].as_str().unwrap()).unwrap();
+        assert!(path.is_file());
+        assert_eq!(error.details["published_path"], created[0]["path"]);
+    }
+    #[test]
+    fn acquisition_reload_failure_keeps_installed_claim_evidence() {
+        let f = Fixture::new();
+        {
+            let g = CoordinationGuard::acquire(&f.ops.project, true).unwrap();
+            let workspace = ContextStore::register(&g, &f.root).unwrap();
+            ContextStore::bind(&g, &f.item, &workspace).unwrap();
+        }
+        let invalid = f
+            .ops
+            .project
+            .git_common_dir
+            .join("work/workspaces/unexpected");
+        let hook = files::on_next("after_directory_sync", move || {
+            fs::write(invalid, b"invalid").unwrap();
+        });
+        let error = f
+            .ops
+            .acquire(&f.item, "actor", &Fixture::session())
+            .unwrap_err();
+        drop(hook);
+        assert_eq!(error.code, "invalid_format");
+        assert_eq!(error.details["publication"], "published");
+        let created = error.details["partial"]["created"].as_array().unwrap();
+        assert_eq!(created.len(), 1);
+        assert!(
+            decode_path(created[0]["path"].as_str().unwrap())
+                .unwrap()
+                .is_file()
+        );
+    }
+    #[test]
+    fn close_checkout_failure_keeps_saved_item_and_active_claim_evidence() {
+        let mut f = Fixture::new();
+        let claim = f
+            .ops
+            .acquire(&f.item, "actor", &Fixture::session())
+            .unwrap()
+            .0;
+        f.ops.authorization.push(ClaimAuthorization {
+            claim_id: claim["id"].as_str().unwrap().into(),
+            session: Fixture::session(),
+        });
+        let original = fs::read(f.root.join(format!(".work/items/{}.md", f.item))).unwrap();
+        let hook = files::fail_next("checkout_after_publish");
+        let error = f.ops.close(&f.item, None).unwrap_err();
+        drop(hook);
+        assert_eq!(error.code, "io");
+        assert_eq!(error.details["publication"], "published");
+        assert_eq!(
+            error.details["partial"]["updated"],
+            json!([error.details["published_item"]])
+        );
+        assert_eq!(error.details["published_item"]["id"], f.item);
+        assert_eq!(
+            fs::read(decode_path(error.details["previous_source_path"].as_str().unwrap()).unwrap())
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            f.ops.inspect(&f.item).unwrap().file.header.unwrap().state,
+            Some(crate::core::items::ManualState::Done)
+        );
+        let g = CoordinationGuard::acquire(&f.ops.project, false).unwrap();
+        assert!(ClaimStore::current(&g, &f.item).unwrap().is_some());
+    }
 }

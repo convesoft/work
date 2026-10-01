@@ -1564,6 +1564,13 @@ impl CheckoutWriter {
             snapshot,
         })
     }
+    pub(crate) fn verify(&self) -> Result<(), OperationError> {
+        #[cfg(test)]
+        super::storage::files::inject("checkout_verify", &self.ops.root)
+            .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+        self.ops
+            .check_snapshot(&self.lock, &self.items, &self.snapshot)
+    }
     pub(crate) fn publish(
         &mut self,
         header: &ItemHeader,
@@ -1669,6 +1676,47 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with(".operation-"))
             .count()
+    }
+
+    #[test]
+    fn checkout_writer_verification_rejects_replaced_identities_with_unchanged_source_bytes() {
+        for replaced in ["root", "work", "items", "lock"] {
+            let (root, id) = fixture();
+            let writer = CheckoutWriter::open(&root).unwrap();
+            let raw = writer.snapshot.resolve(&id).unwrap().raw.clone();
+            let selected = match replaced {
+                "root" => root.clone(),
+                "work" => root.join(".work"),
+                "items" => root.join(".work/items"),
+                "lock" => root.join(".work/operations.lock"),
+                _ => unreachable!(),
+            };
+            let retained = selected.with_extension("held");
+            fs::rename(&selected, &retained).unwrap();
+            if replaced == "lock" {
+                fs::write(&selected, b"").unwrap();
+            } else {
+                fs::create_dir_all(root.join(".work/items")).unwrap();
+                fs::write(root.join(".work/items").join(format!("{id}.md")), &raw).unwrap();
+                fs::write(root.join(".work/operations.lock"), b"").unwrap();
+            }
+            assert_eq!(
+                ItemStore::load_from_root(&root)
+                    .unwrap()
+                    .resolve(&id)
+                    .unwrap()
+                    .raw,
+                raw
+            );
+            let error = writer.verify().unwrap_err();
+            assert!(matches!(error, OperationError::Conflict(_)));
+            assert!(error.published_item().is_none());
+            drop(writer);
+            fs::remove_dir_all(&root).unwrap();
+            if replaced == "root" {
+                fs::remove_dir_all(retained).unwrap();
+            }
+        }
     }
 
     #[test]

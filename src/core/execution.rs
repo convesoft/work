@@ -435,18 +435,19 @@ impl ExecutionOperations {
         let v = ResolvedView::load(&g)?;
         let mut candidate = candidate(&g, &v, input)?;
         ClaimStore::validate_acquire(&g, &candidate, actor, session)?;
-        let _source_lock = material_source_lock(&v, &candidate.header.id)?;
+        let source_lock = material_source_lock(&v, &candidate.header.id)?;
         let mut created = Vec::new();
         let result = (|| {
             prepare_claim_context(&g, &v, &mut candidate, &mut created)?;
-            let result =
-                ClaimStore::acquire_checked(&g, &candidate, actor, session, || v.recheck())?;
+            let result = ClaimStore::acquire_checked(&g, &candidate, actor, session, || {
+                verify_claim_source(&source_lock, &v)
+            })?;
             created.push(json!({"id":result.claim.id,"path":encode_path(&g.root_path().join(format!("claims/{}.yaml",result.claim.id)))}));
-            let current = ResolvedView::load(&g)?;
-            Ok((
-                result.claim.to_json(),
-                inspect(&g, &current, &candidate.header.id)?,
-            ))
+            let current = ResolvedView::load(&g).map_err(claim_postpublication_error)?;
+            let inspection =
+                inspect(&g, &current, &candidate.header.id).map_err(claim_postpublication_error)?;
+            verify_claim_source(&source_lock, &v).map_err(claim_postpublication_error)?;
+            Ok((result.claim.to_json(), inspection))
         })();
         result.map_err(|error| with_setup_progress(error, &created))
     }
@@ -463,7 +464,7 @@ impl ExecutionOperations {
         let v = ResolvedView::load(&g)?;
         let mut candidate = candidate(&g, &v, &old.claim.item_id)?;
         ClaimStore::validate_reassign(&g, id, &candidate, actor, session, reason, stopped)?;
-        let _source_lock = material_source_lock(&v, &candidate.header.id)?;
+        let source_lock = material_source_lock(&v, &candidate.header.id)?;
         let mut created = Vec::new();
         let result = (|| {
             prepare_claim_context(&g, &v, &mut candidate, &mut created)?;
@@ -475,7 +476,7 @@ impl ExecutionOperations {
                 session,
                 reason,
                 stopped,
-                || v.recheck(),
+                || verify_claim_source(&source_lock, &v),
             )?;
             for (id, name) in [
                 (
@@ -488,13 +489,21 @@ impl ExecutionOperations {
                     json!({"id":id,"path":encode_path(&g.root_path().join("claims").join(name))}),
                 );
             }
-            Ok((
-                result.claim.to_json(),
-                inspect(&g, &v, &candidate.header.id)?,
-            ))
+            let inspection =
+                inspect(&g, &v, &candidate.header.id).map_err(claim_postpublication_error)?;
+            verify_claim_source(&source_lock, &v).map_err(claim_postpublication_error)?;
+            Ok((result.claim.to_json(), inspection))
         })();
         result.map_err(|error| with_setup_progress(error, &created))
     }
+}
+fn verify_claim_source(writer: &CheckoutWriter, view: &ResolvedView) -> ExecutionResult<()> {
+    writer.verify()?;
+    view.recheck()
+}
+fn claim_postpublication_error(mut error: ExecutionError) -> ExecutionError {
+    error.details["publication"] = json!("published");
+    error
 }
 fn material_source_lock(v: &ResolvedView, id: &str) -> ExecutionResult<CheckoutWriter> {
     let root = v
@@ -1336,6 +1345,167 @@ mod tests {
             fixture.ops.inspect(&id).unwrap().file.header.unwrap().title,
             "original"
         );
+    }
+
+    #[test]
+    fn acquisition_rejects_substituted_checkout_lock_before_and_after_publication() {
+        for after_publication_check in [false, true] {
+            let fixture = Fixture::new();
+            let id = fixture_item(&fixture);
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let root = fixture.root.clone();
+            let item_id = id.clone();
+            let hook = super::super::storage::files::on_nth(
+                if after_publication_check {
+                    "before_publication"
+                } else {
+                    "checkout_verify"
+                },
+                if after_publication_check { 3 } else { 1 },
+                move || {
+                    fs::rename(
+                        root.join(".work/operations.lock"),
+                        root.join(".work/old.lock"),
+                    )
+                    .unwrap();
+                    fs::write(root.join(".work/operations.lock"), b"").unwrap();
+                    if after_publication_check {
+                        DurableOperations::new(&root).close(&item_id, None).unwrap();
+                    }
+                },
+            );
+            let error = fixture
+                .ops
+                .acquire(&id, "owner", &test_session())
+                .unwrap_err();
+            drop(hook);
+            assert_eq!(error.code, "conflict");
+            assert!(error.message.contains("operation lock changed"));
+            assert_eq!(
+                error.details["publication"],
+                if after_publication_check {
+                    "published"
+                } else {
+                    "not_published"
+                }
+            );
+            let guard = CoordinationGuard::acquire(&fixture.ops.project, false).unwrap();
+            let current = ClaimStore::current(&guard, &id).unwrap();
+            if after_publication_check {
+                let claim = current.unwrap();
+                let record = json!({"id":claim.id,"path":encode_path(&guard.root_path().join(format!("claims/{}.yaml",claim.id)))});
+                assert!(
+                    error.details["partial"]["created"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&record)
+                );
+                assert_eq!(
+                    DurableOperations::new(&fixture.root)
+                        .inspect(&id)
+                        .unwrap()
+                        .file
+                        .header
+                        .unwrap()
+                        .state,
+                    Some(ManualState::Done)
+                );
+            } else {
+                assert!(current.is_none());
+                assert!(
+                    error.details["partial"]["created"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|r| !r["path"].as_str().unwrap().contains("/claims/"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reassignment_rejects_substituted_checkout_lock_at_both_boundaries_and_after_publication() {
+        for boundary in ["ending", "replacement", "after"] {
+            let fixture = Fixture::new();
+            let id = fixture_item(&fixture);
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let (claim, _) = fixture.ops.acquire(&id, "owner", &test_session()).unwrap();
+            let old_id = claim["id"].as_str().unwrap();
+            let root = fixture.root.clone();
+            let item_id = id.clone();
+            let hook = super::super::storage::files::on_nth(
+                if boundary == "after" {
+                    "before_publication"
+                } else {
+                    "checkout_verify"
+                },
+                if boundary == "ending" { 1 } else { 2 },
+                move || {
+                    fs::rename(
+                        root.join(".work/operations.lock"),
+                        root.join(".work/old.lock"),
+                    )
+                    .unwrap();
+                    fs::write(root.join(".work/operations.lock"), b"").unwrap();
+                    if boundary == "after" {
+                        DurableOperations::new(&root).close(&item_id, None).unwrap();
+                    }
+                },
+            );
+            let error = fixture
+                .ops
+                .reassign(old_id, "replacement", &test_session(), "stopped", true)
+                .unwrap_err();
+            drop(hook);
+            assert_eq!(error.code, "conflict");
+            assert!(error.message.contains("operation lock changed"));
+            assert_eq!(
+                error.details["publication"],
+                if boundary == "after" {
+                    "published"
+                } else {
+                    "not_published"
+                }
+            );
+            let guard = CoordinationGuard::acquire(&fixture.ops.project, false).unwrap();
+            let old = ClaimStore::inspect(&guard, old_id).unwrap();
+            let current = ClaimStore::current(&guard, &id).unwrap();
+            let created = error.details["partial"]["created"].as_array().unwrap();
+            if boundary == "ending" {
+                assert!(old.current);
+                assert!(old.ending.is_none());
+                assert_eq!(current.unwrap().id, old_id);
+                assert!(created.is_empty());
+            } else {
+                assert!(!old.current);
+                assert!(old.ending.is_some());
+                let ending = json!({"id":old_id,"path":encode_path(&guard.root_path().join(format!("claims/{old_id}.end.yaml")))});
+                assert!(created.contains(&ending));
+                if boundary == "replacement" {
+                    assert!(current.is_none());
+                    assert_eq!(created.len(), 1);
+                } else {
+                    let claim = current.unwrap();
+                    assert_ne!(claim.id, old_id);
+                    assert!(created.contains(&json!({"id":claim.id,"path":encode_path(&guard.root_path().join(format!("claims/{}.yaml",claim.id)))})));
+                    assert_eq!(created.len(), 2);
+                    assert_eq!(
+                        DurableOperations::new(&fixture.root)
+                            .inspect(&id)
+                            .unwrap()
+                            .file
+                            .header
+                            .unwrap()
+                            .state,
+                        Some(ManualState::Done)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
