@@ -41,7 +41,7 @@ The seven implementation items are done after their merged PRs. The alpha releas
 | [w-292b3f92](items/292b3f92dfbc4dbba7cd656a21ef7095.md) | Receiver-scoped handoffs |
 | [w-6fba939e](items/6fba939e61b543b59adda11a829c238a.md) | Session and workspace associations |
 | [w-7a9d4d85](items/7a9d4d85256f438ea22e098800959cda.md) | Explicit workspace cleanup |
-| [w-350f6c4f](items/350f6c4f665f46dba64e36e73c585838.md) | Durable run finalization digest |
+| [w-350f6c4f](items/350f6c4f665f46dba64e36e73c585838.md) | Run squash with a digest or explicit ephemeral discard |
 | [w-210453f0](items/210453f0dd104a978097120cb21bc733.md) | Complete CLI/MCP beta adoption verification |
 | [w-e3640780](items/e3640780b04f404bbb3baebfa3a50a38.md) | Prepare, verify, and publish the first beta |
 

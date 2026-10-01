@@ -95,6 +95,8 @@ An item has one run; callers cannot create competing independent executions for 
 Repeated expansion can add findings, fixes and new review rounds through ordinary items and blocking edges. It creates no application record, provenance entity or idempotency receipt. Preview uses local keys; creation assigns permanent IDs and returns their mapping as an operation result. Validate the prospective graph before writing; if writing stops partway, report known created items and leave inspection, deletion and retry to the caller under [[REQ-RUN-ATOMICITY]]. No atomic multi-file publication or automatic retry deduplication is promised. Here, publication means creating item files, not creating an additional lifecycle entity.
 
 The run has finished when its member obligations are resolved and no active claims remain. The root is separate: an unfinished manual root does not prevent retaining a finished run's digest, and finalization does not complete it. [[DES-SQUASH-DIGEST]] retains a caller-written extension to the root before wisp cleanup. Durable output uses a designated surviving checkout and is not automatically committed or merged. Shared files survive feature-worktree removal. Workspace cleanup is separate and external; run completion never removes a shared workspace. Refuse cleanup that would strand outside references.
+
+Each wisp belongs to exactly one run and follows that run's execution-context lifetime. Completing a wisp, finishing the run or exiting a session does not delete it. Finished is derived from resolved member obligations and absence of active claims; adding or reopening member work makes a retained run unfinished again. Explicit squash retains a root digest before cleanup; explicit discard removes selected wisps or disposes of the run's ephemeral context without a digest under [[DES-SQUASH-DIGEST]]. Disposal can abandon unfinished work and must not be reported as successful completion.
 :::
 
 :::mara design DES-INTERFACE-ADAPTERS
@@ -124,7 +126,7 @@ Store each run under `<resolved Git common directory>/work/runs/<run-id>/`, with
 
 The manifest owns run/root identity and source/output checkout context. Wisps own their metadata, relationships and bodies. Active-run state for durable items must have an explicit file representation without copying durable bodies or embedding all entities into the manifest; the exact envelope belongs to the run implementation. Handoffs, claims and workspace records remain independent entities with their own lifecycles.
 
-[[DES-FILE-COORDINATION]] defines locking and individual file safety. Template expansion may leave a partial result for caller inspection and cleanup under [[REQ-RUN-ATOMICITY]]; it requires no committed-manifest visibility protocol. Retain required results as a root digest extension before explicitly removing temporary context.
+[[DES-FILE-COORDINATION]] defines locking and individual file safety. Template expansion may leave a partial result for caller inspection and cleanup under [[REQ-RUN-ATOMICITY]]; it requires no committed-manifest visibility protocol. For squash, retain required results as a root digest extension before removing temporary context. Explicit discard may instead remove run-owned wisps without a digest under [[DES-SQUASH-DIGEST]]; finishing a run alone does not delete them.
 :::
 
 :::mara design DES-RELATION-MODEL
@@ -193,7 +195,7 @@ Workspace reuse, run defaults, item overrides, and explicit cleanup follow [[DES
 
 :::mara design DES-SQUASH-DIGEST
 :mid: 01M3KPWZ4WR4MM8DFR5YJ906PR
-:title: Retain a run digest as an extension to its root
+:title: Retain a root digest or explicitly discard ephemeral work
 :status: accepted
 :kind: behavior
 :satisfies: REQ-RUN-FINALIZATION
@@ -203,9 +205,11 @@ Squash retains a caller-written summary as an extension to the existing durable 
 
 The root's lifecycle remains separate from run finalization. A finished run has resolved member obligations and no active claims; an unfinished manual root can remain open after its run is finalized. Saving a digest never implicitly closes it. This operation does not promote arbitrary wisps or discard unfinished work.
 
-Retain the digest before removing wisps or optional named-session bindings. Cleanup must refuse and identify surviving item or handoff references that still need those records; the caller resolves them or retains the files. Shared workspaces and cross-run handoffs follow their own lifecycles. Use a surviving output checkout even after a feature workspace has been removed; do not automatically commit, merge or terminate sessions.
+For squash, retain the digest before removing wisps or optional named-session bindings. Cleanup must refuse and identify surviving item or handoff references that still need those records; the caller resolves them or retains the files. Shared workspaces and cross-run handoffs follow their own lifecycles. Use a surviving output checkout even after a feature workspace has been removed; do not automatically commit, merge or terminate sessions.
 
 Do not introduce template application records for finalization. Keep interruption handling bounded to retaining the root extension before cleanup, preserving evidence and allowing inspection/continuation. Exact serialization and repeat-call behavior must be specified before implementation; no general transaction engine is required.
+
+Explicit discard is the alternative when temporary detail need not be retained. It can remove selected wisps within their owning run or dispose of a run's ephemeral context without a summary, even if that work is unfinished. It does not complete the root or material members, delete their files, or overwrite an existing root digest. Selected-wisp discard leaves the run and other members intact; full disposal may remove run-scoped named-session bindings without acting on external sessions or workspaces. Check current claims and references under the shared lock: refuse active claims for the target work and references from surviving items or needed handoffs, returning the blockers. Do not cascade into material items or automatically drop their dependencies. Internal references among discarded wisps need no repair. Report any partial deletion so the caller can inspect and continue; do not add a generic transaction engine. Exact command/schema and run-disposal representation remain implementation details.
 :::
 
 :::mara design DES-WORKSPACE-ASSOCIATIONS

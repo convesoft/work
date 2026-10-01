@@ -87,7 +87,7 @@ From a control checkout select each worktree by path and inspect its content wit
 
 Validate invalid template inputs without creating files. For a valid five-item expansion, inject failure after three creations. Inspect those files and the returned created-ID mapping and failure; no application record or transaction receipt exists. Remove the partial result as the caller and retry to create the intended graph. Repeat for a mixed material/wisp template, including restart after a killed creator; surviving files remain discoverable without a promise of automatic rollback or duplicate suppression. Ordinary malformed-file or unresolved-reference diagnostics still apply.
 
-For finalization, inject interruption before root-digest retention and before wisp cleanup. No temporary content may be discarded before the digest is retained. Inspect and continue using the bounded finalization interface. Keep an outside reference to verify cleanup identifies the blocker. The root's manual completion stays unchanged. Do not assume atomic rename across the surviving checkout and shared storage. A process-kill test is not proof of power-loss durability.
+For squash, inject interruption before root-digest retention and before wisp cleanup. Squash must not delete temporary content before the digest is retained. Explicit discard is separately tested without a digest in [[VER-SQUASH-DIGEST]]. Inspect and continue using the bounded finalization interface. Keep an outside reference to verify cleanup identifies the blocker. The root's manual completion stays unchanged. Do not assume atomic rename across the surviving checkout and shared storage. A process-kill test is not proof of power-loss durability.
 :::
 
 :::mara verification VER-GRAPH-ERRORS
@@ -217,12 +217,14 @@ Once concrete priority and filter schemas are selected, construct eligible, depe
 
 :::mara verification VER-SQUASH-DIGEST
 :mid: 01M3KPXXBAZ20409CEYQGVGMRD
-:title: Verify retained digest before temporary cleanup
+:title: Verify squash and explicit wisp discard
 :status: accepted
 :method: test
 :verifies: REQ-RUN-FINALIZATION
 
-Supply a finished run and caller-written summary while its manual root remains open. Finalization retains the summary verbatim as an extension to that existing root, preserving prior root content and completion state and creating no new digest item or child edge. Verify retention precedes wisp cleanup, including interruption and inspection/continuation. Reject finalization of unfinished member work or work with active claims. Keep surviving item references and handoffs with unresolved receivers to verify cleanup identifies blockers and preserves needed context. Root completion remains a separate explicit operation. Exact repeat-call behavior follows the bounded finalization contract.
+Supply a finished run and caller-written summary while its manual root remains open. Finalization retains the summary verbatim as an extension to that existing root, preserving prior root content and completion state and creating no new digest item or child edge. Verify retention precedes wisp cleanup, including interruption and inspection/continuation. Reject squash of unfinished member work or work with active claims. Keep surviving item references and handoffs with unresolved receivers to verify cleanup identifies blockers and preserves needed context. Root completion remains a separate explicit operation. Exact repeat-call behavior follows the bounded finalization contract.
+
+Exercise explicit discard through real CLI/MCP calls on both completed and abandoned open wisps, with no digest supplied: selected discard removes only the requested wisps, while full disposal removes the run's ephemeral context. Preserve material item files, root state, existing digest and other runs byte-for-byte. Reject active claims and incoming references from surviving work, reporting their IDs; after caller resolution, deletion succeeds. References within the deletion set do not block it. Verify finished runs retain files until explicit cleanup, and interrupted discard reports partial deletion for inspection/continuation without generating a digest.
 :::
 
 :::mara verification VER-WORKSPACE-CLEANUP
