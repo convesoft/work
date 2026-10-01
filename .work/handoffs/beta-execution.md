@@ -79,18 +79,18 @@ No additional product questions block these specified interfaces. Private helper
 Only after activation, launch named interactive implementation workers with:
 
 ```text
-herdr agent start <unique-implementation-name> --kind codex --pane <returned-pane-id> -- --remote unix:// -C <actual-worktree-path> -m gpt-6.1-sol -c model_reasoning_effort=high --approve-for-me
+herdr agent start <unique-implementation-name> --kind codex --pane <returned-pane-id> -- -C <actual-worktree-path> -m gpt-6.1-sol -c model_reasoning_effort=high -c service_tier="fast"
 ```
 
 Create a separate PR-worker pane in each item's returned workspace, preserving focus. Launch explicitly:
 
 ```text
-herdr agent start <unique-pr-name> --kind codex --pane <returned-pane-id> -- --remote unix:// -C <actual-worktree-path> -m gpt-6-luna -c model_reasoning_effort=high --approve-for-me
+herdr agent start <unique-pr-name> --kind codex --pane <returned-pane-id> -- -C <actual-worktree-path> -m gpt-6-luna -c model_reasoning_effort=high -c service_tier="fast"
 ```
 
-Verify actual model, reasoning, cwd, shared-server attachment and Approve for me settings before prompting either kind. Starting generic Codex does not select the repository custom agent. PR workers receive the TOML instructions verbatim plus the exact canonical item path/ID, branch, ready-to-push SHA, Mara IDs, test evidence, limitations and existing PR URL. No SHA is ready for implementation publication yet.
+Verify actual model, reasoning, cwd and fast service tier settings before prompting either kind. Starting generic Codex does not select the repository custom agent. PR workers receive the TOML instructions verbatim plus the exact canonical item path/ID, branch, ready-to-push SHA, Mara IDs, test evidence, limitations and existing PR URL. No SHA is ready for implementation publication yet.
 
-Latest user override: no additional local Codex reviews; use automatic cloud review only. Do not create headless review tabs or manually request `@codex review`. Passing required CI and completed automatic review must cover the exact pushed SHA. If the service reports review unavailable, report its actual message and wait for a specific exception; do not infer a separate quota or reuse earlier PR exceptions.
+Latest user workflow: freeze source edits and run a headless local `codex review --base origin/main` with gpt-6.1-sol, xhigh reasoning and fast service tier in a fresh Herdr review tab before publication. Main classifies findings, verifies accepted fixes and repeats until clean, replacing its previous review tab when the head changes. After publication use automatic cloud review only, including subsequent fixes; no concurrent local/cloud review loops. Never manually request `@codex review`. Required CI and completed automatic review must cover the exact pushed SHA. Report unavailable review accurately; prior PR-specific exceptions are not blanket authorization. Interactive workers use native Codex without --remote or --approve-for-me.
 
 PR workers only publish/monitor/report and perform explicitly directed conversation actions. They never edit source/Work/Mara, commit, force-push or merge. Factual findings may be relayed to implementation workers only after checking their state, with the same URL and reviewed SHA sent to main. Never prompt a blocked agent or blindly resend after a timeout. Main classifies findings, verifies accepted fixes, commits and hands off the new exact SHA. Merge requires applicable explicit user approval. Close an implementation item only after acceptance and merge; preserve clean main and safely remove only created/clean worktrees and Herdr surfaces after approved delivery.
 

@@ -1,4 +1,5 @@
-//! CLI presentation over shared durable operations.
+use work::core::execution::ExecutionOperations;
+// CLI presentation over shared operations.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -11,7 +12,7 @@ use serde_json::{Value, json};
 use work::core::graph::{Blocker, ItemGraph};
 use work::core::items::{Completion, Diagnostic, ItemStore, LookupError, ManualState};
 use work::core::operations::{
-    DurableOperations, Inspection, MetadataChange, OperationError, RawInspection, RelationKind,
+    Inspection, MetadataChange, OperationError, RawInspection, RelationKind,
 };
 use work::core::project::{DiscoveryError, Project, discover};
 use work::core::templates::{
@@ -57,7 +58,9 @@ impl CliError {
             | "storage_missing" | "storage_corrupt" | "recovery_required" | "identity_mismatch" => {
                 4
             }
-            "conflict" | "already_exists" | "storage_busy" | "unsafe_path" => 5,
+            "conflict" | "already_exists" | "storage_busy" | "unsafe_path" | "claim_conflict"
+            | "stale_claim" | "not_ready" | "run_conflict" | "run_not_current"
+            | "workspace_busy" | "reference_blocked" | "source_unavailable" => 5,
             _ => 1,
         }
     }
@@ -256,9 +259,69 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
             result
         };
     }
+    if words.first().is_some_and(|w| w == "claim") {
+        if words.get(1).is_some_and(|w| w == "--help") {
+            return Ok(json!({"help":super::claims::HELP}));
+        }
+        let (verb, fields) = super::claims::from_cli(&words[1..])?;
+        return super::claims::execute(&discover(selected)?, &verb, &fields);
+    }
+    let mut words = words;
+    let mut authorizations = Vec::new();
+    let mut checkout_view = false;
+    let mut i = 2;
+    while i < words.len() {
+        if words[i] == "--authorize" {
+            let value = words
+                .get(i + 1)
+                .ok_or_else(|| usage("--authorize requires JSON"))?;
+            authorizations.push(
+                serde_json::from_str(value).map_err(|_| usage("invalid authorization JSON"))?,
+            );
+            words.drain(i..i + 2);
+        } else if words[i] == "--view" {
+            if words[0] != "item"
+                || !matches!(words[1].as_str(), "list" | "ready" | "inspect" | "diagnose")
+            {
+                return Err(usage("--view is read-only"));
+            }
+            match words.get(i + 1).map(String::as_str) {
+                Some("checkout") => checkout_view = true,
+                Some("resolved") => {}
+                _ => return Err(usage("--view resolved|checkout")),
+            };
+            words.drain(i..i + 2);
+        } else if matches!(
+            words[i].as_str(),
+            "--title"
+                | "--body"
+                | "--completion"
+                | "--priority"
+                | "--parent"
+                | "--label"
+                | "--model"
+                | "--thinking"
+                | "--reason"
+                | "--source"
+                | "--root"
+                | "--param"
+                | "--existing"
+        ) {
+            // Existing option values are opaque text, even when they resemble
+            // a newly added authorization/view option. The command parser
+            // remains responsible for missing or invalid values.
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    super::claims::authorization(Some(&Value::Array(authorizations.clone())))?;
     validate_command_shape(&words)?;
     let project = discover(selected)?;
-    let ops = DurableOperations::new(&project.worktree_root);
+    let mut ops = ExecutionOperations::new(project.clone());
+    ops.authorization =
+        super::claims::authorization(Some(&serde_json::Value::Array(authorizations)))?;
+    ops.checkout_view = checkout_view;
     let result = match words.as_slice() {
         [noun, verb, tail @ ..] if noun == "item" => item_command(&project, &ops, verb, tail),
         [noun, verb, tail @ ..] if noun == "relation" => {
@@ -271,7 +334,11 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
     }?;
     if words[0] == "item" && matches!(words[1].as_str(), "list" | "ready" | "diagnose" | "inspect")
     {
-        Ok(super::storage::attach_read(&project, result))
+        Ok(super::storage::attach_read(
+            &project,
+            result,
+            ops.take_read_storage(),
+        ))
     } else {
         Ok(result)
     }
@@ -300,13 +367,13 @@ fn command_help(words: &[String]) -> Option<&'static str> {
             "Usage: work item list\nList valid durable items in canonical ID order, including recorded state, graph state, relations, and blockers. Use item diagnose for malformed files.",
         ),
         ["item", "inspect", "--help"] => Some(
-            "Usage: work item inspect ID [--raw]\nInspect an item by full ID or unique lowercase prefix, optionally prefixed with w-. --raw requires a full ID and exposes original source bytes and diagnostics.",
+            "Usage: work item inspect ID [--view resolved|checkout] [--raw]\nInspect an item by full ID or unique lowercase prefix, optionally prefixed with w-. --raw reads the physical selected checkout and requires a full ID and exposes original source bytes and diagnostics.",
         ),
         ["item", "diagnose", "--help"] => Some(
             "Usage: work item diagnose\nReport source and graph diagnostics for the selected checkout. Invalid graphs can still be inspected, but refuse readiness and structured mutations.",
         ),
         ["item", "ready", "--help"] => Some(
-            "Usage: work item ready\nList open executable manual items whose lifecycle prerequisites are resolved, ordered by priority then ID. This reports eligibility, not ownership or execution.",
+            "Usage: work item ready [--view resolved|checkout]\nList open executable manual items whose lifecycle prerequisites are resolved, ordered by priority then ID. Resolved readiness excludes claimed items; inspect shows their owner.",
         ),
         ["item", "update", "--help"] => Some(
             "Usage: work item update ID OPTIONS\nEdit supplied header fields only; preserve the existing body. Options: --title TEXT, --completion manual|children, --priority 0..4, --parent ID, --clear-parent, --label TEXT (repeatable), --clear-labels, --model TEXT, --clear-model, --thinking TEXT, --clear-thinking.",
@@ -416,15 +483,15 @@ fn validate_metadata_syntax(args: &[String], create: bool) -> Result<(), CliErro
 
 fn item_command(
     project: &Project,
-    ops: &DurableOperations,
+    ops: &ExecutionOperations,
     verb: &str,
     args: &[String],
 ) -> Result<Value, CliError> {
     match verb {
-        "list" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.list()?)?})),
-        "ready" if args.is_empty() => Ok(json!({"items":items_value(project,&ops.ready()?)?})),
+        "list" if args.is_empty() => Ok(json!({"items":items_view(ops,&ops.list()?)?})),
+        "ready" if args.is_empty() => Ok(json!({"items":items_view(ops,&ops.ready()?)?})),
         "diagnose" if args.is_empty() => {
-            let store = ItemStore::load(project).map_err(io_error)?;
+            let store = ops.view()?;
             let graph = ItemGraph::from_store(&store);
             Ok(
                 json!({"diagnostics":graph.diagnostics().iter().map(diagnostic).collect::<Vec<_>>()}),
@@ -432,7 +499,7 @@ fn item_command(
         }
         "inspect" if args.len() == 1 => {
             let candidate = args[0].strip_prefix("w-").unwrap_or(&args[0]);
-            let id = match resolve(project, &args[0]) {
+            let id = match resolve_view(ops, &args[0]) {
                 Ok(id) => id,
                 Err(error) if error.code == "not_found" && candidate.len() == 32 => {
                     if let Ok(raw) = ops.inspect_raw(candidate) {
@@ -442,7 +509,7 @@ fn item_command(
                 }
                 Err(error) => return Err(error),
             };
-            Ok(json!({"item":one_item_value(project,&ops.inspect(&id)?)?}))
+            Ok(json!({"item":one_item_view(ops,&ops.inspect(&id)?)?}))
         }
         "inspect" if args.len() == 2 && args[1] == "--raw" => {
             let raw = ops.inspect_raw(&args[0])?;
@@ -603,7 +670,7 @@ pub(super) fn source_value(id: &str, raw: &RawInspection) -> Value {
 
 fn relation_command(
     project: &Project,
-    ops: &DurableOperations,
+    ops: &ExecutionOperations,
     verb: &str,
     args: &[String],
 ) -> Result<Value, CliError> {
@@ -761,6 +828,9 @@ fn valid_line(value: &str) -> bool {
 }
 
 pub(super) fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
+    resolve_view(&ExecutionOperations::new(project.clone()), input)
+}
+pub(super) fn resolve_view(ops: &ExecutionOperations, input: &str) -> Result<String, CliError> {
     let candidate = input.strip_prefix("w-").unwrap_or(input);
     if candidate.len() == 32 && !valid_full_id(candidate) {
         return Err(CliError::new(
@@ -768,17 +838,32 @@ pub(super) fn resolve(project: &Project, input: &str) -> Result<String, CliError
             "full item ID must be a lowercase UUIDv4",
         ));
     }
-    let store = ItemStore::load(project).map_err(io_error)?;
+    let store = ops.view()?;
     match store.resolve(input) {
         Ok(file) => Ok(file.header.as_ref().unwrap().id.clone()),
         Err(LookupError::InvalidInput) => Err(CliError::new(
             "invalid_argument",
             "item ID must be lowercase hexadecimal, optionally prefixed with w-",
         )),
-        Err(LookupError::NotFound) => Err(CliError::new(
-            "not_found",
-            format!("item {input} was not found"),
-        )),
+        Err(LookupError::NotFound) => {
+            // An unavailable bound source has no parsed header. Its resolved
+            // diagnostic still owns this full ID; a healthy checkout copy
+            // must not replace that evidence.
+            let diagnostics: Vec<_> = store
+                .files
+                .iter()
+                .filter(|file| file.path.file_stem().and_then(|s| s.to_str()) == Some(candidate))
+                .flat_map(|file| file.diagnostics.clone())
+                .collect();
+            if diagnostics.is_empty() {
+                Err(CliError::new(
+                    "not_found",
+                    format!("item {input} was not found"),
+                ))
+            } else {
+                Err(invalid_source(diagnostics))
+            }
+        }
         Err(LookupError::Ambiguous(ids)) => Err(CliError::new(
             "ambiguous_id",
             format!("item {input} matches {}", ids.join(", ")),
@@ -797,8 +882,25 @@ fn valid_full_id(value: &str) -> bool {
         && matches!(bytes[16], b'8' | b'9' | b'a' | b'b')
 }
 
+/// Render a completed operation's returned snapshot without another filesystem
+/// read. Full display IDs stay unambiguous without reloading the catalog.
+pub(super) fn snapshot_item_value(item: &Inspection) -> Result<Value, CliError> {
+    let header = item
+        .file
+        .header
+        .as_ref()
+        .ok_or_else(|| CliError::new("invalid_source", "item header is invalid"))?;
+    item_value(&BTreeMap::from([(header.id.clone(), 32)]), item)
+}
+
 pub(super) fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
-    let store = ItemStore::load(project).map_err(io_error)?;
+    one_item_view(&ExecutionOperations::new(project.clone()), item)
+}
+pub(super) fn one_item_view(
+    ops: &ExecutionOperations,
+    item: &Inspection,
+) -> Result<Value, CliError> {
+    let store = ops.view()?;
     item_value(&display_prefixes(&store), item)
 }
 
@@ -812,8 +914,11 @@ pub(super) fn mutation_item_value(project: &Project, item: &Inspection) -> Resul
         .map_err(|error| with_published_item(error, &header.id, &item.file.path))
 }
 
-pub(super) fn items_value(project: &Project, items: &[Inspection]) -> Result<Vec<Value>, CliError> {
-    let store = ItemStore::load(project).map_err(io_error)?;
+pub(super) fn items_view(
+    ops: &ExecutionOperations,
+    items: &[Inspection],
+) -> Result<Vec<Value>, CliError> {
+    let store = ops.view()?;
     let prefixes = display_prefixes(&store);
     items
         .iter()
@@ -872,7 +977,7 @@ fn item_value(prefixes: &BTreeMap<String, usize>, item: &Inspection) -> Result<V
             Blocker::Child(id) => json!({"kind":"child","id":id}),
         })
         .collect();
-    Ok(json!({
+    let mut value = json!({
         "id":h.id,"display_id":format!("w-{}",&h.id[..prefix]),"title":h.title,
         "completion":match h.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
         "state":h.state.map(|s|match s {ManualState::Open=>"open",ManualState::Done=>"done"}),
@@ -884,7 +989,15 @@ fn item_value(prefixes: &BTreeMap<String, usize>, item: &Inspection) -> Result<V
             "blocks":r.blocks,"related":r.related,"discovered_from":r.discovered_from,"discovered_by":r.discovered_by},
         "graph_diagnostics":item.graph_diagnostics.iter().map(diagnostic).collect::<Vec<_>>(),
         "recovery_path":item.recovery_path.as_deref().map(encode_path)
-    }))
+    });
+    if let Some(context) = item.context.as_object() {
+        value.as_object_mut().unwrap().extend(context.clone());
+    }
+    if !value["claim"].is_null() {
+        let claim = value["claim"].clone();
+        value["blockers"].as_array_mut().unwrap().push(json!({"kind":"claim","id":claim["id"],"actor":claim["actor"],"session":claim["session"]}));
+    }
+    Ok(value)
 }
 pub(super) fn invalid_source(diagnostics: Vec<Diagnostic>) -> CliError {
     CliError {
@@ -928,6 +1041,18 @@ fn print_human(value: &Value) {
                 item["display_id"].as_str().unwrap_or("?"),
                 item["title"].as_str().unwrap_or("")
             );
+            if let Some(path) = item["path"].as_str() {
+                println!("  source: {path}");
+            }
+            if let Some(w) = item.get("ownership_warning") {
+                eprintln!("work: ownership warning: {}", w["message"]);
+            }
+            if let Some(actor) = item["claim"]["actor"].as_str() {
+                println!(
+                    "  claimed by {actor} ({})",
+                    item["claim"]["id"].as_str().unwrap_or("")
+                );
+            }
         }
     } else if let Some(item) = value.get("item") {
         println!(
@@ -941,8 +1066,8 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
-Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview, claim acquire|inspect|list|release|recover|reassign, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
+Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
 pub(super) fn encode_path(path: &Path) -> String {

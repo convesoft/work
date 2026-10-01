@@ -34,7 +34,7 @@ target/debug/work --json item reopen PREREQUISITE_FULL_ID
 
 Every `--json` invocation writes one JSON object: success has `ok: true` and `result`; failure has `ok: false` and `error.code`. Syntax and invalid arguments exit 2, missing or ambiguous IDs exit 3, invalid source or candidate graph exits 4, conflicts and duplicates exit 5, and discovery or I/O errors exit 1. A malformed file can be inspected with `item inspect FULL_ID --raw`; `item repair FULL_ID --source -` accepts a complete replacement source on stdin. Diagnose and inspect before repairing. Rejected structured mutations leave the candidate unpublished. Direct file edits outside Work's lock can still race with a mutation; inspect the reported paths and recovery copies after a conflict.
 
-Use `--worktree PATH` before a command to read or edit another linked checkout's selected file view without switching the caller's branch. Work does not create that worktree. If two views contain the same ID with different content, each query uses the selected checkout's content.
+Use `--worktree PATH` before a command to read or edit another linked checkout's selected file view without switching the caller's branch. Work does not create that worktree. For a bound material item, normal queries/mutations use the entire actual file in its associated worktree, including uncommitted changes. `item list|inspect|ready|diagnose --view checkout` explicitly inspects the physical selected checkout; raw inspect/repair are always physical. Missing bound sources are diagnosed without falling back to stale main content.
 
 ## Preview a reusable template
 
@@ -50,14 +50,14 @@ Preview returns rendered items under template-local keys and their edges without
 
 ## Shared file storage
 
-Linked worktrees share operational folders in the resolved Git common directory. Items and templates still come from the selected checkout, including uncommitted changes. Reading an uninitialized repository creates no storage:
+Linked worktrees share operational folders in the resolved Git common directory. Templates and unbound items come from the selected checkout; bound items come from their associated workspace, including uncommitted changes. Reading an uninitialized repository creates no storage:
 
 ```sh
 target/debug/work --json storage inspect
 target/debug/work --json storage init
 ```
 
-`init` explicitly initializes a fresh store and is a no-op when healthy. `inspect` reports `state`, `coordination_available`, validated identity/generation, diagnostics and pending operation IDs. Foundation availability reports usable storage structure; claims and their enforcement remain a later feature. Item list, readiness, diagnosis and inspection include `storage` and `storage_warning`. Human output sends warnings to stderr while keeping available file data; malformed item graphs still block readiness.
+`init` explicitly initializes a fresh store and is a no-op when healthy. `inspect` reports `state`, `coordination_available`, validated identity/generation, diagnostics and pending operation IDs. Claim acquisition requires available storage and validates ownership files under its shared lock. Item list, readiness, diagnosis and inspection include `storage` and `storage_warning`. Human output sends warnings to stderr while keeping available file data; malformed item graphs still block readiness.
 
 Detected missing, corrupt or interrupted storage is never recreated automatically. Stop affected executors before an explicit reset, inspect the current identity and generation, then supply those exact values:
 
@@ -75,14 +75,30 @@ For a supported interrupted operation, use the reported ID:
 target/debug/work --json storage recover OPERATION_ID
 ```
 
-Resuming recreation requires the same current stopped-executor/loss affirmations. Recovery never resets an unrelated newer generation. Unsupported metadata versions require a compatible tool. Backup/restore, actual claim operations and entity-specific run/handoff/workspace management remain deferred. See [the storage contract](storage.mara.md) for the file formats and recovery rules.
+Resuming recreation requires the same current stopped-executor/loss affirmations. Recovery never resets an unrelated newer generation. Unsupported metadata versions require a compatible tool. Backup/restore and entity-specific run/handoff/workspace management remain deferred. See [the storage contract](storage.mara.md) for the file formats and recovery rules.
 
 On Linux, creation under a restrictive umask can require access to `/proc/self/fd` to set permissions through a held directory descriptor. If unavailable, the operation reports an error; it does not use an unsafe pathname fallback. On macOS, a umask that prevents opening a newly created directory causes a permission error; use a umask that leaves owner access (for example, `077`). Work preserves the interrupted state for explicit recovery.
 
+## Claims and material ownership
+
+Initialize shared storage explicitly before claiming. Acquisitions are immutable; release/completion creates a separate ending file. A fresh acquisition always has a fresh ID, including the same session returning. Session namespace/ID are opaque caller-supplied identity, not a secret token.
+
+```sh
+target/debug/work --json claim acquire ITEM --actor worker --session-namespace codex --session-id SESSION
+target/debug/work --json claim list --current
+target/debug/work --json claim inspect CLAIM_ID
+target/debug/work --json item close ITEM --authorize '{"claim_id":"CLAIM_ID","session":{"namespace":"codex","id":"SESSION"}}'
+target/debug/work --json claim release CLAIM_ID --session-namespace codex --session-id SESSION
+```
+
+Replace uppercase placeholders with actual IDs. Repeat `--authorize JSON` when changing several claimed sources; MCP mutations take the corresponding `authorization` array. Reads never require ownership. Resolved readiness excludes claimed items; inspection includes the owner and source path. Closing saves the item before ending its claim. If ending fails, inspect the reported publication and retry with the still-current pair. Former pairs cannot authorize changes after completion, release, reassignment or storage recreation.
+
+`claim recover CLAIM_ID --actor controller --reason TEXT --executors-stopped` ends abandoned ownership. `claim reassign` additionally takes the new `--session-namespace` and `--session-id`; a failed replacement may leave an explicitly reported unclaimed gap. These operations do not stop executors. There is no automatic expiry, heartbeat or claim-next yet. Material bindings survive release; subsequent reads continue to use that source workspace. Rich rebinding/cleanup commands arrive in the context slice.
+
 ## MCP stdio
 
-Start `target/debug/work mcp` from a Git checkout and configure an MCP client to launch it over stdio. The server negotiates MCP `2025-06-18` and advertises 20 tools: `discover`, `item_create`, `item_list`, `item_inspect`, `item_inspect_raw`, `item_diagnose`, `item_ready`, `item_update`, `item_close`, `item_reopen`, `item_repair`, `relation_add`, `relation_remove`, `template_list`, `template_validate`, `template_preview`, `storage_inspect`, `storage_init`, `storage_recreate`, and `storage_recover`. The names correspond to the CLI commands above. Every tool accepts optional `worktree`; otherwise it uses the server process checkout. `item_repair` takes replacement bytes encoded as `raw_hex`. `template_preview` takes `name`, `root`, and optional `parameters` and `existing` maps. Tool successes return the result as `structuredContent`; domain failures set `isError: true` and return `structuredContent.error.code`. Unknown MCP methods and tools are JSON-RPC errors. Use `tools/list` for exact argument schemas; optional fields must be omitted rather than sent as `null`.
+Start `target/debug/work mcp` from a Git checkout and configure an MCP client to launch it over stdio. The server negotiates MCP `2025-06-18` and advertises 26 tools: `discover`, `item_create`, `item_list`, `item_inspect`, `item_inspect_raw`, `item_diagnose`, `item_ready`, `item_update`, `item_close`, `item_reopen`, `item_repair`, `relation_add`, `relation_remove`, `template_list`, `template_validate`, `template_preview`, `storage_inspect`, `storage_init`, `storage_recreate`, `storage_recover`, `claim_acquire`, `claim_inspect`, `claim_list`, `claim_release`, `claim_recover`, and `claim_reassign`. The names correspond to the CLI commands above. Every tool accepts optional `worktree`; otherwise it uses the server process checkout. `item_repair` takes replacement bytes encoded as `raw_hex`. `template_preview` takes `name`, `root`, and optional `parameters` and `existing` maps. Tool successes return the result as `structuredContent`; domain failures set `isError: true` and return `structuredContent.error.code`. Unknown MCP methods and tools are JSON-RPC errors. Use `tools/list` for exact argument schemas; optional fields must be omitted rather than sent as `null`.
 
 ## Current limits and verification
 
-This slice manages durable item files, graph readiness, read-only template preview, and the shared file-storage foundation. It has no claim or ownership coordination, template publication, temporary runs, handoffs, session or workspace management, index rebuild, release action, or executor. It does not start agents, manage worktrees, or perform pull-request or CI actions. In particular, the broader Mara verification definitions covering those later capabilities are future checks, not evidence that they work today. The current acceptance tests include `cargo test --locked --test bootstrap_adoption --test templates --test storage --test cli_json --test mcp_protocol`; they use disposable Git repositories before changing state. Other source and operation contracts are covered by the existing integration tests.
+This slice manages durable item files, ownership-aware graph readiness, read-only template preview, shared file storage, exclusive claims and basic material-workspace binding. Template publication, temporary runs, handoffs, named-session/workspace management, index rebuild, release actions and executor integration remain later work. It does not start agents, manage worktrees, or perform pull-request or CI actions. In particular, the broader Mara verification definitions covering those later capabilities are future checks, not evidence that they work today. The current acceptance tests include `cargo test --locked --test bootstrap_adoption --test templates --test storage --test cli_json --test mcp_protocol`; they use disposable Git repositories before changing state. Other source and operation contracts are covered by the existing integration tests.

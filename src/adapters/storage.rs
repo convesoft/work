@@ -163,8 +163,18 @@ fn error(e: StorageError) -> CliError {
     CliError::with_details(code(&e.code), e.message, details)
 }
 
-pub(super) fn attach_read(project: &Project, mut value: Value) -> Value {
-    match Storage::new(project.clone()).inspect() {
+pub(super) fn attach_read(
+    project: &Project,
+    mut value: Value,
+    observed: Option<StorageInspection>,
+) -> Value {
+    // Preserve the inspection that selected a physical fallback, even if a
+    // concurrent writer has released its lock before result presentation.
+    let observation = match observed {
+        Some(s) => Ok(s),
+        None => Storage::new(project.clone()).inspect(),
+    };
+    match observation {
         Ok(s) => {
             value["storage_warning"] = s
                 .storage_warning
@@ -197,5 +207,56 @@ pub(super) fn print_warning(value: &Value) {
             warning["code"].as_str().unwrap_or("storage"),
             warning["message"].as_str().unwrap_or("storage unavailable")
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, process::Command};
+    use work::core::{
+        coordination::{CoordinationGuard, new_id},
+        execution::ExecutionOperations,
+        operations::{DurableOperations, MetadataChange},
+        project::discover,
+    };
+    #[test]
+    fn fallback_warning_survives_writer_release_before_presentation() {
+        let root = std::env::temp_dir().join(format!("work-read-warning-{}", new_id().unwrap()));
+        fs::create_dir_all(root.join(".work/items")).unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        DurableOperations::new(&root)
+            .create("item".into(), Vec::new(), MetadataChange::default())
+            .unwrap();
+        let project = discover(Some(&root)).unwrap();
+        Storage::new(project.clone()).initialize().unwrap();
+        let held = CoordinationGuard::acquire(&project, true).unwrap();
+        let ops = ExecutionOperations::new(project.clone());
+        let ready = ops.ready().unwrap();
+        assert_eq!(ready.len(), 1);
+        drop(held);
+        assert!(
+            Storage::new(project.clone())
+                .inspect()
+                .unwrap()
+                .coordination_available
+        );
+        let presented = attach_read(
+            &project,
+            json!({"count":ready.len()}),
+            ops.take_read_storage(),
+        );
+        assert_eq!(presented["storage_warning"]["code"], "storage_busy");
+        assert_eq!(presented["storage"]["coordination_available"], false);
+        assert!(ops.take_read_storage().is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 }

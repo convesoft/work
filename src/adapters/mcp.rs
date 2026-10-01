@@ -1,12 +1,13 @@
-//! MCP stdio transport over the durable operation layer.
+use work::core::execution::ExecutionOperations;
+// MCP stdio transport over shared operations.
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
 use work::core::graph::ItemGraph;
-use work::core::items::{Completion, ItemStore};
-use work::core::operations::{DurableOperations, MetadataChange, RelationKind};
+use work::core::items::Completion;
+use work::core::operations::{MetadataChange, RelationKind};
 use work::core::project::{Project, discover};
 
 use super::cli::{self, CliError};
@@ -91,7 +92,9 @@ fn handle(request: Value, initialized: &mut bool) -> Option<Value> {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(rpc_error(id, -32602, "Missing tool name"));
             };
-            if !TOOL_NAMES.contains(&name) {
+            if !TOOL_NAMES.contains(&name)
+                && !super::claims::tools().iter().any(|t| t["name"] == name)
+            {
                 return Some(rpc_error(id, -32602, "Unknown tool"));
             }
             let args = params
@@ -139,6 +142,34 @@ fn tool(name: &str, properties: Value, required: &[&str], description: &str) -> 
 }
 
 fn tools() -> Vec<Value> {
+    let mut result = base_tools();
+    let session = json!({"type":"object","properties":{"namespace":{"type":"string"},"id":{"type":"string"}},"required":["namespace","id"],"additionalProperties":false});
+    for tool in &mut result {
+        let name = tool["name"].as_str().unwrap().to_owned();
+        if matches!(
+            name.as_str(),
+            "item_create"
+                | "item_update"
+                | "item_close"
+                | "item_reopen"
+                | "item_repair"
+                | "relation_add"
+                | "relation_remove"
+        ) {
+            tool["inputSchema"]["properties"]["authorization"] = json!({"type":"array","items":{"type":"object","properties":{"claim_id":{"type":"string"},"session":session},"required":["claim_id","session"],"additionalProperties":false}});
+        }
+        if matches!(
+            name.as_str(),
+            "item_list" | "item_inspect" | "item_ready" | "item_diagnose"
+        ) {
+            tool["inputSchema"]["properties"]["view"] =
+                json!({"type":"string","enum":["resolved","checkout"]});
+        }
+    }
+    result.extend(super::claims::tools());
+    result
+}
+fn base_tools() -> Vec<Value> {
     let s = json!({"type":"string"});
     let b = json!({"type":"boolean"});
     let common = json!({"worktree":s});
@@ -310,9 +341,13 @@ fn validate<'a>(name: &str, args: &'a Value) -> Result<&'a Map<String, Value>, C
             "string" => value.is_string(),
             "boolean" => value.is_boolean(),
             "integer" => value.as_u64().is_some_and(|n| n <= 4),
+            "array" if key == "authorization" => super::claims::authorization(Some(value)).is_ok(),
             "array" => value
                 .as_array()
                 .is_some_and(|a| a.iter().all(Value::is_string)),
+            "object" if key == "session" => {
+                work::core::coordination::SessionIdentity::from_json(value).is_ok()
+            }
             "object" => value
                 .as_object()
                 .is_some_and(|map| map.values().all(Value::is_string)),
@@ -443,13 +478,18 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         return super::storage::execute(&selected(args)?, request);
     }
     let project = selected(args)?;
-    let ops = DurableOperations::new(&project.worktree_root);
+    if let Some(verb) = name.strip_prefix("claim_") {
+        return super::claims::execute(&project, verb, args);
+    }
+    let mut ops = ExecutionOperations::new(project.clone());
+    ops.authorization = super::claims::authorization(args.get("authorization"))?;
+    ops.checkout_view = string(args, "view") == Some("checkout");
     let result = match name {
         "discover" => Ok(
             json!({"worktree_root":cli::encode_path(&project.worktree_root),"git_common_dir":cli::encode_path(&project.git_common_dir)}),
         ),
-        "item_list" => Ok(json!({"items":cli::items_value(&project,&ops.list()?)?})),
-        "item_ready" => Ok(json!({"items":cli::items_value(&project,&ops.ready()?)?})),
+        "item_list" => Ok(json!({"items":cli::items_view(&ops,&ops.list()?)?})),
+        "item_ready" => Ok(json!({"items":cli::items_view(&ops,&ops.ready()?)?})),
         "template_list" => cli::template_command(&project, "list", &[]),
         "template_validate" => {
             cli::template_command(&project, "validate", &[required(args, "name").to_owned()])
@@ -484,8 +524,7 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
             cli::template_command(&project, "preview", &arguments)
         }
         "item_diagnose" => {
-            let store =
-                ItemStore::load(&project).map_err(|e| CliError::new("io", e.to_string()))?;
+            let store = ops.view()?;
             let graph = ItemGraph::from_store(&store);
             Ok(
                 json!({"diagnostics":graph.diagnostics().iter().map(cli::diagnostic).collect::<Vec<_>>()}),
@@ -494,7 +533,7 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         "item_inspect" => {
             let input = required(args, "id");
             let candidate = input.strip_prefix("w-").unwrap_or(input);
-            let id = match cli::resolve(&project, input) {
+            let id = match cli::resolve_view(&ops, input) {
                 Ok(id) => id,
                 Err(error) if error.value()["code"] == "not_found" && candidate.len() == 32 => {
                     if let Ok(raw) = ops.inspect_raw(candidate) {
@@ -504,7 +543,7 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
                 }
                 Err(error) => return Err(error),
             };
-            Ok(json!({"item":cli::one_item_value(&project,&ops.inspect(&id)?)?}))
+            Ok(json!({"item":cli::one_item_view(&ops,&ops.inspect(&id)?)?}))
         }
         "item_inspect_raw" => {
             let id = required(args, "id");
@@ -567,7 +606,11 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         name,
         "item_list" | "item_ready" | "item_diagnose" | "item_inspect" | "item_inspect_raw"
     ) {
-        Ok(super::storage::attach_read(&project, result))
+        Ok(super::storage::attach_read(
+            &project,
+            result,
+            ops.take_read_storage(),
+        ))
     } else {
         Ok(result)
     }

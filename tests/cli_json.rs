@@ -115,10 +115,7 @@ fn command_help_explains_operations_without_a_git_checkout() {
     let outside = std::env::temp_dir();
     for (args, detail) in [
         (vec!["item", "--help"], "item COMMAND"),
-        (
-            vec!["item", "ready", "--help"],
-            "eligibility, not ownership",
-        ),
+        (vec!["item", "ready", "--help"], "excludes claimed items"),
         (vec!["item", "create", "--help"], "generated full ID"),
         (
             vec!["relation", "add", "--help"],
@@ -140,7 +137,7 @@ fn durable_loop_and_machine_readable_errors() {
     let f = Fixture::new();
     let help = ok(f.call(&["--help"]));
     assert!(help["help"].as_str().unwrap().contains("item create"));
-    assert!(!help["help"].as_str().unwrap().contains("claim"));
+    assert!(help["help"].as_str().unwrap().contains("claim acquire"));
     assert!(
         ok(f.call(&["item", "ready"]))["items"]
             .as_array()

@@ -11,7 +11,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Identity {
+pub(crate) struct Identity {
     pub dev: u64,
     pub ino: u64,
 }
@@ -24,7 +24,7 @@ impl Identity {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Source {
+pub(crate) struct Source {
     pub raw: Vec<u8>,
     pub identity: Identity,
     pub mode: u32,
@@ -54,7 +54,7 @@ impl Source {
             && self.mtime == other.mtime
     }
 }
-pub(super) struct Directory {
+pub(crate) struct Directory {
     pub file: File,
     pub path: PathBuf,
     pub identity: Identity,
@@ -158,7 +158,7 @@ impl Directory {
     // Only called for an inaccessible directory this attempt just created.
     // Never follow the mutable storage entry to recover from a restrictive umask.
     #[cfg(target_os = "linux")]
-    pub(super) fn restore_new_directory_mode(
+    pub(crate) fn restore_new_directory_mode(
         &self,
         name: &str,
         expected: &Identity,
@@ -211,7 +211,7 @@ impl Directory {
         Ok(held)
     }
     #[cfg(not(target_os = "linux"))]
-    pub(super) fn restore_new_directory_mode(
+    pub(crate) fn restore_new_directory_mode(
         &self,
         name: &str,
         _expected: &Identity,
@@ -547,7 +547,7 @@ impl Directory {
         Ok(())
     }
 }
-pub(super) struct Locked {
+pub(crate) struct Locked {
     pub common: Directory,
     pub root: Directory,
     lock: File,
@@ -684,10 +684,10 @@ fn valid_name(name: &OsStr) -> Result<(), StorageError> {
 fn unsafe_path(path: &Path, message: &str) -> StorageError {
     StorageError::new(StorageErrorCode::UnsafePath, message, Some(path.to_owned()))
 }
-pub(super) fn conflict(path: &Path, message: &str) -> StorageError {
+pub(crate) fn conflict(path: &Path, message: &str) -> StorageError {
     StorageError::new(StorageErrorCode::Conflict, message, Some(path.to_owned()))
 }
-pub(super) fn map(error: rustix::io::Errno, path: &Path) -> StorageError {
+pub(crate) fn map(error: rustix::io::Errno, path: &Path) -> StorageError {
     match error {
         rustix::io::Errno::NOENT => StorageError::new(
             StorageErrorCode::StorageMissing,
@@ -714,11 +714,11 @@ struct TestAction {
     action: Box<dyn FnOnce()>,
 }
 #[cfg(test)]
-pub(super) fn on_next(point: &'static str, action: impl FnOnce() + 'static) -> FailureGuard {
+pub(crate) fn on_next(point: &'static str, action: impl FnOnce() + 'static) -> FailureGuard {
     on_nth(point, 1, action)
 }
 #[cfg(test)]
-pub(super) fn on_nth(
+pub(crate) fn on_nth(
     point: &'static str,
     remaining: usize,
     action: impl FnOnce() + 'static,
@@ -733,7 +733,7 @@ pub(super) fn on_nth(
     FailureGuard
 }
 #[cfg(test)]
-pub(super) struct FailureGuard;
+pub(crate) struct FailureGuard;
 #[cfg(test)]
 impl Drop for FailureGuard {
     fn drop(&mut self) {
@@ -742,12 +742,12 @@ impl Drop for FailureGuard {
     }
 }
 #[cfg(test)]
-pub(super) fn fail_next(point: &'static str) -> FailureGuard {
+pub(crate) fn fail_next(point: &'static str) -> FailureGuard {
     FAILURE.set(Some(point));
     FailureGuard
 }
 #[cfg(test)]
-pub(super) fn inject(point: &str, path: &Path) -> Result<(), StorageError> {
+pub(crate) fn inject(point: &str, path: &Path) -> Result<(), StorageError> {
     let action = ACTION.with(|slot| {
         let mut action = slot.borrow_mut();
         if let Some(selected) = action.as_mut()

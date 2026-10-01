@@ -36,6 +36,11 @@ pub enum OperationError {
     },
 }
 
+struct ExchangeFailure {
+    cause: OperationError,
+    rolled_back: bool,
+}
+
 impl OperationError {
     pub fn code(&self) -> &'static str {
         match self {
@@ -109,6 +114,7 @@ impl From<io::Error> for OperationError {
 
 #[derive(Debug, Clone)]
 pub struct Inspection {
+    pub context: serde_json::Value,
     pub file: ItemFile,
     pub relations: Relations,
     pub evaluation: Option<Evaluation>,
@@ -149,6 +155,7 @@ pub enum RelationKind {
 
 pub struct DurableOperations {
     root: PathBuf,
+    fresh_common_dir: Option<PathBuf>,
 }
 
 struct OperationLock {
@@ -162,7 +169,14 @@ impl DurableOperations {
         let root: PathBuf = root.into();
         Self {
             root: root.components().collect(),
+            fresh_common_dir: None,
         }
+    }
+    /// Only the execution facade's fresh fallback uses this fence. The fixed
+    /// initialization evidence is checked after acquiring the existing lock.
+    pub(crate) fn with_initialization_fence(mut self, common_dir: &Path) -> Self {
+        self.fresh_common_dir = Some(common_dir.to_owned());
+        self
     }
 
     pub fn inspect(&self, id: &str) -> Result<Inspection, OperationError> {
@@ -1028,7 +1042,27 @@ impl DurableOperations {
             .map_err(io::Error::from)?,
         );
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        #[cfg(test)]
+        super::storage::files::inject("checkout_before_lock", &self.root)
+            .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
         flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
+        if let Some(common) = &self.fresh_common_dir {
+            for name in ["work", "work.identity.yaml"] {
+                match fs::symlink_metadata(common.join(name)) {
+                    Ok(_) => {
+                        return Err(OperationError::Conflict(
+                            "coordination initialization appeared; retry through current ownership"
+                                .into(),
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            #[cfg(test)]
+            super::storage::files::inject("checkout_fresh_checked", &self.root)
+                .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+        }
         Ok(OperationLock {
             file,
             root_dir,
@@ -1124,6 +1158,26 @@ impl DurableOperations {
         publication: (&[u8], &FileFingerprint),
         before_rollback: impl FnOnce(),
     ) -> Result<(), OperationError> {
+        self.verify_exchange_outcome(items, before, source, staged, publication, before_rollback)
+            .map_err(|failure| failure.cause)
+    }
+
+    fn verify_exchange_outcome(
+        &self,
+        items: &OwnedFd,
+        before: &ItemStore,
+        source: &ItemFile,
+        staged: &Path,
+        publication: (&[u8], &FileFingerprint),
+        before_rollback: impl FnOnce(),
+    ) -> Result<(), ExchangeFailure> {
+        #[cfg(test)]
+        super::storage::files::inject("checkout_verify_exchange", &source.path).map_err(
+            |error| ExchangeFailure {
+                cause: OperationError::Io(io::Error::other(error.to_string())),
+                rolled_back: false,
+            },
+        )?;
         let (new_raw, published) = publication;
         let old_matches = fingerprint_at(items, staged).is_ok_and(|now| {
             source
@@ -1166,28 +1220,38 @@ impl DurableOperations {
                 && read_at(items, &source.path).is_ok_and(|raw| raw == new_raw)
         });
         if !published_untouched {
-            return Err(OperationError::Conflict(format!(
-                "item changed after publication; previous source retained at {}",
-                staged.display()
-            )));
+            return Err(ExchangeFailure {
+                cause: OperationError::Conflict(format!(
+                    "item changed after publication; previous source retained at {}",
+                    staged.display()
+                )),
+                rolled_back: false,
+            });
         }
         before_rollback();
         rename_in_dir(items, staged, &source.path, RenameFlags::EXCHANGE).map_err(|e| {
-            OperationError::Conflict(format!(
-                "publication conflict; rollback failed: {e}; recovery copy retained at {}",
-                staged.display()
-            ))
+            ExchangeFailure {
+                cause: OperationError::Conflict(format!(
+                    "publication conflict; rollback failed: {e}; recovery copy retained at {}",
+                    staged.display()
+                )),
+                rolled_back: false,
+            }
         })?;
-        self.sync_items(items).map_err(|e| {
-            OperationError::Io(io::Error::other(format!(
-                "{e}; recovery copy retained at {}",
+        self.sync_items(items).map_err(|e| ExchangeFailure {
+            cause: OperationError::Io(io::Error::other(format!(
+                "{e}; rollback restored source; rejected proposal retained at {}",
                 staged.display()
-            )))
+            ))),
+            rolled_back: true,
         })?;
-        Err(OperationError::Conflict(format!(
-            "items changed during publication; recovery copy retained at {}",
-            staged.display()
-        )))
+        Err(ExchangeFailure {
+            cause: OperationError::Conflict(format!(
+                "items changed during publication; rollback restored source; rejected proposal retained at {}",
+                staged.display()
+            )),
+            rolled_back: true,
+        })
     }
     fn sync_items(&self, items: &OwnedFd) -> Result<(), OperationError> {
         fsync(items).map_err(io::Error::from)?;
@@ -1195,12 +1259,12 @@ impl DurableOperations {
     }
 }
 
-fn inspect_store(store: &ItemStore, id: &str) -> Result<Inspection, OperationError> {
+pub(crate) fn inspect_store(store: &ItemStore, id: &str) -> Result<Inspection, OperationError> {
     let graph = ItemGraph::from_store(store);
     inspect_with_graph(store, &graph, id)
 }
 
-fn inspect_with_graph(
+pub(crate) fn inspect_with_graph(
     store: &ItemStore,
     graph: &ItemGraph,
     id: &str,
@@ -1225,6 +1289,7 @@ fn inspect_with_graph(
         None
     };
     Ok(Inspection {
+        context: serde_json::json!({"source_worktree": super::coordination::encode_path(file.path.parent().unwrap().parent().unwrap().parent().unwrap()), "persistence":"material","run_id":null,"claim":null}),
         file,
         relations,
         evaluation,
@@ -1251,7 +1316,7 @@ fn require_candidate(store: &ItemStore) -> Result<(), OperationError> {
         ))
     }
 }
-fn candidate_store(
+pub(crate) fn candidate_store(
     store: &ItemStore,
     path: &Path,
     raw: Vec<u8>,
@@ -1276,7 +1341,7 @@ fn candidate_store(
     Ok(ItemStore::from_candidate_files(candidate.files))
 }
 
-fn default_header(id: String, title: String) -> ItemHeader {
+pub(crate) fn default_header(id: String, title: String) -> ItemHeader {
     ItemHeader {
         id,
         title,
@@ -1293,7 +1358,7 @@ fn default_header(id: String, title: String) -> ItemHeader {
         close_reason: None,
     }
 }
-fn apply_change(mut h: ItemHeader, c: MetadataChange) -> ItemHeader {
+pub(crate) fn apply_change(mut h: ItemHeader, c: MetadataChange) -> ItemHeader {
     if let Some(v) = c.title {
         h.title = v;
     }
@@ -1335,7 +1400,7 @@ fn apply_change(mut h: ItemHeader, c: MetadataChange) -> ItemHeader {
     h
 }
 
-fn serialize(h: &ItemHeader, body: &[u8]) -> Vec<u8> {
+pub(crate) fn serialize(h: &ItemHeader, body: &[u8]) -> Vec<u8> {
     let mut text = format!(
         "---\nformat_version: 1\nid: {}\ntitle: {}\n",
         quote(&h.id),
@@ -1505,12 +1570,139 @@ fn with_recovery(error: OperationError, path: &Path) -> OperationError {
         other => OperationError::Conflict(format!("{other}{context}")),
     }
 }
-fn new_id() -> Result<String, OperationError> {
+pub(crate) fn new_id() -> Result<String, OperationError> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Coordinator-owned checkout lock and publication primitives. The caller has
+/// already validated the complete resolved graph under the common lock.
+pub(crate) struct CheckoutWriter {
+    ops: DurableOperations,
+    lock: OperationLock,
+    items: OwnedFd,
+    snapshot: ItemStore,
+}
+impl CheckoutWriter {
+    pub(crate) fn open(root: &Path) -> Result<Self, OperationError> {
+        let ops = DurableOperations::new(root);
+        let lock = ops.lock()?;
+        let items = ops.items_dir(&lock)?;
+        let snapshot = ops.load_from_dir(&items)?;
+        Ok(Self {
+            ops,
+            lock,
+            items,
+            snapshot,
+        })
+    }
+    pub(crate) fn verify(&self) -> Result<(), OperationError> {
+        #[cfg(test)]
+        super::storage::files::inject("checkout_verify", &self.ops.root)
+            .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+        self.ops
+            .check_snapshot(&self.lock, &self.items, &self.snapshot)
+    }
+    pub(crate) fn publish(
+        &mut self,
+        header: &ItemHeader,
+        body: &[u8],
+        expected: Option<&ItemFile>,
+    ) -> Result<Option<PathBuf>, OperationError> {
+        let path = self.ops.item_path(&header.id);
+        let raw = serialize(header, body);
+        self.ops
+            .check_snapshot(&self.lock, &self.items, &self.snapshot)?;
+        if let Some(old) = expected {
+            if old.path != path
+                || !self
+                    .snapshot
+                    .files
+                    .iter()
+                    .any(|f| f.path == path && f.raw == old.raw && f.fingerprint == old.fingerprint)
+            {
+                return Err(OperationError::Conflict(
+                    "resolved source changed before checkout write".into(),
+                ));
+            }
+        } else if self.snapshot.files.iter().any(|f| f.path == path) {
+            return Err(OperationError::AlreadyExists(header.id.clone()));
+        }
+        let staged =
+            self.ops
+                .stage_with_mode(&self.items, &raw, expected.map(source_mode).transpose()?)?;
+        let prepare = (|| {
+            #[cfg(test)]
+            super::storage::files::inject("checkout_after_stage", &path)
+                .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+            let identity = fingerprint_at(&self.items, &staged)?;
+            self.ops
+                .check_snapshot(&self.lock, &self.items, &self.snapshot)?;
+            #[cfg(test)]
+            super::storage::files::inject("checkout_before_rename", &path)
+                .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+            rename_in_dir(
+                &self.items,
+                &staged,
+                &path,
+                if expected.is_some() {
+                    RenameFlags::EXCHANGE
+                } else {
+                    RenameFlags::NOREPLACE
+                },
+            )
+            .map_err(exchange_error)?;
+            Ok(identity)
+        })();
+        let staged_identity = match prepare {
+            Ok(identity) => identity,
+            Err(error) => {
+                remove_stage(&self.items, &staged);
+                return Err(error);
+            }
+        };
+        if let Some(old) = expected {
+            self.ops
+                .verify_exchange_outcome(
+                    &self.items,
+                    &self.snapshot,
+                    old,
+                    &staged,
+                    (&raw, &staged_identity),
+                    || {},
+                )
+                .map_err(|failure| {
+                    if failure.rolled_back {
+                        failure.cause
+                    } else {
+                        OperationError::Published {
+                            id: header.id.clone(),
+                            path: path.clone(),
+                            previous_source_path: Some(staged.clone()),
+                            cause: Box::new(failure.cause),
+                        }
+                    }
+                })?;
+        }
+        (|| {
+            self.ops.sync_items(&self.items)?;
+            self.ops.ensure_selected_dir(&self.lock, &self.items)?;
+            self.snapshot = self.ops.load_from_dir(&self.items)?;
+            #[cfg(test)]
+            super::storage::files::inject("checkout_after_publish", &path)
+                .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+            Ok(expected.map(|_| staged.clone()))
+        })()
+        .map_err(|cause| OperationError::Published {
+            id: header.id.clone(),
+            path,
+            previous_source_path: expected.map(|_| staged),
+            cause: Box::new(cause),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1532,6 +1724,202 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with(".operation-"))
             .count()
+    }
+
+    #[test]
+    fn checkout_writer_successful_rollback_never_reports_rejected_proposal_as_saved_item() {
+        let (root, id) = fixture();
+        let mut writer = CheckoutWriter::open(&root).unwrap();
+        let old = writer.snapshot.resolve(&id).unwrap().clone();
+        let mut header = old.header.clone().unwrap();
+        header.title = "rejected proposal".into();
+        let proposed = serialize(&header, b"Body");
+        let mut external = old.raw.clone();
+        external.extend_from_slice(b" external edit");
+        let path = old.path.clone();
+        let changed = external.clone();
+        let hook = super::super::storage::files::on_next("checkout_before_rename", move || {
+            fs::write(path, changed).unwrap();
+        });
+        let error = writer.publish(&header, b"Body", Some(&old)).unwrap_err();
+        drop(hook);
+        assert!(matches!(error, OperationError::Conflict(_)));
+        assert!(error.published_item().is_none());
+        assert!(error.previous_source_path().is_none());
+        assert_eq!(fs::read(&old.path).unwrap(), external);
+        assert_eq!(staged_count(&root), 1);
+        let staged = fs::read_dir(root.join(".work/items"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".operation-")
+            })
+            .unwrap();
+        assert_eq!(fs::read(&staged).unwrap(), proposed);
+        assert!(error.to_string().contains(staged.to_str().unwrap()));
+        assert!(error.to_string().contains("rejected proposal"));
+        let error = super::super::coordination::ExecutionError::from(error);
+        assert_eq!(error.details["publication"], "not_published");
+        assert!(error.details.get("published_item").is_none());
+        assert!(error.details.get("previous_source_path").is_none());
+        assert!(error.details.get("partial").is_none());
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkout_writer_retained_exchange_publication_reports_real_previous_source() {
+        let (root, id) = fixture();
+        let mut writer = CheckoutWriter::open(&root).unwrap();
+        let old = writer.snapshot.resolve(&id).unwrap().clone();
+        let mut header = old.header.clone().unwrap();
+        header.title = "published".into();
+        let mut changed = serialize(&header, b"Body");
+        changed.extend_from_slice(b" external edit after exchange");
+        let expected = changed.clone();
+        let path = old.path.clone();
+        let hook = super::super::storage::files::on_next("checkout_verify_exchange", move || {
+            fs::write(path, changed).unwrap();
+        });
+        let error = writer.publish(&header, b"Body", Some(&old)).unwrap_err();
+        drop(hook);
+        assert_eq!(
+            error.published_item(),
+            Some((id.as_str(), old.path.as_path()))
+        );
+        let recovery = error.previous_source_path().unwrap().to_owned();
+        assert_eq!(fs::read(&recovery).unwrap(), old.raw);
+        assert_eq!(fs::read(&old.path).unwrap(), expected);
+        assert_eq!(staged_count(&root), 1);
+        let error = super::super::coordination::ExecutionError::from(error);
+        assert_eq!(error.details["publication"], "published");
+        assert_eq!(error.details["published_item"]["id"], id);
+        assert_eq!(
+            error.details["previous_source_path"],
+            recovery.to_str().unwrap()
+        );
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkout_writer_verification_rejects_replaced_identities_with_unchanged_source_bytes() {
+        for replaced in ["root", "work", "items", "lock"] {
+            let (root, id) = fixture();
+            let writer = CheckoutWriter::open(&root).unwrap();
+            let raw = writer.snapshot.resolve(&id).unwrap().raw.clone();
+            let selected = match replaced {
+                "root" => root.clone(),
+                "work" => root.join(".work"),
+                "items" => root.join(".work/items"),
+                "lock" => root.join(".work/operations.lock"),
+                _ => unreachable!(),
+            };
+            let retained = selected.with_extension("held");
+            fs::rename(&selected, &retained).unwrap();
+            if replaced == "lock" {
+                fs::write(&selected, b"").unwrap();
+            } else {
+                fs::create_dir_all(root.join(".work/items")).unwrap();
+                fs::write(root.join(".work/items").join(format!("{id}.md")), &raw).unwrap();
+                fs::write(root.join(".work/operations.lock"), b"").unwrap();
+            }
+            assert_eq!(
+                ItemStore::load_from_root(&root)
+                    .unwrap()
+                    .resolve(&id)
+                    .unwrap()
+                    .raw,
+                raw
+            );
+            let error = writer.verify().unwrap_err();
+            assert!(matches!(error, OperationError::Conflict(_)));
+            assert!(error.published_item().is_none());
+            drop(writer);
+            fs::remove_dir_all(&root).unwrap();
+            if replaced == "root" {
+                fs::remove_dir_all(retained).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn checkout_writer_removes_unpublished_stage_on_snapshot_conflict() {
+        let (root, id) = fixture();
+        let mut writer = CheckoutWriter::open(&root).unwrap();
+        let old = writer.snapshot.resolve(&id).unwrap().clone();
+        let mut header = old.header.clone().unwrap();
+        header.title = "proposed".into();
+        let mut external = old.raw.clone();
+        external.extend_from_slice(b" external edit");
+        let path = old.path.clone();
+        let changed = external.clone();
+        let hook = super::super::storage::files::on_next("checkout_after_stage", move || {
+            fs::write(path, changed).unwrap();
+        });
+        let error = writer.publish(&header, b"Body", Some(&old)).unwrap_err();
+        drop(hook);
+        assert!(matches!(error, OperationError::Conflict(_)));
+        assert!(error.published_item().is_none());
+        assert_eq!(fs::read(&old.path).unwrap(), external);
+        assert_eq!(staged_count(&root), 0);
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkout_writer_removes_unpublished_stage_on_actual_rename_failure() {
+        let (root, id) = fixture();
+        let mut writer = CheckoutWriter::open(&root).unwrap();
+        let old = writer.snapshot.resolve(&id).unwrap().clone();
+        let mut header = old.header.clone().unwrap();
+        header.title = "proposed".into();
+        let path = old.path.clone();
+        let hook = super::super::storage::files::on_next("checkout_before_rename", move || {
+            fs::remove_file(path).unwrap();
+        });
+        let error = writer.publish(&header, b"Body", Some(&old)).unwrap_err();
+        drop(hook);
+        assert!(matches!(error, OperationError::Conflict(_)));
+        assert!(error.published_item().is_none());
+        assert!(!old.path.exists());
+        assert_eq!(staged_count(&root), 0);
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkout_writer_retains_published_recovery_on_success_and_failure() {
+        for fail in [false, true] {
+            let (root, id) = fixture();
+            let mut writer = CheckoutWriter::open(&root).unwrap();
+            let old = writer.snapshot.resolve(&id).unwrap().clone();
+            let mut header = old.header.clone().unwrap();
+            header.title = "published".into();
+            let hook =
+                fail.then(|| super::super::storage::files::fail_next("checkout_after_publish"));
+            let result = writer.publish(&header, b"Body", Some(&old));
+            drop(hook);
+            let recovery = if fail {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.published_item(),
+                    Some((id.as_str(), old.path.as_path()))
+                );
+                assert_eq!(error.code(), "io");
+                error.previous_source_path().unwrap().to_owned()
+            } else {
+                result.unwrap().unwrap()
+            };
+            assert_eq!(fs::read(&recovery).unwrap(), old.raw);
+            assert_eq!(fs::read(&old.path).unwrap(), serialize(&header, b"Body"));
+            assert_eq!(staged_count(&root), 1);
+            drop(writer);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -2106,6 +2494,35 @@ mod tests {
         let (published_id, path) = error.published_item().unwrap();
         assert_eq!(path, ops.item_path(published_id));
         assert!(path.exists());
+        let published = serde_json::json!({"id":published_id,"path":super::super::coordination::encode_path(path)});
+        let diagnostics = match &error {
+            OperationError::Published { cause, .. } => match cause.as_ref() {
+                OperationError::InvalidSource(d) => d
+                    .iter()
+                    .map(|d| {
+                        serde_json::json!({
+                            "path":super::super::coordination::encode_path(&d.path),
+                            "line":d.line,"message":d.message
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("unexpected cause: {other:?}"),
+            },
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(!diagnostics.is_empty());
+        let converted = super::super::coordination::ExecutionError::from(error);
+        assert_eq!(converted.code, "invalid_source");
+        assert_eq!(
+            converted.details["diagnostics"],
+            serde_json::json!(diagnostics)
+        );
+        assert_eq!(converted.details["publication"], "published");
+        assert_eq!(converted.details["published_item"], published);
+        assert_eq!(
+            converted.details["partial"]["created"],
+            serde_json::json!([published])
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
