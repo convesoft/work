@@ -315,8 +315,9 @@ impl ExecutionOperations {
         } else {
             writer.publish(&h, body, Some(&before))?
         };
+        let mut endings = Vec::new();
         if complete && let Some(claim) = claim {
-            ClaimStore::completed(
+            let ended = ClaimStore::completed(
                 &g,
                 &claim.id,
                 &claim.session,
@@ -329,12 +330,20 @@ impl ExecutionOperations {
                 }
                 error
             })?;
+            if ended.changed {
+                endings.push(json!({"id":claim.id,"path":encode_path(&g.root_path().join(format!("claims/{}.end.yaml",claim.id)))}));
+            }
         }
         let mut result = reload_valid_inspection(&g, &h.id).map_err(|e| {
-            if changed {
+            let error = if changed {
                 published_reload_error(e, &h.id, &before.path, recovery.as_deref(), false)
             } else {
                 e
+            };
+            if endings.is_empty() {
+                error
+            } else {
+                with_setup_progress(claim_postpublication_error(error), &endings)
             }
         })?;
         result.recovery_path = recovery;
@@ -774,6 +783,79 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn close_reload_failure_retains_published_ending_including_already_done_retry() {
+        for already_done in [false, true] {
+            let mut fixture = Fixture::new();
+            let id = fixture_item(&fixture);
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let session = test_session();
+            let (claim, _) = fixture.ops.acquire(&id, "owner", &session).unwrap();
+            let claim_id = claim["id"].as_str().unwrap().to_owned();
+            fixture.ops.authorization.push(ClaimAuthorization {
+                claim_id: claim_id.clone(),
+                session,
+            });
+            let ending = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join(format!("work/claims/{claim_id}.end.yaml"));
+            if already_done {
+                let failure = super::super::storage::files::fail_next("before_publication");
+                fixture.ops.close(&id, None).unwrap_err();
+                drop(failure);
+                assert!(!ending.exists());
+            }
+            let unexpected = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join("work/workspaces/unexpected");
+            let damaged = unexpected.clone();
+            let hook = super::super::storage::files::on_next("after_directory_sync", move || {
+                fs::write(damaged, b"invalid").unwrap();
+            });
+            let error = fixture.ops.close(&id, None).unwrap_err();
+            drop(hook);
+            assert_eq!(error.code, "invalid_format");
+            assert_eq!(error.path, Some(unexpected.clone()));
+            assert!(ending.is_file());
+            assert_eq!(error.details["publication"], "published");
+            assert_eq!(
+                error.details["partial"]["created"],
+                json!([{"id":claim_id,"path":encode_path(&ending)}])
+            );
+            assert_eq!(
+                error.details["partial"]["updated"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                usize::from(!already_done)
+            );
+            if already_done {
+                assert!(error.details.get("published_item").is_none());
+            } else {
+                assert_eq!(error.details["published_item"]["id"], id);
+                assert!(error.details["previous_source_path"].is_string());
+            }
+            fs::remove_file(unexpected).unwrap();
+            assert_eq!(
+                fixture.ops.close(&id, None).unwrap_err().code,
+                "stale_claim"
+            );
+            let guard = CoordinationGuard::acquire(&fixture.ops.project, false).unwrap();
+            let inspection = ClaimStore::inspect(&guard, &claim_id).unwrap();
+            assert!(!inspection.current);
+            assert_eq!(
+                inspection.ending.unwrap().outcome,
+                super::super::claims::ClaimOutcome::Completed
+            );
         }
     }
 
