@@ -150,6 +150,7 @@ pub enum RelationKind {
 
 pub struct DurableOperations {
     root: PathBuf,
+    fresh_common_dir: Option<PathBuf>,
 }
 
 struct OperationLock {
@@ -163,7 +164,14 @@ impl DurableOperations {
         let root: PathBuf = root.into();
         Self {
             root: root.components().collect(),
+            fresh_common_dir: None,
         }
+    }
+    /// Only the execution facade's fresh fallback uses this fence. The fixed
+    /// initialization evidence is checked after acquiring the existing lock.
+    pub(crate) fn with_initialization_fence(mut self, common_dir: &Path) -> Self {
+        self.fresh_common_dir = Some(common_dir.to_owned());
+        self
     }
 
     pub fn inspect(&self, id: &str) -> Result<Inspection, OperationError> {
@@ -1029,7 +1037,27 @@ impl DurableOperations {
             .map_err(io::Error::from)?,
         );
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        #[cfg(test)]
+        super::storage::files::inject("checkout_before_lock", &self.root)
+            .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
         flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
+        if let Some(common) = &self.fresh_common_dir {
+            for name in ["work", "work.identity.yaml"] {
+                match fs::symlink_metadata(common.join(name)) {
+                    Ok(_) => {
+                        return Err(OperationError::Conflict(
+                            "coordination initialization appeared; retry through current ownership"
+                                .into(),
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            #[cfg(test)]
+            super::storage::files::inject("checkout_fresh_checked", &self.root)
+                .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+        }
         Ok(OperationLock {
             file,
             root_dir,

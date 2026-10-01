@@ -606,7 +606,11 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         name,
         "item_list" | "item_ready" | "item_diagnose" | "item_inspect" | "item_inspect_raw"
     ) {
-        Ok(super::storage::attach_read(&project, result))
+        Ok(super::storage::attach_read(
+            &project,
+            result,
+            ops.take_read_storage(),
+        ))
     } else {
         Ok(result)
     }

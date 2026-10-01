@@ -334,7 +334,11 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
     }?;
     if words[0] == "item" && matches!(words[1].as_str(), "list" | "ready" | "diagnose" | "inspect")
     {
-        Ok(super::storage::attach_read(&project, result))
+        Ok(super::storage::attach_read(
+            &project,
+            result,
+            ops.take_read_storage(),
+        ))
     } else {
         Ok(result)
     }
