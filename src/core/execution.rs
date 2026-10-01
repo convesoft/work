@@ -5,7 +5,7 @@ use super::claims::{ClaimAuthorization, ClaimCandidate, ClaimStore, OwnershipSna
 use super::context::{ContextStore, ResolvedView};
 use super::coordination::*;
 use super::graph::ItemGraph;
-use super::items::{Completion, ItemHeader, ItemStore, LookupError, ManualState, parse_candidate};
+use super::items::{Completion, ItemHeader, ItemStore, LookupError, ManualState};
 use super::operations::{
     self, CheckoutWriter, DurableOperations, Inspection, MetadataChange, OperationError,
     RawInspection, RelationKind,
@@ -536,17 +536,8 @@ pub(crate) fn validate_candidate(
     h: &ItemHeader,
     body: &[u8],
 ) -> ExecutionResult<()> {
-    let mut files: Vec<_> = store
-        .files
-        .iter()
-        .filter(|f| f.path != path)
-        .cloned()
-        .collect();
-    files.push(parse_candidate(
-        path.to_owned(),
-        operations::serialize(h, body),
-    ));
-    let graph = ItemGraph::from_store(&ItemStore::from_candidate_files(files));
+    let candidate = operations::candidate_store(store, path, operations::serialize(h, body))?;
+    let graph = ItemGraph::from_store(&candidate);
     if graph.is_valid() {
         Ok(())
     } else {

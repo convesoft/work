@@ -1316,7 +1316,7 @@ fn require_candidate(store: &ItemStore) -> Result<(), OperationError> {
         ))
     }
 }
-fn candidate_store(
+pub(crate) fn candidate_store(
     store: &ItemStore,
     path: &Path,
     raw: Vec<u8>,

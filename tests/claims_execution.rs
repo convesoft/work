@@ -856,3 +856,57 @@ fn independent_lock_holder_preserves_cli_mcp_mutation_contention_and_read_warnin
         "after lock release"
     );
 }
+
+#[test]
+fn invalid_candidate_inputs_keep_argument_errors_before_and_after_storage_init() {
+    for initialized in [false, true] {
+        let f = Fixture::new();
+        let id = f.item();
+        if initialized {
+            f.init();
+        }
+        let item_path = f.path.join(format!(".work/items/{id}.md"));
+        let original = fs::read(&item_path).unwrap();
+        for args in [
+            vec!["item", "update", &id, "--title", ""],
+            vec!["item", "create", "--title", ""],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_work"))
+                .args(["--json", "--worktree"])
+                .arg(&f.path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["error"]["code"], "invalid_argument", "{value}");
+        }
+        for (tool, args) in [
+            ("item_update", serde_json::json!({"id":id,"title":""})),
+            ("item_create", serde_json::json!({"title":""})),
+        ] {
+            let value = mcp(&f.path, tool, args);
+            assert_eq!(value["error"]["code"], "invalid_argument", "{value}");
+        }
+        let mut child = Command::new(env!("CARGO_BIN_EXE_work"))
+            .args(["--json", "--worktree"])
+            .arg(&f.path)
+            .args(["item", "create", "--title", "valid", "--body", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&[0xff, 0xfe])
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_argument", "{value}");
+        assert_eq!(fs::read(&item_path).unwrap(), original);
+        assert_eq!(ItemStore::load(&f.project).unwrap().files.len(), 1);
+    }
+}
