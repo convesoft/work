@@ -334,3 +334,150 @@ fn terminal_fixture_keeps_material_binding_and_uncommitted_worktree_state() {
         "open"
     );
 }
+
+/// Pending cleanup is reserved fixture data; no finalization verb is performed.
+fn freeze_run(f: &Fixture, run: &str, phase: &str, wisp: &str) {
+    let path = f.root.join(format!(".git/work/runs/{run}/run.yaml"));
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["phase"] = json!(phase);
+    manifest["cleanup"] = json!({"kind":if phase=="squashing" {"squash"} else {"discard"},"finalize":phase=="squashing","item_ids":[wisp],"session_ids":[],"started_at":"2026-10-01T10:30:00Z"});
+    fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+}
+fn operational_files(f: &Fixture) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn collect(path: &Path, files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, files);
+            } else {
+                files.insert(path.clone(), fs::read(path).unwrap());
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    collect(&f.root.join(".git/work"), &mut files);
+    collect(&f.root.join(".work/items"), &mut files);
+    files
+}
+
+#[test]
+fn frozen_existing_wisp_expansion_refuses_before_any_setup_through_cli_and_mcp() {
+    for phase in ["squashing", "discarding"] {
+        let f = Fixture::new();
+        let root = f.item();
+        f.init();
+        let started = ok(cli(&f.root, &["run", "start", &root]));
+        let run = started["run"]["id"].as_str().unwrap();
+        template(
+            &f,
+            "seed",
+            "format_version: 2\nname: seed\nitems: [{key: a, title: Seed, persistence: wisp}]\n",
+        );
+        let expanded = ok(cli(&f.root, &["template", "expand", "seed", "--run", run]));
+        let wisp = expanded["items"][0]["id"].as_str().unwrap();
+        freeze_run(&f, run, phase, wisp);
+        template(
+            &f,
+            "extend",
+            "format_version: 2\nname: extend\nexisting: [seed]\nitems: [{key: a, title: NewMaterial}]\nedges: [{from: 'existing:seed', kind: depends_on, to: 'local:a'}]\n",
+        );
+        let before = operational_files(&f);
+        let binding = format!("seed={wisp}");
+        // There is deliberately no target run: the existing source's owner is
+        // the frozen run. Rejecting only --run would miss this preflight case.
+        let failed = cli(
+            &f.root,
+            &["template", "expand", "extend", "--existing", &binding],
+        );
+        assert_eq!(failed["error"]["code"], "run_not_current", "{failed}");
+        assert_eq!(operational_files(&f), before);
+        let failed = mcp(
+            &f.root,
+            "template_expand",
+            json!({"name":"extend","existing":{"seed":wisp}}),
+        );
+        assert_eq!(failed["error"]["code"], "run_not_current", "{failed}");
+        assert_eq!(operational_files(&f), before);
+        assert_eq!(
+            ok(cli(&f.root, &["item", "inspect", wisp]))["item"]["body"],
+            ""
+        );
+    }
+}
+
+#[test]
+fn frozen_run_root_material_and_wisps_match_ready_vs_acquire_in_cli_and_mcp() {
+    for phase in ["squashing", "discarding"] {
+        let f = Fixture::new();
+        let root = f.item();
+        let member = f.item();
+        let outsider = f.item();
+        f.init();
+        let started = ok(cli(&f.root, &["run", "start", &root]));
+        let run = started["run"]["id"].as_str().unwrap();
+        ok(cli(&f.root, &["run", "attach", run, &member]));
+        template(
+            &f,
+            "seed",
+            "format_version: 2\nname: seed\nitems: [{key: a, title: Seed, persistence: wisp}]\n",
+        );
+        let expanded = ok(cli(&f.root, &["template", "expand", "seed", "--run", run]));
+        let wisp = expanded["items"][0]["id"].as_str().unwrap();
+        // Retain one current owner when cleanup is frozen; inspection must still
+        // report the acquisition rather than silently hiding ownership.
+        let owned = acquire(&f.root, wisp);
+        freeze_run(&f, run, phase, wisp);
+        let ready = ok(cli(&f.root, &["item", "ready"]));
+        let mcp_ready = mcp(&f.root, "item_ready", json!({}));
+        assert_eq!(ready, mcp_ready);
+        let ids: Vec<_> = ready["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![outsider.as_str()]);
+        let listed = ok(cli(&f.root, &["item", "list"]));
+        assert_eq!(listed, mcp(&f.root, "item_list", json!({})));
+        for id in [&root, &member, wisp] {
+            let inspected = ok(cli(&f.root, &["item", "inspect", id]));
+            assert_eq!(inspected["item"]["executable"], false, "{inspected}");
+            assert_eq!(inspected, mcp(&f.root, "item_inspect", json!({"id":id})));
+            assert_eq!(
+                listed["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["id"] == id)
+                    .unwrap()["executable"],
+                false
+            );
+            let failed = cli(
+                &f.root,
+                &[
+                    "claim",
+                    "acquire",
+                    id,
+                    "--actor",
+                    "worker",
+                    "--session-namespace",
+                    "codex",
+                    "--session-id",
+                    "another session",
+                ],
+            );
+            assert_eq!(failed["error"]["code"], "run_not_current", "{failed}");
+            let failed = mcp(
+                &f.root,
+                "claim_acquire",
+                json!({"item":id,"actor":"worker","session":session()}),
+            );
+            assert_eq!(failed["error"]["code"], "run_not_current", "{failed}");
+        }
+        let inspected = ok(cli(&f.root, &["item", "inspect", wisp]));
+        assert_eq!(inspected["item"]["claim"]["id"], owned["claim"]["id"]);
+        assert_eq!(inspected["item"]["claim"]["session"], session());
+        assert_eq!(inspected["item"]["persistence"], "wisp");
+        assert_eq!(inspected["item"]["run_id"], run);
+    }
+}

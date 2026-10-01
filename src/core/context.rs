@@ -415,7 +415,36 @@ impl ResolvedView {
         })
     }
     pub fn recheck(&self, g: &CoordinationGuard) -> ExecutionResult<()> {
+        // Validate entry sets as well as captured source tokens: an uncaptured
+        // run/wisp can change the graph just as an added material file can.
+        // Callers use this before publication, not after their own planned writes.
+        let expected_runs: Vec<_> = self
+            .runs
+            .records
+            .iter()
+            .map(|run| run.manifest.id.clone())
+            .collect();
+        if g.names(Path::new("runs"))? != expected_runs {
+            return Err(ExecutionError::new(
+                "conflict",
+                "run entries changed after graph validation",
+            )
+            .at(g.root_path().join("runs")));
+        }
         for run in &self.runs.records {
+            let items = Path::new("runs").join(&run.manifest.id).join("items");
+            let expected_wisps: Vec<_> = run
+                .wisp_sources
+                .keys()
+                .map(|id| format!("{id}.md"))
+                .collect();
+            if g.names(&items)? != expected_wisps {
+                return Err(ExecutionError::new(
+                    "conflict",
+                    "wisp entries changed after graph validation",
+                )
+                .at(g.root_path().join(&items)));
+            }
             g.recheck(
                 &Path::new("runs").join(&run.manifest.id).join("run.yaml"),
                 &run.source,

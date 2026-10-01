@@ -284,7 +284,20 @@ impl ExecutionOperations {
             .unwrap_or(new_id()?);
         ClaimStore::authorize(&g, &check_id, &self.authorization)?;
         for file in &plan.updated {
-            ClaimStore::authorize(&g, &file.header.as_ref().unwrap().id, &self.authorization)?;
+            let id = &file.header.as_ref().unwrap().id;
+            ClaimStore::authorize(&g, id, &self.authorization)?;
+            if let Some(owner) = v.runs.membership(id)
+                && owner.wisp_sources.contains_key(id)
+                && owner.manifest.phase != RunPhase::Active
+            {
+                let mut error = ExecutionError::new(
+                    "run_not_current",
+                    "existing wisp run is frozen for cleanup",
+                )
+                .at(&file.path);
+                error.details = json!({"run_id":owner.manifest.id,"item_id":id,"phase":owner.manifest.phase.as_str(),"publication":"not_published"});
+                return Err(error);
+            }
         }
         let mut roots = BTreeSet::new();
         if plan
@@ -324,24 +337,31 @@ impl ExecutionOperations {
                 None
             };
             for (index, item) in plan.items.iter().enumerate() {
-                attempted = Some(item.path.clone());
+                attempted = None;
                 before_item(index)?;
                 match item.persistence {
                     Persistence::Material => {
                         ContextStore::bind(&g, &item.id, dest.as_ref().unwrap())?;
                         setup_created.push(json!({"id":item.id,"path":encode_path(&g.root_path().join(format!("workspaces/items/{}.yaml",item.id)))}));
+                        attempted = Some(item.path.clone());
                         writers
                             .get_mut(&self.project.worktree_root)
                             .unwrap()
                             .publish(&item.header, &item.body, None)?;
                     }
                     Persistence::Wisp => {
+                        attempted = Some(item.path.clone());
                         RunStore::create_wisp(
                             &g,
                             run_id.expect("planner requires run"),
                             &item.header,
                             &item.body,
-                        )?;
+                        )
+                        .inspect_err(|error| {
+                            if error.details["publication"] == "published" {
+                                created.push(item.id.clone());
+                            }
+                        })?;
                     }
                 }
                 created.push(item.id.clone());
@@ -357,13 +377,12 @@ impl ExecutionOperations {
                         .publish(h, body, Some(file))?;
                 } else {
                     let run = v.runs.membership(&h.id).unwrap();
-                    RunStore::replace_wisp(
-                        &g,
-                        &run.manifest.id,
-                        &run.wisp_sources[&h.id],
-                        h,
-                        body,
-                    )?;
+                    RunStore::replace_wisp(&g, &run.manifest.id, &run.wisp_sources[&h.id], h, body)
+                        .inspect_err(|error| {
+                            if error.details["publication"] == "published" {
+                                updated.push(h.id.clone());
+                            }
+                        })?;
                 }
                 updated.push(h.id.clone());
             }
@@ -394,11 +413,16 @@ impl ExecutionOperations {
             Ok(())
         })();
         if let Err(error) = publish {
+            let uncertain_paths = if error.details["publication"] == "possible" {
+                attempted.into_iter().collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             return Err(plan.partial_error(
                 with_setup_progress(error, &setup_created),
                 &created,
                 &updated,
-                &attempted.into_iter().collect::<Vec<_>>(),
+                &uncertain_paths,
             ));
         }
         Ok(
@@ -492,5 +516,223 @@ mod tests {
             0
         );
         fs::remove_dir_all(root).unwrap();
+    }
+    struct RunFixture {
+        root: std::path::PathBuf,
+        ops: ExecutionOperations,
+        run_id: String,
+        wisp_id: String,
+        wisp_path: std::path::PathBuf,
+    }
+    impl RunFixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("work-wisp-progress-{}", new_id().unwrap()));
+            fs::create_dir_all(root.join(".work/items")).unwrap();
+            fs::create_dir_all(root.join(".work/templates")).unwrap();
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(["init", "-q"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let project = super::super::project::discover(Some(&root)).unwrap();
+            let material = super::super::operations::DurableOperations::new(&root)
+                .create("root".into(), b"root body".to_vec(), Default::default())
+                .unwrap()
+                .file
+                .header
+                .unwrap()
+                .id;
+            super::super::storage::Storage::new(project.clone())
+                .initialize()
+                .unwrap();
+            let ops = ExecutionOperations::new(project);
+            let result = ops.run_start(&material, None, None).unwrap();
+            let run_id = result["run"]["id"].as_str().unwrap().to_owned();
+            let guard = CoordinationGuard::acquire(&ops.project, true).unwrap();
+            let wisp_id = new_id().unwrap();
+            let header =
+                super::super::operations::default_header(wisp_id.clone(), "existing wisp".into());
+            let wisp_path =
+                RunStore::create_wisp(&guard, &run_id, &header, b"original body").unwrap();
+            Self {
+                root,
+                ops,
+                run_id,
+                wisp_id,
+                wisp_path,
+            }
+        }
+        fn template(&self, update: bool) {
+            let source = if update {
+                "format_version: 2\nname: step\nexisting: [seed]\nitems: [{key: a, title: NewWisp, persistence: wisp}]\nedges: [{from: 'existing:seed', kind: depends_on, to: 'local:a'}]\n"
+            } else {
+                "format_version: 2\nname: step\nitems: [{key: a, title: NewWisp, persistence: wisp}]\n"
+            };
+            fs::write(self.root.join(".work/templates/step.yaml"), source).unwrap();
+        }
+        fn request(&self, update: bool) -> PreviewRequest {
+            PreviewRequest {
+                root: None,
+                parameters: Default::default(),
+                existing: if update {
+                    BTreeMap::from([("seed".into(), self.wisp_id.clone())])
+                } else {
+                    BTreeMap::new()
+                },
+            }
+        }
+    }
+    impl Drop for RunFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn expansion_reports_synced_wisp_create_and_update_without_false_uncertainty() {
+        for update in [false, true] {
+            let fixture = RunFixture::new();
+            fixture.template(update);
+            let original = fs::read(&fixture.wisp_path).unwrap();
+            let lock = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join("work/coordination.lock");
+            let hook_lock = lock.clone();
+            let hook = super::super::storage::files::on_nth(
+                "after_directory_sync",
+                if update { 2 } else { 1 },
+                move || {
+                    fs::rename(&hook_lock, hook_lock.with_extension("retained")).unwrap();
+                    fs::write(hook_lock, b"").unwrap();
+                },
+            );
+            let error = fixture
+                .ops
+                .expand("step", &fixture.request(update), Some(&fixture.run_id))
+                .unwrap_err();
+            drop(hook);
+            let new_id = error.details["key_ids"]["a"].as_str().unwrap();
+            let new_path = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join(format!("work/runs/{}/items/{new_id}.md", fixture.run_id));
+            assert_eq!(error.code, "conflict", "{error:?}");
+            assert_eq!(error.path, Some(lock));
+            assert_eq!(error.details["publication"], "published");
+            let attempted = if update {
+                &fixture.wisp_path
+            } else {
+                &new_path
+            };
+            assert_eq!(error.details["published_path"], encode_path(attempted));
+            assert!(error.details["errno"].is_null());
+            assert_eq!(
+                error.details["partial"]["created"],
+                json!([{"id":new_id,"path":encode_path(&new_path)}])
+            );
+            assert_eq!(
+                error.details["partial"]["updated"],
+                if update {
+                    json!([{"id":fixture.wisp_id,"path":encode_path(&fixture.wisp_path)}])
+                } else {
+                    json!([])
+                }
+            );
+            assert_eq!(error.details["partial"]["uncertain_paths"], json!([]));
+            assert!(new_path.is_file());
+            if update {
+                assert!(
+                    String::from_utf8(fs::read(&fixture.wisp_path).unwrap())
+                        .unwrap()
+                        .contains(new_id)
+                );
+                let retained = error.details["recovery_paths"].as_array().unwrap();
+                assert_eq!(retained.len(), 1);
+                let path = decode_path(retained[0].as_str().unwrap()).unwrap();
+                assert_eq!(fs::read(path).unwrap(), original);
+            } else {
+                assert_eq!(fs::read(&fixture.wisp_path).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn expansion_wisp_progress_distinguishes_possible_from_unpublished() {
+        for possible in [false, true] {
+            let fixture = RunFixture::new();
+            fixture.template(false);
+            let fault = super::super::storage::files::fail_next(if possible {
+                "publication_sync"
+            } else {
+                "before_publication"
+            });
+            let error = fixture
+                .ops
+                .expand("step", &fixture.request(false), Some(&fixture.run_id))
+                .unwrap_err();
+            drop(fault);
+            let id = error.details["key_ids"]["a"].as_str().unwrap();
+            let path = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join(format!("work/runs/{}/items/{id}.md", fixture.run_id));
+            assert_eq!(error.code, "io");
+            assert_eq!(error.details["errno"], 5);
+            assert_eq!(error.path.as_deref(), Some(path.as_path()));
+            assert_eq!(
+                error.details["publication"],
+                if possible {
+                    "possible"
+                } else {
+                    "not_published"
+                }
+            );
+            assert_eq!(error.details["partial"]["created"], json!([]));
+            assert_eq!(error.details["partial"]["updated"], json!([]));
+            assert_eq!(
+                error.details["partial"]["uncertain_paths"],
+                if possible {
+                    json!([encode_path(&path)])
+                } else {
+                    json!([])
+                }
+            );
+            assert_eq!(path.is_file(), possible);
+            if possible {
+                assert!(
+                    !error.details["recovery_paths"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expansion_can_publish_its_planned_entries_then_update_an_existing_wisp() {
+        let fixture = RunFixture::new();
+        fixture.template(true);
+        let result = fixture
+            .ops
+            .expand("step", &fixture.request(true), Some(&fixture.run_id))
+            .unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["updated"].as_array().unwrap().len(), 1);
+        assert_eq!(result["updated"][0]["id"], fixture.wisp_id);
+        let current = fixture.ops.inspect(&fixture.wisp_id).unwrap();
+        assert_eq!(
+            current.file.header.unwrap().depends_on,
+            vec![result["items"][0]["id"].as_str().unwrap().to_owned()]
+        );
     }
 }
