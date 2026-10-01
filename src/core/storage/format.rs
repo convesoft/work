@@ -7,7 +7,7 @@ use std::path::Path;
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
 
-pub(super) fn valid_id(value: &str) -> bool {
+pub(crate) fn valid_id(value: &str) -> bool {
     let b = value.as_bytes();
     b.len() == 32
         && b.iter()
@@ -28,7 +28,7 @@ fn bad(path: &Path, message: impl Into<String>) -> StorageError {
         Some(path.to_owned()),
     )
 }
-pub(super) fn yaml(raw: &[u8], path: &Path) -> Result<Value, StorageError> {
+pub(crate) fn yaml(raw: &[u8], path: &Path) -> Result<Value, StorageError> {
     let text = std::str::from_utf8(raw).map_err(|_| bad(path, "foundation YAML must be UTF-8"))?;
     if text.lines().any(|line| line.starts_with('%')) {
         return Err(bad(path, "YAML directives are forbidden"));
@@ -192,7 +192,7 @@ fn id(map: &Map<String, Value>, key: &str, path: &Path) -> Result<String, Storag
     }
     Ok(value)
 }
-pub(super) fn metadata(raw: &[u8], path: &Path) -> Result<StoreMetadata, StorageError> {
+pub(crate) fn metadata(raw: &[u8], path: &Path) -> Result<StoreMetadata, StorageError> {
     let value = yaml(raw, path)?;
     version(value.as_object().expect("YAML mapping"), path)?;
     let map = fields(
@@ -206,14 +206,14 @@ pub(super) fn metadata(raw: &[u8], path: &Path) -> Result<StoreMetadata, Storage
         recovery_generation: id(map, "recovery_generation", path)?,
     })
 }
-pub(super) fn identity(raw: &[u8], path: &Path) -> Result<String, StorageError> {
+pub(crate) fn identity(raw: &[u8], path: &Path) -> Result<String, StorageError> {
     let value = yaml(raw, path)?;
     version(value.as_object().expect("YAML mapping"), path)?;
     let map = fields(&value, &["format_version", "store_id"], path)?;
     id(map, "store_id", path)
 }
 #[derive(Debug, Clone)]
-pub(super) struct Operation {
+pub(crate) struct Operation {
     pub id: String,
     pub kind: String,
     pub store_id: String,
@@ -243,7 +243,7 @@ fn list(map: &Map<String, Value>, key: &str, path: &Path) -> Result<Vec<String>,
     }
     Ok(result)
 }
-pub(super) fn operation(raw: &[u8], path: &Path) -> Result<Operation, StorageError> {
+pub(crate) fn operation(raw: &[u8], path: &Path) -> Result<Operation, StorageError> {
     let value = yaml(raw, path)?;
     let map = fields(
         &value,
@@ -346,22 +346,22 @@ impl Operation {
         Ok(())
     }
 }
-pub(super) fn metadata_bytes(meta: &StoreMetadata) -> Vec<u8> {
+pub(crate) fn metadata_bytes(meta: &StoreMetadata) -> Vec<u8> {
     bytes(
         &json!({"format_version":1,"store_id":meta.store_id,"recovery_generation":meta.recovery_generation}),
     )
 }
-pub(super) fn identity_bytes(id: &str) -> Vec<u8> {
+pub(crate) fn identity_bytes(id: &str) -> Vec<u8> {
     bytes(&json!({"format_version":1,"store_id":id}))
 }
-pub(super) fn bytes(value: &Value) -> Vec<u8> {
+pub(crate) fn bytes(value: &Value) -> Vec<u8> {
     let mut raw = serde_json::to_vec_pretty(value).expect("JSON foundation serialization");
     raw.push(b'\n');
     raw
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Context {
+pub(crate) struct Context {
     pub prior_missing_or_damaged: bool,
     pub store: Option<Source>,
     pub identity: Option<Source>,
@@ -485,7 +485,7 @@ fn source(value: &Value, path: &Path) -> Result<Option<Source>, StorageError> {
     }
     Ok(Some(result))
 }
-pub(super) fn context(raw: &[u8], op: &Operation, path: &Path) -> Result<Context, StorageError> {
+pub(crate) fn context(raw: &[u8], op: &Operation, path: &Path) -> Result<Context, StorageError> {
     let value = yaml(raw, path)?;
     let m = fields(
         &value,

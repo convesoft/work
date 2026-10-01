@@ -1,0 +1,302 @@
+//! Real CLI/MCP ownership and material-source routing acceptance.
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
+};
+static NEXT: AtomicU64 = AtomicU64::new(0);
+struct Fixture {
+    root: PathBuf,
+}
+fn git(root: &Path, args: &[&str]) {
+    let o = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "work-execution-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        fs::create_dir_all(root.join(".work/items")).unwrap();
+        Self { root }
+    }
+    fn item(&self) -> String {
+        ok(cli(
+            &self.root,
+            &[
+                "item",
+                "create",
+                "--title",
+                "original",
+                "--body",
+                "original body",
+            ],
+        ))["item"]["id"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+    fn init(&self) {
+        ok(cli(&self.root, &["storage", "init"]));
+    }
+    fn linked(&self) -> PathBuf {
+        git(&self.root, &["add", ".work/items"]);
+        git(
+            &self.root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+        let path = self.root.join("linked");
+        git(
+            &self.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                path.to_str().unwrap(),
+            ],
+        );
+        path
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+fn cli(root: &Path, args: &[&str]) -> Value {
+    let o = Command::new(env!("CARGO_BIN_EXE_work"))
+        .arg("--json")
+        .arg("--worktree")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    serde_json::from_slice(&o.stdout).unwrap_or_else(|_| {
+        panic!(
+            "{} {}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    })
+}
+fn ok(v: Value) -> Value {
+    assert_eq!(v["ok"], true, "{v}");
+    v["result"].clone()
+}
+fn mcp(root: &Path, name: &str, args: Value) -> Value {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_work"))
+        .arg("mcp")
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = c.stdin.take().unwrap();
+    writeln!(stdin,"{}",json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})).unwrap();
+    writeln!(stdin,"{}",json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
+    drop(stdin);
+    let o = c.wait_with_output().unwrap();
+    let v: Value =
+        serde_json::from_str(String::from_utf8_lossy(&o.stdout).lines().last().unwrap()).unwrap();
+    v["result"]["structuredContent"].clone()
+}
+fn session() -> Value {
+    json!({"namespace":"codex","id":"session / opaque:α"})
+}
+fn acquire(root: &Path, id: &str) -> Value {
+    ok(cli(
+        root,
+        &[
+            "claim",
+            "acquire",
+            id,
+            "--actor",
+            "worker",
+            "--session-namespace",
+            "codex",
+            "--session-id",
+            "session / opaque:α",
+        ],
+    ))
+}
+#[test]
+fn bound_whole_file_is_read_and_mutated_from_main_without_touching_main_item() {
+    let f = Fixture::new();
+    let id = f.item();
+    let linked = f.linked();
+    let rel = format!(".work/items/{id}.md");
+    let main = fs::read(f.root.join(&rel)).unwrap();
+    let text = String::from_utf8(main.clone())
+        .unwrap()
+        .replace("original body", "feature body")
+        .replace("original", "feature title");
+    fs::write(linked.join(&rel), text).unwrap();
+    f.init();
+    let a = acquire(&linked, &id);
+    let claim = a["claim"]["id"].as_str().unwrap();
+    let pair = json!({"claim_id":claim,"session":session()});
+    let read = ok(cli(&f.root, &["item", "inspect", &id]));
+    assert_eq!(read["item"]["body"], "feature body");
+    assert_eq!(read["item"]["source_worktree"], linked.to_str().unwrap());
+    assert_eq!(read["item"]["claim"]["id"], claim);
+    assert_eq!(
+        mcp(&f.root, "item_inspect", json!({"id":id}))["item"],
+        read["item"]
+    );
+    assert!(
+        ok(cli(&f.root, &["item", "ready"]))["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        cli(&f.root, &["item", "close", &id])["error"]["code"],
+        "claim_conflict"
+    );
+    let update = mcp(
+        &f.root,
+        "item_update",
+        json!({"id":id,"title":"changed from main","authorization":[pair.clone()]}),
+    );
+    assert_eq!(update["item"]["title"], "changed from main", "{update}");
+    let branch = ok(cli(
+        &f.root,
+        &["item", "inspect", &id, "--view", "checkout"],
+    ));
+    assert_eq!(branch["item"]["body"], "original body");
+    let closed = ok(cli(
+        &f.root,
+        &[
+            "item",
+            "close",
+            &id,
+            "--authorize",
+            &pair.to_string(),
+            "--reason",
+            "done",
+        ],
+    ));
+    assert_eq!(closed["item"]["state"], "done");
+    assert_eq!(fs::read(f.root.join(&rel)).unwrap(), main);
+    assert_eq!(
+        ok(cli(&f.root, &["claim", "inspect", claim]))["ending"]["outcome"],
+        "completed"
+    );
+    assert_eq!(
+        mcp(
+            &f.root,
+            "item_reopen",
+            json!({"id":id,"authorization":[pair]})
+        )["error"]["code"],
+        "stale_claim"
+    );
+}
+#[test]
+fn actual_claim_calls_refuse_uninitialized_and_corrupt_storage_while_reads_warn() {
+    let f = Fixture::new();
+    let id = f.item();
+    let args = json!({"item":id,"actor":"a","session":session()});
+    let before = mcp(&f.root, "claim_acquire", args.clone());
+    assert_eq!(before["error"]["code"], "storage_missing");
+    assert!(!f.root.join(".git/work").exists());
+    f.init();
+    fs::write(f.root.join(".git/work/store.yaml"), "broken: [").unwrap();
+    let denied = mcp(&f.root, "claim_acquire", args);
+    assert_eq!(denied["error"]["code"], "recovery_required");
+    let read = ok(cli(&f.root, &["item", "ready"]));
+    assert!(read["storage_warning"].is_object());
+    assert_eq!(read["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        cli(
+            &f.root,
+            &[
+                "claim",
+                "acquire",
+                &id,
+                "--actor",
+                "a",
+                "--session-namespace",
+                "codex",
+                "--session-id",
+                "x"
+            ]
+        )["error"]["code"],
+        denied["error"]["code"]
+    );
+}
+#[test]
+fn cli_and_mcp_compete_for_one_owner_then_release_without_item_source() {
+    let f = Fixture::new();
+    let id = f.item();
+    f.init();
+    let root = f.root.clone();
+    let id2 = id.clone();
+    let a = std::thread::spawn(move || {
+        cli(
+            &root,
+            &[
+                "claim",
+                "acquire",
+                &id2,
+                "--actor",
+                "cli",
+                "--session-namespace",
+                "codex",
+                "--session-id",
+                "session / opaque:α",
+            ],
+        )
+    });
+    let b = mcp(
+        &f.root,
+        "claim_acquire",
+        json!({"item":id,"actor":"mcp","session":session()}),
+    );
+    let a = a.join().unwrap();
+    assert_eq!(
+        usize::from(a["ok"] == true) + usize::from(b["claim"].is_object()),
+        1,
+        "{a} {b}"
+    );
+    let owner = ok(cli(&f.root, &["claim", "list", "--current"]));
+    let claim = owner["claims"][0]["claim"]["id"].as_str().unwrap();
+    assert_eq!(owner["claims"].as_array().unwrap().len(), 1);
+    fs::remove_file(f.root.join(format!(".work/items/{id}.md"))).unwrap();
+    let released = mcp(
+        &f.root,
+        "claim_release",
+        json!({"claim_id":claim,"session":session()}),
+    );
+    assert_eq!(released["ending"]["outcome"], "released", "{released}");
+    assert_eq!(
+        mcp(
+            &f.root,
+            "claim_release",
+            json!({"claim_id":claim,"session":session()})
+        )["changed"],
+        false
+    );
+}

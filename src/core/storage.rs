@@ -7,8 +7,8 @@
 // to both adapters. Preserve that API instead of boxing away its fields.
 #![allow(clippy::result_large_err)]
 
-mod files;
-mod format;
+pub(crate) mod files;
+pub(crate) mod format;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -189,7 +189,7 @@ impl Storage {
     pub fn new(project: Project) -> Self {
         Self { project }
     }
-    fn empty_inspection(&self) -> StorageInspection {
+    pub(crate) fn empty_inspection(&self) -> StorageInspection {
         let path = self.project.git_common_dir.join("work");
         StorageInspection {
             state: StorageState::Uninitialized,
@@ -263,7 +263,7 @@ impl Storage {
         self.inspect_locked(&locked, &mut result);
         Ok(result)
     }
-    fn inspect_locked(&self, locked: &files::Locked, result: &mut StorageInspection) {
+    pub(crate) fn inspect_locked(&self, locked: &files::Locked, result: &mut StorageInspection) {
         let _ = self.inspect_locked_evidence(locked, result);
     }
     // Retain the original refusal (including errno) for mutation callers;

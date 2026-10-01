@@ -109,6 +109,7 @@ impl From<io::Error> for OperationError {
 
 #[derive(Debug, Clone)]
 pub struct Inspection {
+    pub context: serde_json::Value,
     pub file: ItemFile,
     pub relations: Relations,
     pub evaluation: Option<Evaluation>,
@@ -1195,7 +1196,7 @@ impl DurableOperations {
     }
 }
 
-fn inspect_store(store: &ItemStore, id: &str) -> Result<Inspection, OperationError> {
+pub(crate) fn inspect_store(store: &ItemStore, id: &str) -> Result<Inspection, OperationError> {
     let graph = ItemGraph::from_store(store);
     inspect_with_graph(store, &graph, id)
 }
@@ -1225,6 +1226,7 @@ fn inspect_with_graph(
         None
     };
     Ok(Inspection {
+        context: serde_json::json!({"source_worktree": super::coordination::encode_path(file.path.parent().unwrap().parent().unwrap().parent().unwrap()), "persistence":"material","run_id":null,"claim":null}),
         file,
         relations,
         evaluation,
@@ -1276,7 +1278,7 @@ fn candidate_store(
     Ok(ItemStore::from_candidate_files(candidate.files))
 }
 
-fn default_header(id: String, title: String) -> ItemHeader {
+pub(crate) fn default_header(id: String, title: String) -> ItemHeader {
     ItemHeader {
         id,
         title,
@@ -1293,7 +1295,7 @@ fn default_header(id: String, title: String) -> ItemHeader {
         close_reason: None,
     }
 }
-fn apply_change(mut h: ItemHeader, c: MetadataChange) -> ItemHeader {
+pub(crate) fn apply_change(mut h: ItemHeader, c: MetadataChange) -> ItemHeader {
     if let Some(v) = c.title {
         h.title = v;
     }
@@ -1335,7 +1337,7 @@ fn apply_change(mut h: ItemHeader, c: MetadataChange) -> ItemHeader {
     h
 }
 
-fn serialize(h: &ItemHeader, body: &[u8]) -> Vec<u8> {
+pub(crate) fn serialize(h: &ItemHeader, body: &[u8]) -> Vec<u8> {
     let mut text = format!(
         "---\nformat_version: 1\nid: {}\ntitle: {}\n",
         quote(&h.id),
@@ -1505,12 +1507,100 @@ fn with_recovery(error: OperationError, path: &Path) -> OperationError {
         other => OperationError::Conflict(format!("{other}{context}")),
     }
 }
-fn new_id() -> Result<String, OperationError> {
+pub(crate) fn new_id() -> Result<String, OperationError> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Coordinator-owned checkout lock and publication primitives. The caller has
+/// already validated the complete resolved graph under the common lock.
+pub(crate) struct CheckoutWriter {
+    ops: DurableOperations,
+    lock: OperationLock,
+    items: OwnedFd,
+    snapshot: ItemStore,
+}
+impl CheckoutWriter {
+    pub(crate) fn open(root: &Path) -> Result<Self, OperationError> {
+        let ops = DurableOperations::new(root);
+        let lock = ops.lock()?;
+        let items = ops.items_dir(&lock)?;
+        let snapshot = ops.load_from_dir(&items)?;
+        Ok(Self {
+            ops,
+            lock,
+            items,
+            snapshot,
+        })
+    }
+    pub(crate) fn publish(
+        &mut self,
+        header: &ItemHeader,
+        body: &[u8],
+        expected: Option<&ItemFile>,
+    ) -> Result<Option<PathBuf>, OperationError> {
+        let path = self.ops.item_path(&header.id);
+        let raw = serialize(header, body);
+        self.ops
+            .check_snapshot(&self.lock, &self.items, &self.snapshot)?;
+        if let Some(old) = expected {
+            if old.path != path
+                || !self
+                    .snapshot
+                    .files
+                    .iter()
+                    .any(|f| f.path == path && f.raw == old.raw && f.fingerprint == old.fingerprint)
+            {
+                return Err(OperationError::Conflict(
+                    "resolved source changed before checkout write".into(),
+                ));
+            }
+        } else if self.snapshot.files.iter().any(|f| f.path == path) {
+            return Err(OperationError::AlreadyExists(header.id.clone()));
+        }
+        let staged =
+            self.ops
+                .stage_with_mode(&self.items, &raw, expected.map(source_mode).transpose()?)?;
+        let staged_identity = fingerprint_at(&self.items, &staged)?;
+        self.ops
+            .check_snapshot(&self.lock, &self.items, &self.snapshot)?;
+        rename_in_dir(
+            &self.items,
+            &staged,
+            &path,
+            if expected.is_some() {
+                RenameFlags::EXCHANGE
+            } else {
+                RenameFlags::NOREPLACE
+            },
+        )
+        .map_err(exchange_error)?;
+        (|| {
+            if let Some(old) = expected {
+                self.ops.verify_exchange(
+                    &self.items,
+                    &self.snapshot,
+                    old,
+                    &staged,
+                    &raw,
+                    &staged_identity,
+                )?;
+            }
+            self.ops.sync_items(&self.items)?;
+            self.ops.ensure_selected_dir(&self.lock, &self.items)?;
+            self.snapshot = self.ops.load_from_dir(&self.items)?;
+            Ok(expected.map(|_| staged.clone()))
+        })()
+        .map_err(|cause| OperationError::Published {
+            id: header.id.clone(),
+            path,
+            previous_source_path: expected.map(|_| staged),
+            cause: Box::new(cause),
+        })
+    }
 }
 
 #[cfg(test)]
