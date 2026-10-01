@@ -2494,6 +2494,35 @@ mod tests {
         let (published_id, path) = error.published_item().unwrap();
         assert_eq!(path, ops.item_path(published_id));
         assert!(path.exists());
+        let published = serde_json::json!({"id":published_id,"path":super::super::coordination::encode_path(path)});
+        let diagnostics = match &error {
+            OperationError::Published { cause, .. } => match cause.as_ref() {
+                OperationError::InvalidSource(d) => d
+                    .iter()
+                    .map(|d| {
+                        serde_json::json!({
+                            "path":super::super::coordination::encode_path(&d.path),
+                            "line":d.line,"message":d.message
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("unexpected cause: {other:?}"),
+            },
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(!diagnostics.is_empty());
+        let converted = super::super::coordination::ExecutionError::from(error);
+        assert_eq!(converted.code, "invalid_source");
+        assert_eq!(
+            converted.details["diagnostics"],
+            serde_json::json!(diagnostics)
+        );
+        assert_eq!(converted.details["publication"], "published");
+        assert_eq!(converted.details["published_item"], published);
+        assert_eq!(
+            converted.details["partial"]["created"],
+            serde_json::json!([published])
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

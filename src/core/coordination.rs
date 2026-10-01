@@ -75,7 +75,11 @@ impl From<OperationError> for ExecutionError {
         if let Some(path) = e.previous_source_path() {
             result.details["previous_source_path"] = json!(encode_path(path));
         }
-        if let OperationError::InvalidSource(d) | OperationError::InvalidCandidate(d) = &e {
+        let mut cause = &e;
+        while let OperationError::Published { cause: nested, .. } = cause {
+            cause = nested;
+        }
+        if let OperationError::InvalidSource(d) | OperationError::InvalidCandidate(d) = cause {
             result.details["diagnostics"] = json!(
                 d.iter()
                     .map(|d| json!({"path":encode_path(&d.path),"line":d.line,"message":d.message}))
