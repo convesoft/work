@@ -295,12 +295,25 @@ impl CoordinationGuard {
         self.verify()
     }
     pub fn create(&self, path: &Path, raw: &[u8]) -> ExecutionResult<()> {
-        self.publish(path, None, raw)
+        self.publish(path, None, raw).map(|_| ())
     }
     pub fn replace(&self, path: &Path, expected: &EntitySource, raw: &[u8]) -> ExecutionResult<()> {
+        self.replace_with_recovery(path, expected, raw).map(|_| ())
+    }
+    pub(crate) fn replace_with_recovery(
+        &self,
+        path: &Path,
+        expected: &EntitySource,
+        raw: &[u8],
+    ) -> ExecutionResult<Option<PathBuf>> {
         self.publish(path, Some(&expected.source), raw)
     }
-    fn publish(&self, path: &Path, expected: Option<&Source>, raw: &[u8]) -> ExecutionResult<()> {
+    fn publish(
+        &self,
+        path: &Path,
+        expected: Option<&Source>,
+        raw: &[u8],
+    ) -> ExecutionResult<Option<PathBuf>> {
         self.writable()?;
         let (dir, name) = self.parent(path)?;
         let stage = format!(".storage-{}", new_id()?);
@@ -309,16 +322,18 @@ impl CoordinationGuard {
             // Publication and directory sync completed before this final lock check.
             error.details["publication"] = json!("published");
             error.details["published_path"] = json!(encode_path(&dir.path.join(&name)));
-            if let Some(path) = retained {
+            if let Some(path) = &retained {
+                error.details["previous_source_path"] = json!(encode_path(path));
                 let mut paths = error.details["recovery_paths"]
                     .as_array()
                     .cloned()
                     .unwrap_or_default();
-                paths.push(json!(encode_path(&path)));
+                paths.push(json!(encode_path(path)));
                 error.details["recovery_paths"] = json!(paths);
             }
             error
-        })
+        })?;
+        Ok(retained)
     }
     pub fn delete(&self, path: &Path, expected: &EntitySource) -> ExecutionResult<()> {
         self.writable()?;

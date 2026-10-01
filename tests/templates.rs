@@ -64,7 +64,7 @@ impl Drop for Fixture {
 
 fn request(parameters: &[(&str, &str)], existing: &[(&str, &str)]) -> PreviewRequest {
     PreviewRequest {
-        root: ROOT.into(),
+        root: Some(ROOT.into()),
         parameters: parameters
             .iter()
             .map(|(k, v)| ((*k).into(), (*v).into()))
@@ -176,7 +176,7 @@ fn rejects_schema_tokens_and_references_before_preview() {
     let base = "format_version: 1\nname: bad\nparameters: [change]\nitems:\n  - key: task\n    title: \"Do {{change}}\"\n";
     for (source, expected) in [
         (
-            base.replace("format_version: 1", "format_version: 2"),
+            base.replace("format_version: 1", "format_version: 3"),
             "format_version",
         ),
         (format!("{base}unknown: yes\n"), "unknown template field"),
@@ -308,4 +308,149 @@ fn parameter_values_are_inserted_once_and_omitted_body_is_empty() {
         result.parameters,
         BTreeMap::from([("value".into(), "{{untouched}}".into())])
     );
+}
+
+#[test]
+fn version_two_rootless_material_planning_is_read_only_and_defaults_unchanged() {
+    use work::core::templates::Persistence;
+    let f = Fixture::new();
+    f.template("initial", "format_version: 2\nname: initial\nitems:\n- {key: b, title: Beta}\n- {key: a, title: Alpha, persistence: material}\nedges:\n- {from: 'local:b', kind: depends_on, to: 'local:a'}\n");
+    let mut input = request(&[], &[]);
+    input.root = None;
+    let catalog = f.catalog();
+    let view = f.view();
+    let preview = catalog.preview("initial", &input, &view).unwrap();
+    assert_eq!(preview.root, None);
+    assert!(
+        preview
+            .items
+            .iter()
+            .all(|i| i.persistence == Persistence::Material)
+    );
+    assert_eq!(preview, catalog.preview("initial", &input, &view).unwrap());
+    let shared = f.0.join("disposable-shared");
+    let plan = catalog
+        .plan_expansion("initial", &input, &view, &f.0, None, &shared)
+        .unwrap();
+    assert!(plan.run_id.is_none());
+    assert!(plan.updated.is_empty());
+    assert_eq!(plan.key_ids.len(), 2);
+    assert_eq!(
+        plan.items
+            .iter()
+            .map(|i| i.key.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(
+        plan.items[1].header.depends_on,
+        vec![plan.items[0].id.clone()]
+    );
+    for item in &plan.items {
+        assert_eq!(
+            item.path,
+            f.0.join(".work/items").join(format!("{}.md", item.id))
+        );
+        assert!(!item.path.exists());
+    }
+    assert_eq!(fs::read_dir(f.0.join(".work/items")).unwrap().count(), 0);
+    assert!(!shared.exists());
+    let retry = catalog
+        .plan_expansion("initial", &input, &view, &f.0, None, &shared)
+        .unwrap();
+    assert_ne!(retry.key_ids, plan.key_ids);
+    f.template(
+        "legacy",
+        "format_version: 1\nname: legacy\nitems: [{key: a, title: Alpha}]\n",
+    );
+    assert_eq!(
+        f.catalog().preview("legacy", &input, &view).unwrap().items[0].persistence,
+        Persistence::Material
+    );
+    f.template(
+        "bad",
+        "format_version: 1\nname: bad\nitems: [{key: a, title: Alpha, persistence: material}]\n",
+    );
+    assert!(f.catalog().validate("bad").is_err());
+}
+
+#[test]
+fn persistence_is_structural_and_wisp_preview_needs_no_run() {
+    use work::core::templates::Persistence;
+    let f = Fixture::new();
+    let view = f.view();
+    let mut input = request(&[], &[]);
+    input.root = None;
+    f.template("mixed","format_version: 2\nname: mixed\nitems:\n- {key: a, title: Material}\n- {key: b, title: Wisp, persistence: wisp}\nedges:\n- {from: 'local:b', kind: parent, to: 'local:a'}\n");
+    let catalog = f.catalog();
+    let preview = catalog.preview("mixed", &input, &view).unwrap();
+    assert_eq!(preview.items[1].persistence, Persistence::Wisp);
+    let error = catalog
+        .plan_expansion("mixed", &input, &view, &f.0, None, &f.0.join("shared"))
+        .unwrap_err();
+    assert!(error_text(error).contains("explicit current run"));
+    for invalid in ["'{{kind}}'", "null", "1", "temporary"] {
+        f.template("bad",&format!("format_version: 2\nname: bad\nitems: [{{key: a, title: Alpha, persistence: {invalid}}}]\n"));
+        assert!(f.catalog().validate("bad").is_err());
+    }
+    f.template("needs_root","format_version: 2\nname: needs_root\nitems: [{key: a, title: Alpha}]\nedges: [{from: 'local:a', kind: parent, to: root}]\n");
+    assert!(
+        error_text(
+            f.catalog()
+                .preview("needs_root", &input, &view)
+                .unwrap_err()
+        )
+        .contains("root is required")
+    );
+}
+
+#[test]
+fn planner_keeps_existing_source_authority_and_validates_complete_graph() {
+    let f = Fixture::new();
+    f.item(ROOT, "");
+    f.item(REVIEW, "");
+    let view = f.view();
+    let original = view.resolve(REVIEW).unwrap();
+    let raw = original.raw.clone();
+    let body = original.body.clone();
+    f.template("extend","format_version: 2\nname: extend\nexisting: [review]\nitems: [{key: a, title: Alpha}]\nedges: [{from: 'existing:review', kind: depends_on, to: 'local:a'}]\n");
+    let input = request(&[], &[("review", REVIEW)]);
+    let plan = f
+        .catalog()
+        .plan_expansion("extend", &input, &view, &f.0, None, &f.0.join("shared"))
+        .unwrap();
+    assert_eq!(plan.updated.len(), 1);
+    assert_eq!(plan.updated[0].raw, raw);
+    assert_eq!(plan.updated[0].body, body);
+    assert_eq!(plan.updated[0].path, original.path);
+    assert_eq!(
+        plan.updated[0].header.as_ref().unwrap().depends_on,
+        vec![plan.items[0].id.clone()]
+    );
+    f.template("cycle","format_version: 2\nname: cycle\nitems: [{key: a, title: Alpha}, {key: b, title: Beta}]\nedges:\n- {from: 'local:a', kind: depends_on, to: 'local:b'}\n- {from: 'local:b', kind: depends_on, to: 'local:a'}\n");
+    assert!(matches!(
+        f.catalog().plan_expansion(
+            "cycle",
+            &request(&[], &[]),
+            &view,
+            &f.0,
+            None,
+            &f.0.join("shared")
+        ),
+        Err(TemplateError::InvalidCandidate(_))
+    ));
+    assert_eq!(fs::read_dir(f.0.join(".work/items")).unwrap().count(), 2);
+}
+
+#[test]
+fn reverse_related_duplicate_is_refused_before_any_expansion() {
+    let f = Fixture::new();
+    f.item(ROOT, "");
+    f.item(REVIEW, &format!("related: [\"{ROOT}\"]\n"));
+    f.template("duplicate","format_version: 2\nname: duplicate\nexisting: [review]\nitems: [{key: a, title: Alpha}]\nedges: [{from: root, kind: related, to: 'existing:review'}]\n");
+    assert!(matches!(
+        f.catalog()
+            .preview("duplicate", &request(&[], &[("review", REVIEW)]), &f.view()),
+        Err(TemplateError::InvalidCandidate(_))
+    ));
 }

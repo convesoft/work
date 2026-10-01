@@ -170,7 +170,7 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 26);
+    assert_eq!(tools.len(), 32);
     for name in [
         "item_create",
         "item_ready",
@@ -685,4 +685,74 @@ fn storage_mcp_validates_requests_before_selecting_a_checkout() {
         client.error(name, args, "invalid_argument");
     }
     assert!(!f.0.join(".git/work").exists());
+}
+
+#[test]
+fn template_preview_reports_physical_fallback_warnings_through_cli_and_mcp() {
+    use work::core::{coordination::CoordinationGuard, project::discover};
+    for case in ["fresh", "healthy", "missing_lock", "corrupt", "busy"] {
+        let fixture = Fixture::new();
+        let templates = fixture.0.join(".work/templates");
+        fs::create_dir(&templates).unwrap();
+        fs::write(
+            templates.join("simple.yaml"),
+            "format_version: 2\nname: simple\nitems: [{key: task, title: Task}]\n",
+        )
+        .unwrap();
+        if case != "fresh" {
+            assert_eq!(fixture.cli(&["storage", "init"])["ok"], true);
+        }
+        let shared = fixture.0.join(".git/work");
+        let metadata = shared.join("store.yaml");
+        if case == "missing_lock" {
+            fs::remove_file(shared.join("coordination.lock")).unwrap();
+        } else if case == "corrupt" {
+            fs::write(&metadata, b"invalid: [").unwrap();
+        }
+        let guard = if case == "busy" {
+            Some(CoordinationGuard::acquire(&discover(Some(&fixture.0)).unwrap(), true).unwrap())
+        } else {
+            None
+        };
+        let before = fs::read(&metadata).ok();
+        let cli = fixture.cli(&["template", "preview", "simple"]);
+        assert_eq!(cli["ok"], true, "{case}: {cli}");
+        let result = &cli["result"];
+        let mut client = Client::new(&fixture.0);
+        let mcp = client.ok("template_preview", json!({"name":"simple"}));
+        assert_eq!(mcp, *result, "{case}");
+        assert_eq!(result["preview"]["items"]["task"]["title"], "Task");
+        if matches!(case, "fresh" | "healthy") {
+            assert!(result["storage_warning"].is_null(), "{case}: {result}");
+        } else {
+            let warning = &result["storage_warning"];
+            assert!(warning["code"].is_string(), "{case}: {result}");
+            assert!(warning["path"].is_string());
+            assert_eq!(result["storage"]["coordination_available"], false);
+            assert_eq!(result["storage"]["storage_warning"], *warning);
+            if case == "busy" {
+                assert_eq!(warning["code"], "storage_busy");
+            }
+            let human = Command::new(env!("CARGO_BIN_EXE_work"))
+                .current_dir(&fixture.0)
+                .args(["template", "preview", "simple"])
+                .output()
+                .unwrap();
+            assert!(human.status.success());
+            assert!(
+                String::from_utf8_lossy(&human.stderr)
+                    .contains(warning["message"].as_str().unwrap())
+            );
+        }
+        assert_eq!(fs::read(&metadata).ok(), before);
+        assert_eq!(
+            shared.join("coordination.lock").exists(),
+            case != "fresh" && case != "missing_lock"
+        );
+        assert_eq!(
+            fs::read_dir(fixture.0.join(".work/items")).unwrap().count(),
+            0
+        );
+        drop(guard);
+    }
 }

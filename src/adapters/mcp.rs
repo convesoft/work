@@ -94,6 +94,7 @@ fn handle(request: Value, initialized: &mut bool) -> Option<Value> {
             };
             if !TOOL_NAMES.contains(&name)
                 && !super::claims::tools().iter().any(|t| t["name"] == name)
+                && !super::runs::tools().iter().any(|t| t["name"] == name)
             {
                 return Some(rpc_error(id, -32602, "Unknown tool"));
             }
@@ -166,6 +167,8 @@ fn tools() -> Vec<Value> {
                 json!({"type":"string","enum":["resolved","checkout"]});
         }
     }
+    result.retain(|t| t["name"] != "template_preview");
+    result.extend(super::runs::tools());
     result.extend(super::claims::tools());
     result
 }
@@ -292,20 +295,20 @@ fn base_tools() -> Vec<Value> {
             "template_list",
             common.clone(),
             &[],
-            "Discover valid and invalid version-1 YAML templates in the selected checkout.",
+            "Discover valid and invalid version-1/version-2 YAML templates in the selected checkout.",
         ),
         tool(
             "template_validate",
             json!({"worktree":s,"name":s}),
             &["name"],
-            "Validate one version-1 YAML template definition.",
+            "Validate one version-1/version-2 YAML template definition.",
         ),
         tool(
             "template_preview",
             json!({"worktree":s,"name":s,"root":s,
             "parameters":{"type":"object","additionalProperties":{"type":"string"}},
             "existing":{"type":"object","additionalProperties":{"type":"string"}}}),
-            &["name", "root"],
+            &["name"],
             "Render a complete symbolic item graph without publishing a run, items, permanent IDs, or claims.",
         ),
     ]
@@ -477,6 +480,10 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         let request = super::storage::from_fields(verb, args)?;
         return super::storage::execute(&selected(args)?, request);
     }
+    if name.starts_with("run_") || matches!(name, "template_preview" | "template_expand") {
+        super::runs::validate(name, args)?;
+        return super::runs::execute(&selected(args)?, name, args);
+    }
     let project = selected(args)?;
     if let Some(verb) = name.strip_prefix("claim_") {
         return super::claims::execute(&project, verb, args);
@@ -495,11 +502,10 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
             cli::template_command(&project, "validate", &[required(args, "name").to_owned()])
         }
         "template_preview" => {
-            let mut arguments = vec![
-                required(args, "name").to_owned(),
-                "--root".to_owned(),
-                required(args, "root").to_owned(),
-            ];
+            let mut arguments = vec![required(args, "name").to_owned()];
+            if let Some(root) = string(args, "root") {
+                arguments.extend(["--root".to_owned(), root.to_owned()]);
+            }
             for (field, flag) in [("parameters", "--param"), ("existing", "--existing")] {
                 if let Some(bindings) = args.get(field).and_then(Value::as_object) {
                     for (name, value) in bindings {

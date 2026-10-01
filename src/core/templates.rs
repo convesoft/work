@@ -1,4 +1,4 @@
-//! Read-only discovery, validation, and symbolic preview of version-1 templates.
+//! Read-only discovery, validation, and symbolic preview and planning of version-1/2 templates.
 //!
 //! Preview uses temporary graph identities only inside validation. Its public
 //! result names prospective items by template-local keys; publication owns IDs.
@@ -91,8 +91,24 @@ pub struct HintDefaults {
     pub thinking: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Persistence {
+    Material,
+    Wisp,
+}
+
+impl Persistence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Material => "material",
+            Self::Wisp => "wisp",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateItem {
+    pub persistence: Persistence,
     pub key: String,
     pub title: String,
     pub body: String,
@@ -131,7 +147,7 @@ pub struct TemplateEdge {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewRequest {
-    pub root: String,
+    pub root: Option<String>,
     pub parameters: BTreeMap<String, String>,
     pub existing: BTreeMap<String, String>,
 }
@@ -153,6 +169,7 @@ impl HintSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewItem {
+    pub persistence: Persistence,
     pub key: String,
     pub title: String,
     pub body: String,
@@ -183,7 +200,7 @@ pub struct PreviewEdge {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplatePreview {
     pub name: String,
-    pub root: String,
+    pub root: Option<String>,
     pub parameters: BTreeMap<String, String>,
     pub existing: BTreeMap<String, String>,
     pub items: Vec<PreviewItem>,
@@ -643,14 +660,16 @@ fn names(fields: &mut BTreeMap<String, Node>, key: &str) -> Result<Vec<String>, 
 
 fn decode_template(node: Node, file_stem: &str) -> Result<TemplateDefinition, String> {
     let mut fields = mapping(node, "template")?;
-    match fields.remove("format_version") {
-        Some(Node::Integer(1)) => {}
+    let version = match fields.remove("format_version") {
+        Some(Node::Integer(version @ 1..=2)) => version,
         Some(Node::Integer(version)) => {
-            return Err(format!("unsupported format_version {version}; expected 1"));
+            return Err(format!(
+                "unsupported format_version {version}; expected 1 or 2"
+            ));
         }
         None => return Err("missing required key format_version".into()),
-        _ => return Err("format_version must be integer 1".into()),
-    }
+        _ => return Err("format_version must be integer 1 or 2".into()),
+    };
     let name = required_string(&mut fields, "name")?;
     if name != file_stem {
         return Err(format!(
@@ -714,8 +733,18 @@ fn decode_template(node: Node, file_stem: &str) -> Result<TemplateDefinition, St
             .collect::<Result<Vec<_>, _>>()?;
         let model = optional_string(&mut item, "model")?;
         let thinking = optional_string(&mut item, "thinking")?;
+        let persistence = if version == 2 {
+            match optional_string(&mut item, "persistence")?.as_deref() {
+                None | Some("material") => Persistence::Material,
+                Some("wisp") => Persistence::Wisp,
+                _ => return Err(format!("item {key:?} persistence must be material or wisp")),
+            }
+        } else {
+            Persistence::Material
+        };
         no_extra(&item, &format!("item {key:?}"))?;
         items.push(TemplateItem {
+            persistence,
             key,
             title,
             body,
@@ -902,21 +931,25 @@ fn preview_definition(
     if !graph.is_valid() {
         return Err(TemplateError::InvalidSource(graph.diagnostics().to_vec()));
     }
-    if !valid_id(&request.root) {
-        return Err(TemplateError::InvalidArgument(
-            "root must be a full lowercase UUIDv4 ID".into(),
-        ));
-    }
     let present: BTreeSet<_> = view
         .files
         .iter()
         .filter_map(|file| file.header.as_ref().map(|header| header.id.clone()))
         .collect();
-    if !present.contains(&request.root) {
-        return Err(TemplateError::InvalidArgument(format!(
-            "root item {} is not in the selected view",
-            request.root
-        )));
+    if let Some(root) = &request.root {
+        if !valid_id(root) || !present.contains(root) {
+            return Err(TemplateError::InvalidArgument(
+                "root must resolve to a full UUIDv4 ID in the selected view".into(),
+            ));
+        }
+    } else if template
+        .edges
+        .iter()
+        .any(|e| e.from == "root" || e.to == "root")
+    {
+        return Err(TemplateError::InvalidArgument(
+            "root is required by template edges".into(),
+        ));
     }
     check_arguments(&template.parameters, &request.parameters, "parameter")?;
     check_arguments(&template.existing, &request.existing, "existing binding")?;
@@ -963,6 +996,7 @@ fn preview_definition(
             }
         }
         items.push(PreviewItem {
+            persistence: item.persistence,
             key: item.key.clone(),
             title,
             body,
@@ -994,137 +1028,14 @@ fn preview_definition(
         };
         local_ids.insert(item.key.clone(), id);
     }
-    let mut files = view.files.clone();
-    for item in &items {
-        let id = local_ids[&item.key].clone();
-        files.push(ItemFile {
-            path: template_path.to_owned(),
-            raw: Vec::new(),
-            header: Some(ItemHeader {
-                id,
-                title: item.title.clone(),
-                completion: item.completion,
-                state: item.state,
-                priority: item.priority,
-                parent: None,
-                depends_on: Vec::new(),
-                related: Vec::new(),
-                discovered_from: Vec::new(),
-                labels: item.labels.clone(),
-                model: item.model.clone(),
-                thinking: item.thinking.clone(),
-                close_reason: None,
-            }),
-            body: Some(item.body.as_bytes().to_vec()),
-            diagnostics: Vec::new(),
-            fingerprint: None,
-        });
-    }
-    let mut edges = Vec::new();
-    let mut semantic = BTreeSet::new();
-    for edge in &template.edges {
-        let from = endpoint(&edge.from, request);
-        let to = endpoint(&edge.to, request);
-        let source_id = from
-            .existing_id
-            .as_ref()
-            .or_else(|| local_ids.get(edge.from.strip_prefix("local:").unwrap_or("")))
-            .expect("validated source reference");
-        let target_id = to
-            .existing_id
-            .as_ref()
-            .or_else(|| local_ids.get(edge.to.strip_prefix("local:").unwrap_or("")))
-            .expect("validated target reference");
-        if source_id == target_id {
-            return Err(TemplateError::InvalidCandidate(vec![diagnostic(
-                template_path,
-                None,
-                format!(
-                    "self-relation {} from {} to {}",
-                    edge.kind.as_str(),
-                    edge.from,
-                    edge.to
-                ),
-            )]));
-        }
-        let (a, b) = if edge.kind == TemplateRelationKind::Related && source_id > target_id {
-            (target_id.clone(), source_id.clone())
-        } else {
-            (source_id.clone(), target_id.clone())
-        };
-        if !semantic.insert((edge.kind.clone(), a, b)) {
-            return Err(TemplateError::InvalidCandidate(vec![diagnostic(
-                template_path,
-                None,
-                format!("duplicate semantic {} edge", edge.kind.as_str()),
-            )]));
-        }
-        let source = files
-            .iter_mut()
-            .find(|file| file.header.as_ref().is_some_and(|h| &h.id == source_id))
-            .expect("resolved source is in view");
-        let header = source
-            .header
-            .as_mut()
-            .expect("resolved source has a header");
-        match edge.kind {
-            TemplateRelationKind::Parent => {
-                if header.parent.is_some() {
-                    return Err(TemplateError::InvalidCandidate(vec![diagnostic(
-                        template_path,
-                        None,
-                        format!("item {} already has a parent", edge.from),
-                    )]));
-                }
-                header.parent = Some(target_id.clone());
-            }
-            TemplateRelationKind::DependsOn => {
-                if header.depends_on.contains(target_id) {
-                    return Err(TemplateError::InvalidCandidate(vec![diagnostic(
-                        template_path,
-                        None,
-                        "duplicate depends_on edge",
-                    )]));
-                }
-                header.depends_on.push(target_id.clone());
-            }
-            TemplateRelationKind::Related => {
-                if header.related.contains(target_id) {
-                    return Err(TemplateError::InvalidCandidate(vec![diagnostic(
-                        template_path,
-                        None,
-                        "duplicate related edge",
-                    )]));
-                }
-                header.related.push(target_id.clone());
-            }
-            TemplateRelationKind::DiscoveredFrom => {
-                if header.discovered_from.contains(target_id) {
-                    return Err(TemplateError::InvalidCandidate(vec![diagnostic(
-                        template_path,
-                        None,
-                        "duplicate discovered_from edge",
-                    )]));
-                }
-                header.discovered_from.push(target_id.clone())
-            }
-        }
-        edges.push(PreviewEdge {
-            from,
-            kind: edge.kind.clone(),
-            to,
-        });
-    }
-    let candidate = ItemGraph::from_store(&ItemStore::from_candidate_files(files));
-    if !candidate.is_valid() {
-        let mut diagnostics = candidate.diagnostics().to_vec();
-        for diagnostic in &mut diagnostics {
-            for (key, id) in &local_ids {
-                diagnostic.message = diagnostic.message.replace(id, &format!("local:{key}"));
-            }
-        }
-        return Err(TemplateError::InvalidCandidate(diagnostics));
-    }
+    let (_, mut edges) = prospective_files(
+        &items,
+        &template.edges,
+        template_path,
+        request,
+        view,
+        &local_ids,
+    )?;
     edges.sort_by(|a, b| {
         (&a.from.reference, &a.kind, &a.to.reference).cmp(&(
             &b.from.reference,
@@ -1192,7 +1103,7 @@ fn render_hint(
 
 fn endpoint(reference: &str, request: &PreviewRequest) -> PreviewEndpoint {
     let existing_id = if reference == "root" {
-        Some(request.root.clone())
+        request.root.clone()
     } else {
         reference
             .strip_prefix("existing:")
@@ -1201,5 +1112,356 @@ fn endpoint(reference: &str, request: &PreviewRequest) -> PreviewEndpoint {
     PreviewEndpoint {
         reference: reference.into(),
         existing_id,
+    }
+}
+
+fn prospective_files(
+    items: &[PreviewItem],
+    template_edges: &[TemplateEdge],
+    template_path: &Path,
+    request: &PreviewRequest,
+    view: &ItemStore,
+    local_ids: &BTreeMap<String, String>,
+) -> Result<(Vec<ItemFile>, Vec<PreviewEdge>), TemplateError> {
+    let mut files = view.files.clone();
+    for item in items {
+        let id = local_ids[&item.key].clone();
+        files.push(ItemFile {
+            path: template_path.to_owned(),
+            raw: Vec::new(),
+            header: Some(ItemHeader {
+                id,
+                title: item.title.clone(),
+                completion: item.completion,
+                state: item.state,
+                priority: item.priority,
+                parent: None,
+                depends_on: Vec::new(),
+                related: Vec::new(),
+                discovered_from: Vec::new(),
+                labels: item.labels.clone(),
+                model: item.model.clone(),
+                thinking: item.thinking.clone(),
+                close_reason: None,
+            }),
+            body: Some(item.body.as_bytes().to_vec()),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+        });
+    }
+    let mut edges = Vec::new();
+    let mut semantic = BTreeSet::new();
+    for edge in template_edges {
+        let from = endpoint(&edge.from, request);
+        let to = endpoint(&edge.to, request);
+        let source_id = from
+            .existing_id
+            .as_ref()
+            .or_else(|| local_ids.get(edge.from.strip_prefix("local:").unwrap_or("")))
+            .expect("validated source reference");
+        let target_id = to
+            .existing_id
+            .as_ref()
+            .or_else(|| local_ids.get(edge.to.strip_prefix("local:").unwrap_or("")))
+            .expect("validated target reference");
+        if source_id == target_id {
+            return Err(TemplateError::InvalidCandidate(vec![diagnostic(
+                template_path,
+                None,
+                format!(
+                    "self-relation {} from {} to {}",
+                    edge.kind.as_str(),
+                    edge.from,
+                    edge.to
+                ),
+            )]));
+        }
+        let (a, b) = if edge.kind == TemplateRelationKind::Related && source_id > target_id {
+            (target_id.clone(), source_id.clone())
+        } else {
+            (source_id.clone(), target_id.clone())
+        };
+        if !semantic.insert((edge.kind.clone(), a, b)) {
+            return Err(TemplateError::InvalidCandidate(vec![diagnostic(
+                template_path,
+                None,
+                format!("duplicate semantic {} edge", edge.kind.as_str()),
+            )]));
+        }
+        if edge.kind == TemplateRelationKind::Related
+            && files.iter().any(|file| {
+                file.header.as_ref().is_some_and(|h| {
+                    (&h.id == source_id && h.related.contains(target_id))
+                        || (&h.id == target_id && h.related.contains(source_id))
+                })
+            })
+        {
+            return Err(TemplateError::InvalidCandidate(vec![diagnostic(
+                template_path,
+                None,
+                "duplicate related edge",
+            )]));
+        }
+        let source = files
+            .iter_mut()
+            .find(|file| file.header.as_ref().is_some_and(|h| &h.id == source_id))
+            .expect("resolved source is in view");
+        let header = source
+            .header
+            .as_mut()
+            .expect("resolved source has a header");
+        match edge.kind {
+            TemplateRelationKind::Parent => {
+                if header.parent.is_some() {
+                    return Err(TemplateError::InvalidCandidate(vec![diagnostic(
+                        template_path,
+                        None,
+                        format!("item {} already has a parent", edge.from),
+                    )]));
+                }
+                header.parent = Some(target_id.clone());
+            }
+            TemplateRelationKind::DependsOn => {
+                if header.depends_on.contains(target_id) {
+                    return Err(TemplateError::InvalidCandidate(vec![diagnostic(
+                        template_path,
+                        None,
+                        "duplicate depends_on edge",
+                    )]));
+                }
+                header.depends_on.push(target_id.clone());
+            }
+            TemplateRelationKind::Related => {
+                if header.related.contains(target_id) {
+                    return Err(TemplateError::InvalidCandidate(vec![diagnostic(
+                        template_path,
+                        None,
+                        "duplicate related edge",
+                    )]));
+                }
+                header.related.push(target_id.clone());
+            }
+            TemplateRelationKind::DiscoveredFrom => {
+                if header.discovered_from.contains(target_id) {
+                    return Err(TemplateError::InvalidCandidate(vec![diagnostic(
+                        template_path,
+                        None,
+                        "duplicate discovered_from edge",
+                    )]));
+                }
+                header.discovered_from.push(target_id.clone())
+            }
+        }
+        edges.push(PreviewEdge {
+            from,
+            kind: edge.kind.clone(),
+            to,
+        });
+    }
+    let candidate = ItemGraph::from_store(&ItemStore::from_candidate_files(files.clone()));
+    if !candidate.is_valid() {
+        let mut diagnostics = candidate.diagnostics().to_vec();
+        for diagnostic in &mut diagnostics {
+            for (key, id) in local_ids {
+                diagnostic.message = diagnostic.message.replace(id, &format!("local:{key}"));
+            }
+        }
+        return Err(TemplateError::InvalidCandidate(diagnostics));
+    }
+    Ok((files, edges))
+}
+
+/// Generated files are in lexical template-key order. Existing changes retain
+/// their original `raw` and fingerprint for source authorization/rechecking;
+/// their header is the proposed header and their opaque body is unchanged.
+#[derive(Debug, Clone)]
+pub struct ExpansionPlan {
+    pub key_ids: BTreeMap<String, String>,
+    pub items: Vec<PlannedItem>,
+    pub updated: Vec<ItemFile>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannedItem {
+    pub key: String,
+    pub id: String,
+    pub persistence: Persistence,
+    pub path: PathBuf,
+    pub header: ItemHeader,
+    pub body: Vec<u8>,
+    pub raw: Vec<u8>,
+}
+
+impl ExpansionPlan {
+    /// Add only progress known by the coordinator. Preserve the last write's
+    /// underlying publication/error evidence, including possible publication.
+    /// No retry record is written and no files are removed.
+    pub fn partial_error(
+        &self,
+        mut error: super::coordination::ExecutionError,
+        created: &[String],
+        updated: &[String],
+        uncertain_paths: &[PathBuf],
+    ) -> super::coordination::ExecutionError {
+        use super::coordination::encode_path;
+        use serde_json::json;
+        error.details["key_ids"] = json!(self.key_ids);
+        let mut partial = json!({
+            "created":self.items.iter().filter(|item| created.contains(&item.id)).map(|item| json!({"id":item.id,"path":encode_path(&item.path)})).collect::<Vec<_>>(),
+            "updated":self.updated.iter().filter(|file| file.header.as_ref().is_some_and(|h| updated.contains(&h.id))).map(|file| json!({"id":file.header.as_ref().unwrap().id,"path":encode_path(&file.path)})).collect::<Vec<_>>(),
+            "deleted":[], "uncertain_paths":uncertain_paths.iter().map(|p| encode_path(p)).collect::<Vec<_>>()
+        });
+        if let Some(prior) = error.details.get("partial") {
+            for key in ["created", "updated", "deleted", "uncertain_paths"] {
+                if let Some(records) = prior[key].as_array() {
+                    for record in records {
+                        let target = partial[key].as_array_mut().unwrap();
+                        if !target.contains(record) {
+                            target.push(record.clone());
+                        }
+                    }
+                }
+            }
+        }
+        error.details["partial"] = partial;
+        if error.details.get("publication").is_none() {
+            error.details["publication"] = json!("not_published");
+        }
+        error
+    }
+}
+
+impl TemplateCatalog {
+    /// Read-only expansion planning. Main supplies the complete resolved view,
+    /// authorizes/rechecks every `updated` source and publishes under shared then
+    /// checkout locks. Bindings precede new material files; run membership is last.
+    /// Run selection has already been loaded under the held coordination guard.
+    pub fn plan_expansion(
+        &self,
+        name: &str,
+        request: &PreviewRequest,
+        view: &ItemStore,
+        material_root: &Path,
+        run: Option<&super::runs::RunManifest>,
+        shared_root: &Path,
+    ) -> Result<ExpansionPlan, TemplateError> {
+        if !material_root.is_absolute() || !shared_root.is_absolute() {
+            return Err(TemplateError::InvalidArgument(
+                "expansion destinations must be absolute discovered paths".into(),
+            ));
+        }
+        let mut request = request.clone();
+        if let Some(run) = run {
+            if run.phase != super::runs::RunPhase::Active {
+                return Err(TemplateError::InvalidArgument(
+                    "target run does not accept expansion".into(),
+                ));
+            }
+            if request
+                .root
+                .as_ref()
+                .is_some_and(|root| root != &run.root_item_id)
+            {
+                return Err(TemplateError::InvalidArgument(
+                    "explicit root differs from target run root".into(),
+                ));
+            }
+            request.root = Some(run.root_item_id.clone());
+        }
+        let preview = self.preview(name, &request, view)?;
+        if run.is_none()
+            && preview
+                .items
+                .iter()
+                .any(|i| i.persistence == Persistence::Wisp)
+        {
+            return Err(TemplateError::InvalidArgument(
+                "wisp creation requires an explicit current run".into(),
+            ));
+        }
+        let template = self.validate(name)?;
+        let path = &self
+            .files
+            .iter()
+            .find(|f| f.name == name)
+            .expect("validated template has file")
+            .path;
+        let mut occupied: BTreeSet<_> = view
+            .files
+            .iter()
+            .filter_map(|f| f.header.as_ref().map(|h| h.id.clone()))
+            .collect();
+        let mut key_ids = BTreeMap::new();
+        for item in &preview.items {
+            let id = loop {
+                let id = super::coordination::new_id()
+                    .map_err(|error| TemplateError::Io(error.to_string()))?;
+                if occupied.insert(id.clone()) {
+                    break id;
+                }
+            };
+            key_ids.insert(item.key.clone(), id);
+        }
+        let (files, _) = prospective_files(
+            &preview.items,
+            &template.edges,
+            path,
+            &request,
+            view,
+            &key_ids,
+        )?;
+        let mut items = Vec::new();
+        for item in &preview.items {
+            let id = &key_ids[&item.key];
+            let candidate = files
+                .iter()
+                .find(|f| f.header.as_ref().is_some_and(|h| &h.id == id))
+                .expect("generated candidate exists");
+            let header = candidate.header.clone().expect("candidate header");
+            let body = item.body.as_bytes().to_vec();
+            let path = match item.persistence {
+                Persistence::Material => material_root.join(".work/items").join(format!("{id}.md")),
+                Persistence::Wisp => shared_root
+                    .join("runs")
+                    .join(&run.expect("wisp requires run").id)
+                    .join("items")
+                    .join(format!("{id}.md")),
+            };
+            let raw = super::operations::serialize(&header, &body);
+            let parsed = super::items::parse_candidate(path.clone(), raw.clone());
+            if !parsed.is_valid() {
+                return Err(TemplateError::InvalidCandidate(parsed.diagnostics));
+            }
+            items.push(PlannedItem {
+                key: item.key.clone(),
+                id: id.clone(),
+                persistence: item.persistence,
+                path,
+                header,
+                body,
+                raw,
+            });
+        }
+        let mut updated = Vec::new();
+        for original in &view.files {
+            let Some(header) = &original.header else {
+                continue;
+            };
+            let proposed = files
+                .iter()
+                .find(|f| f.header.as_ref().is_some_and(|h| h.id == header.id))
+                .expect("existing source retained");
+            if proposed.header != original.header {
+                updated.push(proposed.clone());
+            }
+        }
+        updated.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(ExpansionPlan {
+            key_ids,
+            items,
+            updated,
+            run_id: run.map(|r| r.id.clone()),
+        })
     }
 }

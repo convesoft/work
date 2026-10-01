@@ -769,6 +769,21 @@ impl DurableOperations {
         lock: &OperationLock,
         items: &OwnedFd,
     ) -> Result<(), OperationError> {
+        self.ensure_selected_work(lock)?;
+        let selected = fs::symlink_metadata(self.root.join(".work/items"))
+            .map_err(|_| OperationError::Conflict("items directory changed on disk".into()))?;
+        let held = rustix::fs::fstat(items).map_err(io::Error::from)?;
+        if !selected.is_dir()
+            || selected.dev() != held.st_dev as u64
+            || selected.ino() != held.st_ino as u64
+        {
+            return Err(OperationError::Conflict(
+                "items directory changed on disk".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn ensure_selected_work(&self, lock: &OperationLock) -> Result<(), OperationError> {
         let root = fs::symlink_metadata(&self.root)
             .map_err(|_| OperationError::Conflict("checkout root changed on disk".into()))?;
         let held_root = rustix::fs::fstat(&lock.root_dir).map_err(io::Error::from)?;
@@ -800,17 +815,6 @@ impl DurableOperations {
         {
             return Err(OperationError::Conflict(
                 "operation lock changed on disk".into(),
-            ));
-        }
-        let selected = fs::symlink_metadata(self.root.join(".work/items"))
-            .map_err(|_| OperationError::Conflict("items directory changed on disk".into()))?;
-        let held = rustix::fs::fstat(items).map_err(io::Error::from)?;
-        if !selected.is_dir()
-            || selected.dev() != held.st_dev as u64
-            || selected.ino() != held.st_ino as u64
-        {
-            return Err(OperationError::Conflict(
-                "items directory changed on disk".into(),
             ));
         }
         Ok(())
@@ -1588,8 +1592,23 @@ pub(crate) struct CheckoutWriter {
 }
 impl CheckoutWriter {
     pub(crate) fn open(root: &Path) -> Result<Self, OperationError> {
+        Self::open_inner(root, false)
+    }
+    /// Prepare only a validated new-material destination, never a bound source.
+    pub(crate) fn open_destination(root: &Path) -> Result<Self, OperationError> {
+        Self::open_inner(root, true)
+    }
+    fn open_inner(root: &Path, prepare_destination: bool) -> Result<Self, OperationError> {
         let ops = DurableOperations::new(root);
         let lock = ops.lock()?;
+        if prepare_destination {
+            ops.ensure_selected_work(&lock)?;
+            match rustix::fs::mkdirat(&lock.work_dir, "items", Mode::RWXU) {
+                Ok(()) => fsync(&lock.work_dir).map_err(io::Error::from)?,
+                Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => return Err(io::Error::from(error).into()),
+            }
+        }
         let items = ops.items_dir(&lock)?;
         let snapshot = ops.load_from_dir(&items)?;
         Ok(Self {

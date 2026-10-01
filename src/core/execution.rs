@@ -5,7 +5,7 @@ use super::claims::{ClaimAuthorization, ClaimCandidate, ClaimStore, OwnershipSna
 use super::context::{ContextStore, ResolvedView};
 use super::coordination::*;
 use super::graph::ItemGraph;
-use super::items::{Completion, ItemHeader, ItemStore, LookupError, ManualState};
+use super::items::{Completion, ItemFile, ItemHeader, ItemStore, LookupError, ManualState};
 use super::operations::{
     self, CheckoutWriter, DurableOperations, Inspection, MetadataChange, OperationError,
     RawInspection, RelationKind,
@@ -204,7 +204,7 @@ impl ExecutionOperations {
             .join(format!(".work/items/{}.md", h.id));
         validate_candidate(&v.store, &path, &h, &body)?;
         let mut writer = CheckoutWriter::open(&self.project.worktree_root)?;
-        v.recheck()?;
+        v.recheck(&g)?;
         g.verify()?;
         let recovery = writer.publish(&h, &body, None)?;
         let mut result = reload_valid_inspection(&g, &h.id)
@@ -303,17 +303,40 @@ impl ExecutionOperations {
         edit(&mut h, selected)?;
         let body = before.body.as_deref().unwrap();
         validate_candidate(&v.store, &before.path, &h, body)?;
-        let root = v.sources.get(&h.id).ok_or_else(|| {
-            ExecutionError::new("source_unavailable", "material source is missing")
-        })?;
-        let mut writer = CheckoutWriter::open(root)?;
-        v.recheck()?;
+        v.recheck(&g)?;
         g.verify()?;
         let changed = before.header.as_ref() != Some(&h);
-        let recovery = if !changed {
-            None
+        let recovery = if let Some(root) = v.sources.get(&h.id) {
+            let mut writer = CheckoutWriter::open(root)?;
+            v.recheck(&g)?;
+            if !changed {
+                None
+            } else {
+                writer.publish(&h, body, Some(&before))?
+            }
+        } else if changed {
+            let run = v
+                .runs
+                .membership(&h.id)
+                .ok_or_else(|| ExecutionError::new("source_unavailable", "wisp run missing"))?;
+            let expected = &run.wisp_sources[&h.id];
+            let (_, recovery) = super::runs::RunStore::replace_wisp_with_recovery(
+                &g,
+                &run.manifest.id,
+                expected,
+                &h,
+                body,
+            )
+            .map_err(|error| {
+                if error.details["publication"] == "published" {
+                    saved_item_error(error, &h.id, &before.path, "updated")
+                } else {
+                    error
+                }
+            })?;
+            recovery
         } else {
-            writer.publish(&h, body, Some(&before))?
+            None
         };
         let mut endings = Vec::new();
         if complete && let Some(claim) = claim {
@@ -467,13 +490,13 @@ impl ExecutionOperations {
         let result = (|| {
             prepare_claim_context(&g, &v, &mut candidate, &mut created)?;
             let result = ClaimStore::acquire_checked(&g, &candidate, actor, session, || {
-                verify_claim_source(&source_lock, &v)
+                verify_claim_source(&source_lock, &v, &g)
             })?;
             created.push(json!({"id":result.claim.id,"path":encode_path(&g.root_path().join(format!("claims/{}.yaml",result.claim.id)))}));
             let current = ResolvedView::load(&g).map_err(claim_postpublication_error)?;
             let inspection =
                 inspect(&g, &current, &candidate.header.id).map_err(claim_postpublication_error)?;
-            verify_claim_source(&source_lock, &v).map_err(claim_postpublication_error)?;
+            verify_claim_source(&source_lock, &v, &g).map_err(claim_postpublication_error)?;
             Ok((result.claim.to_json(), inspection))
         })();
         result.map_err(|error| with_setup_progress(error, &created))
@@ -503,7 +526,7 @@ impl ExecutionOperations {
                 session,
                 reason,
                 stopped,
-                || verify_claim_source(&source_lock, &v),
+                || verify_claim_source(&source_lock, &v, &g),
             )?;
             for (id, name) in [
                 (
@@ -518,26 +541,40 @@ impl ExecutionOperations {
             }
             let inspection =
                 inspect(&g, &v, &candidate.header.id).map_err(claim_postpublication_error)?;
-            verify_claim_source(&source_lock, &v).map_err(claim_postpublication_error)?;
+            verify_claim_source(&source_lock, &v, &g).map_err(claim_postpublication_error)?;
             Ok((result.claim.to_json(), inspection))
         })();
         result.map_err(|error| with_setup_progress(error, &created))
     }
 }
-fn verify_claim_source(writer: &CheckoutWriter, view: &ResolvedView) -> ExecutionResult<()> {
-    writer.verify()?;
-    view.recheck()
+fn verify_claim_source(
+    writer: &Option<CheckoutWriter>,
+    view: &ResolvedView,
+    guard: &CoordinationGuard,
+) -> ExecutionResult<()> {
+    if let Some(writer) = writer {
+        writer.verify()?;
+    }
+    view.recheck(guard)
 }
 fn claim_postpublication_error(mut error: ExecutionError) -> ExecutionError {
     error.details["publication"] = json!("published");
     error
 }
-fn material_source_lock(v: &ResolvedView, id: &str) -> ExecutionResult<CheckoutWriter> {
-    let root = v
-        .sources
-        .get(id)
-        .ok_or_else(|| ExecutionError::new("source_unavailable", "material source is missing"))?;
-    Ok(CheckoutWriter::open(root)?)
+fn material_source_lock(v: &ResolvedView, id: &str) -> ExecutionResult<Option<CheckoutWriter>> {
+    if let Some(root) = v.sources.get(id) {
+        return Ok(Some(CheckoutWriter::open(root)?));
+    }
+    if v.runs
+        .membership(id)
+        .is_some_and(|r| r.wisp_sources.contains_key(id))
+    {
+        return Ok(None);
+    }
+    Err(ExecutionError::new(
+        "source_unavailable",
+        "material source is missing",
+    ))
 }
 pub(crate) fn require_valid(store: &ItemStore) -> ExecutionResult<()> {
     let graph = ItemGraph::from_store(store);
@@ -561,11 +598,7 @@ pub(crate) fn validate_candidate(
         Err(OperationError::InvalidCandidate(graph.diagnostics().to_vec()).into())
     }
 }
-fn candidate(
-    g: &CoordinationGuard,
-    v: &ResolvedView,
-    input: &str,
-) -> ExecutionResult<ClaimCandidate> {
+fn validate_item_reference(input: &str) -> ExecutionResult<()> {
     let id = input.strip_prefix("w-").unwrap_or(input);
     if id.len() == 32 && !valid_id(id) {
         return Err(ExecutionError::new(
@@ -573,8 +606,13 @@ fn candidate(
             "full item ID must be a lowercase UUIDv4",
         ));
     }
-    require_valid(&v.store)?;
-    let source = v.store.resolve(input).map_err(|error| match error {
+    Ok(())
+}
+
+/// Shared run/claim item lookup; callers retain their graph/source validation.
+pub(crate) fn resolve_item<'a>(store: &'a ItemStore, input: &str) -> ExecutionResult<&'a ItemFile> {
+    validate_item_reference(input)?;
+    store.resolve(input).map_err(|error| match error {
         LookupError::InvalidInput => ExecutionError::new(
             "invalid_argument",
             "item ID must be lowercase hexadecimal, optionally prefixed with w-",
@@ -587,7 +625,17 @@ fn candidate(
             format!("item {input} matches {}", ids.join(", ")),
         ),
         LookupError::Invalid(diagnostics) => OperationError::InvalidSource(diagnostics).into(),
-    })?;
+    })
+}
+
+fn candidate(
+    g: &CoordinationGuard,
+    v: &ResolvedView,
+    input: &str,
+) -> ExecutionResult<ClaimCandidate> {
+    validate_item_reference(input)?;
+    require_valid(&v.store)?;
+    let source = resolve_item(&v.store, input)?;
     let h = source
         .header
         .clone()
@@ -595,11 +643,18 @@ fn candidate(
     let evaluation = ItemGraph::from_store(&v.store)
         .evaluate(&h.id)
         .map_err(|e| ExecutionError::new("not_ready", format!("{e:?}")))?;
+    let run = v.runs.membership(&h.id);
+    if run.is_some_and(|r| r.manifest.phase != super::runs::RunPhase::Active) {
+        return Err(ExecutionError::new(
+            "run_not_current",
+            "run is frozen for cleanup",
+        ));
+    }
     let candidate = ClaimCandidate {
         header: h,
         evaluation,
         workspace_id: None,
-        run_id: None,
+        run_id: run.map(|r| r.manifest.id.clone()),
         session_record_id: None,
     };
     ClaimStore::validate_candidate(&candidate)?;
@@ -614,11 +669,35 @@ fn prepare_claim_context(
     created: &mut Vec<Value>,
 ) -> ExecutionResult<()> {
     let id = &candidate.header.id;
-    let root = v
-        .sources
-        .get(id)
-        .ok_or_else(|| ExecutionError::new("source_unavailable", "material source is missing"))?;
-    v.recheck()?;
+    let Some(root) = v.sources.get(id) else {
+        let run = v
+            .runs
+            .membership(id)
+            .ok_or_else(|| ExecutionError::new("source_unavailable", "wisp owner is missing"))?;
+        if let Some(wid) = &run.manifest.default_workspace_id {
+            let workspace = v.context.workspaces.get(wid).ok_or_else(|| {
+                ExecutionError::new("source_unavailable", "run default workspace is missing")
+            })?;
+            if workspace.state != "open" {
+                return Err(ExecutionError::new(
+                    "workspace_busy",
+                    "execution workspace is closing",
+                ));
+            }
+            let project = super::project::discover(Some(&workspace.path)).map_err(|e| {
+                ExecutionError::new("source_unavailable", e.to_string()).at(&workspace.path)
+            })?;
+            if project.git_common_dir != g.project().git_common_dir {
+                return Err(ExecutionError::new(
+                    "source_unavailable",
+                    "execution workspace repository changed",
+                ));
+            }
+            candidate.workspace_id = Some(wid.clone());
+        }
+        return Ok(());
+    };
+    v.recheck(g)?;
     let workspace = if let Some(binding) = v.context.bindings.get(id) {
         v.context.workspaces[&binding.workspace_id].clone()
     } else {
@@ -639,7 +718,7 @@ fn prepare_claim_context(
     candidate.workspace_id = Some(workspace.id);
     Ok(())
 }
-fn with_setup_progress(mut error: ExecutionError, created: &[Value]) -> ExecutionError {
+pub(crate) fn with_setup_progress(mut error: ExecutionError, created: &[Value]) -> ExecutionError {
     if !error.details.is_object() {
         error.details = json!({"cause_details":error.details});
     }
@@ -693,12 +772,18 @@ fn inspect_with_snapshot(
             ),
         ),
     };
-    if (claim.is_some() || warning.is_some())
+    let frozen = i
+        .file
+        .header
+        .as_ref()
+        .and_then(|header| v.runs.membership(&header.id))
+        .is_some_and(|run| run.manifest.phase != super::runs::RunPhase::Active);
+    if (claim.is_some() || warning.is_some() || frozen)
         && let Some(e) = i.evaluation.as_mut()
     {
         e.executable = false;
     }
-    i.context = json!({"source_worktree":v.sources.get(id).map(|p|encode_path(p)),"persistence":"material","run_id":v.run_ids.get(id),"claim":claim.map(|c|c.to_json())});
+    i.context = json!({"source_worktree":v.sources.get(id).map(|p|encode_path(p)),"persistence":if v.sources.contains_key(id){"material"}else{"wisp"},"run_id":v.run_ids.get(id),"claim":claim.map(|c|c.to_json())});
     if let Some(w) = warning {
         i.context["ownership_warning"] = w;
     }
@@ -1948,6 +2033,380 @@ mod tests {
             }
             drop(hook);
             assert!(verified.get());
+        }
+    }
+    #[test]
+    fn run_entry_additions_refuse_material_update_before_publication() {
+        for add_run in [false, true] {
+            let fixture = Fixture::new();
+            let target = fixture_item(&fixture);
+            let other_root = fixture_item(&fixture);
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let started = fixture.ops.run_start(&target, None, None).unwrap();
+            let run_id = started["run"]["id"].as_str().unwrap().to_owned();
+            let source_path = fixture.root.join(format!(".work/items/{target}.md"));
+            let before = fs::read(&source_path).unwrap();
+            let shared = fixture.ops.project.git_common_dir.join("work");
+            let mut manifest: Value = serde_json::from_slice(
+                &fs::read(shared.join(format!("runs/{run_id}/run.yaml"))).unwrap(),
+            )
+            .unwrap();
+            let added_run = new_id().unwrap();
+            manifest["id"] = json!(added_run);
+            manifest["root_item_id"] = json!(other_root);
+            let wisp_id = new_id().unwrap();
+            let mut header =
+                operations::default_header(wisp_id.clone(), "unexpected graph source".into());
+            header.depends_on = vec![wisp_id.clone()];
+            let run_dir = shared
+                .join("runs")
+                .join(if add_run { &added_run } else { &run_id });
+            let unexpected = run_dir.join("items").join(format!("{wisp_id}.md"));
+            let added_path = unexpected.clone();
+            // The existing edit callback executes after loading/validating the
+            // view. A direct editor changes the source set while that snapshot
+            // remains captured, before its publication recheck.
+            let error = fixture
+                .ops
+                .mutate(
+                    &target,
+                    false,
+                    move |edited| {
+                        if add_run {
+                            fs::create_dir_all(run_dir.join("items")).unwrap();
+                            fs::create_dir_all(run_dir.join("sessions")).unwrap();
+                            fs::write(run_dir.join("run.yaml"), yaml_bytes(&manifest)).unwrap();
+                        }
+                        fs::write(added_path, operations::serialize(&header, b"direct editor"))
+                            .unwrap();
+                        edited.title = "must not publish".into();
+                        Ok(())
+                    },
+                    |_| panic!("initialized mutation must use the resolved snapshot"),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "conflict", "{error:?}");
+            assert!(error.message.contains(if add_run {
+                "run entries changed"
+            } else {
+                "wisp entries changed"
+            }));
+            assert!(unexpected.is_file());
+            assert_eq!(fs::read(&source_path).unwrap(), before);
+            assert!(error.details.get("published_item").is_none());
+        }
+    }
+
+    #[test]
+    fn run_snapshot_recheck_refuses_missing_entries_and_same_byte_source_swaps() {
+        for change in ["missing_run", "missing_wisp", "swap_manifest", "swap_wisp"] {
+            let fixture = Fixture::new();
+            let target = fixture_item(&fixture);
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let run = fixture.ops.run_start(&target, None, None).unwrap();
+            let run_id = run["run"]["id"].as_str().unwrap();
+            let guard = CoordinationGuard::acquire(&fixture.ops.project, true).unwrap();
+            let header = operations::default_header(new_id().unwrap(), "wisp".into());
+            let wisp = super::super::runs::RunStore::create_wisp(&guard, run_id, &header, b"body")
+                .unwrap();
+            let view = ResolvedView::load(&guard).unwrap();
+            let run_dir = guard.root_path().join("runs").join(run_id);
+            match change {
+                "missing_run" => fs::remove_dir_all(&run_dir).unwrap(),
+                "missing_wisp" => fs::remove_file(&wisp).unwrap(),
+                "swap_manifest" | "swap_wisp" => {
+                    let path = if change == "swap_manifest" {
+                        run_dir.join("run.yaml")
+                    } else {
+                        wisp
+                    };
+                    let raw = fs::read(&path).unwrap();
+                    let replacement = path.with_extension("replacement");
+                    fs::write(&replacement, raw).unwrap();
+                    fs::rename(replacement, path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                view.recheck(&guard).unwrap_err().code,
+                "conflict",
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn certainly_published_wisp_mutation_retains_updated_progress() {
+        let fixture = Fixture::new();
+        let root = fixture_item(&fixture);
+        Storage::new(fixture.ops.project.clone())
+            .initialize()
+            .unwrap();
+        let run = fixture.ops.run_start(&root, None, None).unwrap();
+        let run_id = run["run"]["id"].as_str().unwrap();
+        let guard = CoordinationGuard::acquire(&fixture.ops.project, true).unwrap();
+        let header = operations::default_header(new_id().unwrap(), "original wisp".into());
+        let path =
+            super::super::runs::RunStore::create_wisp(&guard, run_id, &header, b"body").unwrap();
+        let original = fs::read(&path).unwrap();
+        let lock = guard.root_path().join("coordination.lock");
+        drop(guard);
+        let lock_for_hook = lock.clone();
+        let hook = super::super::storage::files::on_next("after_directory_sync", move || {
+            fs::rename(&lock_for_hook, lock_for_hook.with_extension("retained")).unwrap();
+            fs::write(lock_for_hook, b"").unwrap();
+        });
+        let error = fixture
+            .ops
+            .update(
+                &header.id,
+                MetadataChange {
+                    title: Some("saved wisp".into()),
+                    ..MetadataChange::default()
+                },
+            )
+            .unwrap_err();
+        drop(hook);
+        assert_eq!(error.code, "conflict");
+        assert_eq!(error.path, Some(lock));
+        assert_eq!(error.details["publication"], "published");
+        assert_eq!(error.details["published_path"], encode_path(&path));
+        assert_eq!(
+            error.details["partial"]["updated"],
+            json!([{"id":header.id,"path":encode_path(&path)}])
+        );
+        assert_eq!(error.details["partial"]["uncertain_paths"], json!([]));
+        assert!(
+            String::from_utf8(fs::read(path).unwrap())
+                .unwrap()
+                .contains("saved wisp")
+        );
+        assert_eq!(error.details["recovery_paths"].as_array().unwrap().len(), 1);
+        let previous = error.details["previous_source_path"].as_str().unwrap();
+        assert_eq!(error.details["recovery_paths"][0], previous);
+        assert_eq!(fs::read(decode_path(previous).unwrap()).unwrap(), original);
+    }
+    #[test]
+    fn shared_item_lookup_preserves_invalid_source_diagnostics() {
+        let id = new_id().unwrap();
+        let file = super::super::items::parse_candidate(
+            std::path::PathBuf::from("/fixture/wrong.md"),
+            operations::serialize(
+                &operations::default_header(id.clone(), "item".into()),
+                b"body",
+            ),
+        );
+        let store = ItemStore::from_candidate_files(vec![file]);
+        for input in [&id, &format!("w-{id}")] {
+            let error = resolve_item(&store, input).unwrap_err();
+            assert_eq!(error.code, "invalid_source");
+            assert!(
+                error.details["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|diagnostic| diagnostic["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("filename must be"))
+            );
+        }
+    }
+
+    fn fixture_wisp(fixture: &Fixture) -> (String, PathBuf) {
+        let root = fixture_item(fixture);
+        Storage::new(fixture.ops.project.clone())
+            .initialize()
+            .unwrap();
+        let started = fixture.ops.run_start(&root, None, None).unwrap();
+        let guard = CoordinationGuard::acquire(&fixture.ops.project, true).unwrap();
+        let mut header = operations::default_header(new_id().unwrap(), "original wisp".into());
+        header.parent = Some(root);
+        let path = super::super::runs::RunStore::create_wisp(
+            &guard,
+            started["run"]["id"].as_str().unwrap(),
+            &header,
+            b"wisp body",
+        )
+        .unwrap();
+        (header.id, path)
+    }
+
+    #[test]
+    fn wisp_mutation_reload_failures_preserve_actual_retained_source() {
+        for failure in ["graph", "load"] {
+            let fixture = Fixture::new();
+            let (id, path) = fixture_wisp(&fixture);
+            let original = fs::read(&path).unwrap();
+            let before = fixture.ops.inspect(&id).unwrap();
+            let parent = before.file.header.unwrap().parent.unwrap();
+            let parent_path = fixture.root.join(format!(".work/items/{parent}.md"));
+            let unexpected = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join("work/workspaces/unexpected");
+            let damage = unexpected.clone();
+            let hook =
+                super::super::storage::files::on_next(
+                    "after_directory_sync",
+                    move || match failure {
+                        "graph" => fs::remove_file(parent_path).unwrap(),
+                        "load" => fs::write(damage, b"invalid").unwrap(),
+                        _ => unreachable!(),
+                    },
+                );
+            let error = fixture
+                .ops
+                .update(
+                    &id,
+                    MetadataChange {
+                        title: Some("saved wisp".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            drop(hook);
+            assert_eq!(
+                error.code,
+                match failure {
+                    "graph" => "invalid_source",
+                    "load" => "invalid_format",
+                    _ => "not_found",
+                },
+                "{error:?}"
+            );
+            assert_eq!(error.details["publication"], "published");
+            assert_eq!(
+                error.details["published_item"],
+                json!({"id":id,"path":encode_path(&path)})
+            );
+            assert_eq!(
+                error.details["partial"]["updated"],
+                json!([error.details["published_item"]])
+            );
+            let retained =
+                decode_path(error.details["previous_source_path"].as_str().unwrap()).unwrap();
+            assert_eq!(retained.parent(), path.parent());
+            assert_eq!(fs::read(retained).unwrap(), original);
+            if failure == "load" {
+                assert_eq!(error.path, Some(unexpected));
+            }
+        }
+    }
+
+    #[test]
+    fn wisp_completion_failures_keep_recovery_and_last_attempted_ending_publication() {
+        for status in ["not_published", "possible", "published"] {
+            let mut fixture = Fixture::new();
+            let (id, path) = fixture_wisp(&fixture);
+            let original = fs::read(&path).unwrap();
+            let session = test_session();
+            let (claim, _) = fixture.ops.acquire(&id, "worker", &session).unwrap();
+            let claim_id = claim["id"].as_str().unwrap().to_owned();
+            fixture.ops.authorization.push(ClaimAuthorization {
+                claim_id: claim_id.clone(),
+                session,
+            });
+            let ending = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join(format!("work/claims/{claim_id}.end.yaml"));
+            let lock = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join("work/coordination.lock");
+            let substituted = lock.clone();
+            let installed = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let retained_fault = installed.clone();
+            let hook = super::super::storage::files::on_nth(
+                "after_directory_sync",
+                if status == "published" { 2 } else { 1 },
+                move || {
+                    if status == "published" {
+                        fs::rename(&substituted, substituted.with_extension("retained")).unwrap();
+                        fs::write(substituted, b"").unwrap();
+                    } else {
+                        *installed.borrow_mut() = Some(super::super::storage::files::fail_next(
+                            if status == "possible" {
+                                "publication_sync"
+                            } else {
+                                "before_publication"
+                            },
+                        ));
+                    }
+                },
+            );
+            let error = fixture.ops.close(&id, None).unwrap_err();
+            drop(hook);
+            drop(retained_fault);
+            assert_eq!(error.details["publication"], status, "{error:?}");
+            assert_eq!(
+                error.code,
+                if status == "published" {
+                    "conflict"
+                } else {
+                    "io"
+                }
+            );
+            assert_eq!(
+                error.path.as_deref(),
+                Some(if status == "published" {
+                    lock.as_path()
+                } else {
+                    ending.as_path()
+                })
+            );
+            assert_eq!(
+                error.details["errno"],
+                if status == "published" {
+                    Value::Null
+                } else {
+                    json!(5)
+                }
+            );
+            assert_eq!(
+                error.details["partial"]["updated"],
+                json!([{"id":id,"path":encode_path(&path)}])
+            );
+            assert_eq!(
+                error.details["partial"]["uncertain_paths"],
+                if status == "possible" {
+                    json!([encode_path(&ending)])
+                } else {
+                    json!([])
+                }
+            );
+            assert_eq!(
+                error.details["partial"]["created"],
+                if status == "published" {
+                    json!([{"id":claim_id,"path":encode_path(&ending)}])
+                } else {
+                    json!([])
+                }
+            );
+            assert_eq!(ending.is_file(), status != "not_published");
+            let recovery =
+                decode_path(error.details["previous_source_path"].as_str().unwrap()).unwrap();
+            assert_eq!(fs::read(recovery).unwrap(), original);
+            assert!(
+                String::from_utf8(fs::read(&path).unwrap())
+                    .unwrap()
+                    .contains("state: done")
+            );
+            if status == "not_published" {
+                // Retry saves only the ending; the unchanged wisp must not be
+                // exchanged again or invent a new previous-source path.
+                let noop = fixture.ops.close(&id, None).unwrap();
+                assert!(noop.recovery_path.is_none());
+                assert!(ending.is_file());
+            }
         }
     }
 }

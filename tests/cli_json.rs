@@ -551,3 +551,57 @@ fn non_utf8_storage_mutation_arguments_report_not_published_before_discovery() {
         assert!(!fixture.0.join(".git/work.identity.yaml").exists());
     }
 }
+
+#[test]
+fn human_expansion_reports_key_ids_destinations_and_existing_updates() {
+    let f = Fixture::new();
+    let root = ok(f.call(&["item", "create", "--title", "Root"]))["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ok(f.call(&["storage", "init"]));
+    let run = ok(f.call(&["run", "start", &root]))["run"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::create_dir_all(f.0.join(".work/templates")).unwrap();
+    fs::write(
+        f.0.join(".work/templates/human.yaml"),
+        "format_version: 2\nname: human\nitems: [{key: material, title: Material}, {key: temporary, title: Wisp, persistence: wisp}]\nedges: [{from: root, kind: depends_on, to: 'local:material'}]\n",
+    ).unwrap();
+    let (status, stdout, stderr) = human(&f.0, &["template", "expand", "human", "--run", &run]);
+    assert_eq!(status, 0, "{stdout}\n{stderr}");
+    let result: Value = serde_json::from_str(&stdout).expect("complete readable expansion result");
+    assert_eq!(result["run_id"], run);
+    assert_eq!(result["changed"], true);
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    for (item, key, persistence) in [
+        (&items[0], "material", "material"),
+        (&items[1], "temporary", "wisp"),
+    ] {
+        assert_eq!(item["key"], key);
+        assert_eq!(item["persistence"], persistence);
+        let id = item["id"].as_str().unwrap();
+        assert_eq!(id.len(), 32);
+        let path = if persistence == "material" {
+            f.0.join(format!(".work/items/{id}.md"))
+        } else {
+            f.0.join(format!(".git/work/runs/{run}/items/{id}.md"))
+        };
+        assert_eq!(item["path"], path.to_str().unwrap());
+        assert!(path.is_file());
+    }
+    assert_eq!(result["updated"].as_array().unwrap().len(), 1);
+    assert_eq!(result["updated"][0]["id"], root);
+    assert_eq!(
+        result["updated"][0]["path"],
+        f.0.join(format!(".work/items/{root}.md")).to_str().unwrap()
+    );
+    let listed = human(&f.0, &["item", "list"]);
+    assert_eq!(listed.0, 0);
+    assert!(listed.1.contains("Root"));
+    assert!(listed.1.contains("Material"));
+    assert!(listed.1.contains("Wisp"));
+    assert!(!listed.1.starts_with('{'));
+}
