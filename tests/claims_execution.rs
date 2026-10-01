@@ -715,6 +715,79 @@ fn mcp(path: &Path, name: &str, arguments: Value) -> Value {
     result["result"]["structuredContent"].clone()
 }
 #[test]
+fn unreadable_metadata_preserves_cli_mcp_write_refusal_and_read_warning() {
+    let f = Fixture::new();
+    let id = f.item();
+    f.init();
+    let path = f.root().join("store.yaml");
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    let metadata = fs::read(&path).unwrap();
+    let item_path = f.path.join(format!(".work/items/{id}.md"));
+    let original = fs::read(&item_path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let baseline = f.cli(&["storage", "init"]);
+    assert_eq!(baseline["error"]["code"], "permission_denied");
+    for (args, tool, arguments) in [
+        (
+            vec!["item", "update", &id, "--title", "refused"],
+            "item_update",
+            serde_json::json!({"id":id,"title":"refused"}),
+        ),
+        (
+            vec![
+                "claim",
+                "acquire",
+                &id,
+                "--actor",
+                "worker",
+                "--session-namespace",
+                "provider",
+                "--session-id",
+                "session",
+            ],
+            "claim_acquire",
+            serde_json::json!({"item":id,"actor":"worker","session":{"namespace":"provider","id":"session"}}),
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_work"))
+            .arg("--json")
+            .arg("--worktree")
+            .arg(&f.path)
+            .args(args)
+            .output()
+            .unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{response}");
+        let mcp_response = mcp(&f.path, tool, arguments);
+        for error in [&response["error"], &mcp_response["error"]] {
+            assert_eq!(error["code"], "permission_denied", "{error}");
+            assert_eq!(error["path"], path.to_str().unwrap());
+            assert_eq!(error["errno"], baseline["error"]["errno"]);
+            assert_eq!(error["publication"], "not_published");
+            assert!(!error["message"].as_str().unwrap().contains("recovery"));
+        }
+        assert_eq!(fs::read(&item_path).unwrap(), original);
+    }
+    let read = f.cli(&["item", "list"]);
+    assert_eq!(read["ok"], true, "{read}");
+    let mcp_read = mcp(&f.path, "item_list", serde_json::json!({}));
+    for result in [&read["result"], &mcp_read] {
+        assert_eq!(result["items"].as_array().unwrap().len(), 1, "{result}");
+        assert_eq!(result["items"][0]["id"], id);
+        assert_eq!(result["storage_warning"]["code"], "permission_denied");
+        assert_eq!(result["storage_warning"]["path"], path.to_str().unwrap());
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), metadata);
+    assert_eq!(fs::read(&item_path).unwrap(), original);
+    assert_eq!(fs::read_dir(f.root().join("claims")).unwrap().count(), 0);
+    assert_eq!(
+        fs::read_dir(f.root().join("workspaces")).unwrap().count(),
+        0
+    );
+}
+
+#[test]
 fn independent_lock_holder_preserves_cli_mcp_mutation_contention_and_read_warnings() {
     let f = Fixture::new();
     let id = f.item();

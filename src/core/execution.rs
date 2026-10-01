@@ -65,6 +65,16 @@ impl ExecutionOperations {
             {
                 return Ok(None);
             }
+            if s.diagnostics.iter().any(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    StorageErrorCode::PermissionDenied | StorageErrorCode::Io
+                )
+            }) {
+                // Value-only inspection omits the original errno/provenance.
+                // Re-read its evidence under the actual mutation guard.
+                return CoordinationGuard::acquire(&self.project, true).map(Some);
+            }
             if let Some(warning) = &s.storage_warning
                 && warning.code == super::storage::StorageErrorCode::StorageBusy
             {
@@ -1288,6 +1298,73 @@ mod tests {
                 assert_eq!(fs::read(file.path).unwrap(), file.raw);
             }
         }
+    }
+
+    #[test]
+    fn original_inspection_io_refusal_survives_claim_and_mutation_guards() {
+        use super::super::storage::files;
+        fn fail_metadata_open() -> files::FailureGuard {
+            // The lock receipt opens first, followed by store.yaml evidence.
+            files::on_nth("source_open", 2, || {
+                std::mem::forget(files::fail_next("source_open"));
+            })
+        }
+        let fixture = Fixture::new();
+        let id = fixture_item(&fixture);
+        Storage::new(fixture.ops.project.clone())
+            .initialize()
+            .unwrap();
+        let original = fs::read(fixture.root.join(format!(".work/items/{id}.md"))).unwrap();
+        let metadata = fixture.ops.project.git_common_dir.join("work/store.yaml");
+        for claim in [false, true] {
+            let hook = if claim {
+                fail_metadata_open()
+            } else {
+                files::on_next("execution_guard_acquire", || {
+                    // The outer action guard clears the one-shot failure too.
+                    std::mem::forget(fail_metadata_open());
+                })
+            };
+            let error = if claim {
+                fixture
+                    .ops
+                    .acquire(&id, "owner", &test_session())
+                    .unwrap_err()
+            } else {
+                fixture
+                    .ops
+                    .update(
+                        &id,
+                        MetadataChange {
+                            title: Some("refused".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_err()
+            };
+            drop(hook);
+            assert_eq!(error.code, "io");
+            assert_eq!(error.path.as_deref(), Some(metadata.as_path()));
+            assert_eq!(error.details["errno"], 5);
+            assert_eq!(error.details["publication"], "not_published");
+            assert!(error.details.get("operation_id").is_some());
+            assert_eq!(error.details["recovery_paths"], json!([]));
+            assert!(!error.message.contains("recovery"));
+            assert_eq!(
+                fs::read(fixture.root.join(format!(".work/items/{id}.md"))).unwrap(),
+                original
+            );
+        }
+        let hook = fail_metadata_open();
+        let ops = ExecutionOperations::new(fixture.ops.project.clone());
+        let read = ops.list().unwrap();
+        drop(hook);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].file.header.as_ref().unwrap().id, id);
+        let storage = ops.take_read_storage().unwrap();
+        let warning = storage.storage_warning.unwrap();
+        assert_eq!(warning.code, StorageErrorCode::Io);
+        assert_eq!(warning.path.as_deref(), Some(metadata.as_path()));
     }
 
     #[test]

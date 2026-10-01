@@ -1,5 +1,5 @@
 //! Claim transport mapping; ownership policy lives in the core.
-use super::cli::{CliError, one_item_value};
+use super::cli::{CliError, snapshot_item_value};
 use serde_json::{Map, Value, json};
 use work::core::claims::{ClaimAuthorization, ClaimStore};
 use work::core::coordination::{CoordinationGuard, ExecutionError, SessionIdentity, valid_id};
@@ -165,7 +165,7 @@ pub(super) fn execute(
     if verb == "acquire" {
         let session = SessionIdentity::from_json(&m["session"])?;
         let (claim, item) = ops.acquire(text(m, "item"), text(m, "actor"), &session)?;
-        return Ok(json!({"claim":claim,"item":one_item_value(project,&item)?,"changed":true}));
+        return Ok(json!({"claim":claim,"item":snapshot_item_value(&item)?,"changed":true}));
     }
     if verb == "reassign" {
         let session = SessionIdentity::from_json(&m["session"])?;
@@ -177,7 +177,7 @@ pub(super) fn execute(
             true,
         )?;
         return Ok(
-            json!({"previous_claim_id":text(m,"claim_id"),"claim":claim,"item":one_item_value(project,&item)?,"changed":true}),
+            json!({"previous_claim_id":text(m,"claim_id"),"claim":claim,"item":snapshot_item_value(&item)?,"changed":true}),
         );
     }
     let guard = CoordinationGuard::acquire(project, !matches!(verb, "inspect" | "list"))?;
@@ -262,5 +262,80 @@ impl From<ExecutionError> for CliError {
             d["path"] = json!(super::cli::encode_path(&path));
         }
         Self::with_details(e.code, e.message, d)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, process::Command};
+    use work::core::{
+        coordination::new_id, operations::MetadataChange, project::discover, storage::Storage,
+    };
+    #[test]
+    fn acquired_and_reassigned_snapshots_render_after_context_becomes_invalid() {
+        for reassign in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("work-claim-presentation-{}", new_id().unwrap()));
+            fs::create_dir_all(root.join(".work/items")).unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["init", "-q"])
+                    .arg(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let project = discover(Some(&root)).unwrap();
+            let ops = ExecutionOperations::new(project.clone());
+            let item = ops
+                .create("task".into(), b"body".to_vec(), MetadataChange::default())
+                .unwrap()
+                .file
+                .header
+                .unwrap()
+                .id;
+            Storage::new(project.clone()).initialize().unwrap();
+            let session = SessionIdentity {
+                namespace: "test".into(),
+                id: "owner".into(),
+            };
+            let (first, initial) = ops.acquire(&item, "actor", &session).unwrap();
+            let (claim, inspection) = if reassign {
+                ops.reassign(
+                    first["id"].as_str().unwrap(),
+                    "controller",
+                    &session,
+                    "restart",
+                    true,
+                )
+                .unwrap()
+            } else {
+                (first, initial)
+            };
+            fs::write(
+                project.git_common_dir.join("work/workspaces/unexpected"),
+                b"invalid",
+            )
+            .unwrap();
+            assert!(ops.view().is_err());
+            let result = snapshot_item_value(&inspection).unwrap_or_else(|_| {
+                panic!("acquired snapshot must render without filesystem reads")
+            });
+            assert_eq!(result["id"], item);
+            assert_eq!(result["display_id"], format!("w-{item}"));
+            assert_eq!(result["claim"]["id"], claim["id"]);
+            assert_eq!(result["body"], "body");
+            assert!(
+                project
+                    .git_common_dir
+                    .join(format!(
+                        "work/claims/{}.yaml",
+                        claim["id"].as_str().unwrap()
+                    ))
+                    .is_file()
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

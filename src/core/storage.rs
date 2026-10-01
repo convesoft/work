@@ -268,7 +268,7 @@ impl Storage {
     }
     // Retain the original refusal (including errno) for mutation callers;
     // public inspection deliberately reports value-only diagnostics.
-    fn inspect_locked_evidence(
+    pub(crate) fn inspect_locked_evidence(
         &self,
         locked: &files::Locked,
         result: &mut StorageInspection,

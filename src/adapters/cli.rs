@@ -882,6 +882,17 @@ fn valid_full_id(value: &str) -> bool {
         && matches!(bytes[16], b'8' | b'9' | b'a' | b'b')
 }
 
+/// Render a completed operation's returned snapshot without another filesystem
+/// read. Full display IDs stay unambiguous without reloading the catalog.
+pub(super) fn snapshot_item_value(item: &Inspection) -> Result<Value, CliError> {
+    let header = item
+        .file
+        .header
+        .as_ref()
+        .ok_or_else(|| CliError::new("invalid_source", "item header is invalid"))?;
+    item_value(&BTreeMap::from([(header.id.clone(), 32)]), item)
+}
+
 pub(super) fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
     one_item_view(&ExecutionOperations::new(project.clone()), item)
 }

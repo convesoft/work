@@ -3,7 +3,7 @@
 use super::operations::OperationError;
 use super::project::Project;
 use super::storage::files::{Directory, Locked, Source};
-use super::storage::{Publication, Storage, StorageError, StoreMetadata};
+use super::storage::{Publication, Storage, StorageError, StorageErrorCode, StoreMetadata};
 use serde_json::{Value, json};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -140,7 +140,15 @@ impl CoordinationGuard {
         let locked = Locked::open(common, exclusive, false)?;
         let storage = Storage::new(project.clone());
         let mut inspection = storage.empty_inspection();
-        storage.inspect_locked(&locked, &mut inspection);
+        let refusal = storage.inspect_locked_evidence(&locked, &mut inspection);
+        if let Some(error) = refusal
+            && matches!(
+                error.code,
+                StorageErrorCode::PermissionDenied | StorageErrorCode::Io
+            )
+        {
+            return Err(error.into());
+        }
         if !inspection.coordination_available {
             let mut e = ExecutionError::new(
                 "recovery_required",
