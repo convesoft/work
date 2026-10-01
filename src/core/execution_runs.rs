@@ -265,6 +265,19 @@ impl ExecutionOperations {
         require_valid(&v.store)?;
         owners(&g)?;
         let run = run_id.map(|id| v.runs.get(id)).transpose()?;
+        if let Some(run) = run
+            && run.manifest.phase != RunPhase::Active
+        {
+            let mut error =
+                ExecutionError::new("run_not_current", "target run does not accept expansion").at(
+                    g.root_path()
+                        .join("runs")
+                        .join(&run.manifest.id)
+                        .join("run.yaml"),
+                );
+            error.details = json!({"run_id":run.manifest.id,"phase":run.manifest.phase.as_str(),"publication":"not_published"});
+            return Err(error);
+        }
         let catalog = TemplateCatalog::load_from_root(&self.project.worktree_root)?;
         let plan = catalog.plan_expansion(
             name,
@@ -893,5 +906,277 @@ mod tests {
             0
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    // The action installs an IO failure only on the selected publication, and
+    // both guards remain alive until the operation has returned.
+    struct ManifestFault {
+        _action: super::super::storage::files::FailureGuard,
+        _failure:
+            std::rc::Rc<std::cell::RefCell<Option<super::super::storage::files::FailureGuard>>>,
+    }
+    fn manifest_fault(fixture: &RunFixture, status: &'static str, nth: usize) -> ManifestFault {
+        let failure = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let installed = failure.clone();
+        let lock = fixture
+            .ops
+            .project
+            .git_common_dir
+            .join("work/coordination.lock");
+        let point = match status {
+            "not_published" => "before_publication",
+            "possible" => "publication_sync",
+            "published" => "after_directory_sync",
+            _ => unreachable!(),
+        };
+        let action = super::super::storage::files::on_nth(point, nth, move || {
+            if status == "published" {
+                fs::rename(&lock, lock.with_extension("retained")).unwrap();
+                fs::write(lock, b"").unwrap();
+            } else {
+                *installed.borrow_mut() = Some(super::super::storage::files::fail_next(point));
+            }
+        });
+        ManifestFault {
+            _action: action,
+            _failure: failure,
+        }
+    }
+    fn assert_manifest_error(
+        fixture: &RunFixture,
+        error: &ExecutionError,
+        path: &std::path::Path,
+        status: &str,
+        previous: Option<&[u8]>,
+    ) {
+        assert_eq!(error.details["publication"], status, "{error:?}");
+        assert_eq!(
+            error.details["partial"]["uncertain_paths"],
+            if status == "possible" {
+                json!([encode_path(path)])
+            } else {
+                json!([])
+            }
+        );
+        if status == "published" {
+            assert_eq!(error.code, "conflict");
+            assert_eq!(
+                error.path.as_deref(),
+                Some(
+                    fixture
+                        .ops
+                        .project
+                        .git_common_dir
+                        .join("work/coordination.lock")
+                        .as_path()
+                )
+            );
+            assert!(error.details["errno"].is_null());
+            assert_eq!(error.details["published_path"], encode_path(path));
+        } else {
+            assert_eq!(error.code, "io");
+            assert_eq!(error.path.as_deref(), Some(path));
+            assert_eq!(error.details["errno"], 5);
+        }
+        if status != "not_published"
+            && let Some(previous) = previous
+        {
+            let recovery = error.details["recovery_paths"].as_array().unwrap();
+            assert_eq!(recovery.len(), 1);
+            assert_eq!(
+                fs::read(decode_path(recovery[0].as_str().unwrap()).unwrap()).unwrap(),
+                previous
+            );
+        }
+    }
+
+    #[test]
+    fn membership_manifest_faults_preserve_progress_setup_and_recovery_for_attach_and_detach() {
+        for attach in [true, false] {
+            for status in ["not_published", "possible", "published"] {
+                let fixture = RunFixture::new();
+                let member_id = new_id().unwrap();
+                let header =
+                    super::super::operations::default_header(member_id.clone(), "member".into());
+                fs::write(
+                    fixture.root.join(format!(".work/items/{member_id}.md")),
+                    super::super::operations::serialize(&header, b"member body"),
+                )
+                .unwrap();
+                if !attach {
+                    fixture
+                        .ops
+                        .run_membership(&fixture.run_id, std::slice::from_ref(&member_id), true)
+                        .unwrap();
+                }
+                let manifest = fixture
+                    .ops
+                    .project
+                    .git_common_dir
+                    .join(format!("work/runs/{}/run.yaml", fixture.run_id));
+                let before = fs::read(&manifest).unwrap();
+                // Attachment saves a new binding before replacing the manifest.
+                let fault = manifest_fault(&fixture, status, if attach { 2 } else { 1 });
+                let error = fixture
+                    .ops
+                    .run_membership(&fixture.run_id, std::slice::from_ref(&member_id), attach)
+                    .unwrap_err();
+                drop(fault);
+                assert_manifest_error(&fixture, &error, &manifest, status, Some(&before));
+                assert_eq!(error.details["run_id"], fixture.run_id);
+                assert_eq!(
+                    error.details["partial"]["updated"],
+                    if status == "published" {
+                        json!([{"id":fixture.run_id,"path":encode_path(&manifest)}])
+                    } else {
+                        json!([])
+                    }
+                );
+                let binding = fixture
+                    .ops
+                    .project
+                    .git_common_dir
+                    .join(format!("work/workspaces/items/{member_id}.yaml"));
+                assert!(binding.is_file());
+                assert_eq!(
+                    error.details["partial"]["created"],
+                    if attach {
+                        json!([{"id":member_id,"path":encode_path(&binding)}])
+                    } else {
+                        json!([])
+                    }
+                );
+                assert_eq!(error.details["partial"]["deleted"], json!([]));
+                if status == "not_published" {
+                    assert_eq!(fs::read(&manifest).unwrap(), before);
+                } else {
+                    let saved: Value =
+                        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+                    assert_eq!(
+                        saved["material_items"],
+                        if attach {
+                            json!([member_id])
+                        } else {
+                            json!([])
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expansion_final_manifest_faults_merge_item_binding_and_existing_update_progress() {
+        for update in [false, true] {
+            for status in ["not_published", "possible", "published"] {
+                let fixture = RunFixture::new();
+                let source = if update {
+                    "format_version: 2\nname: material\nexisting: [seed]\nitems: [{key: a, title: NewMaterial}]\nedges: [{from: 'existing:seed', kind: depends_on, to: 'local:a'}]\n"
+                } else {
+                    "format_version: 2\nname: material\nitems: [{key: a, title: NewMaterial}]\n"
+                };
+                fs::write(fixture.root.join(".work/templates/material.yaml"), source).unwrap();
+                let manifest = fixture
+                    .ops
+                    .project
+                    .git_common_dir
+                    .join(format!("work/runs/{}/run.yaml", fixture.run_id));
+                let before = fs::read(&manifest).unwrap();
+                // Foundation entity writes: binding, optional existing wisp,
+                // manifest. Material publication has its own checkout hooks.
+                let fault = manifest_fault(&fixture, status, if update { 3 } else { 2 });
+                let error = fixture
+                    .ops
+                    .expand("material", &fixture.request(update), Some(&fixture.run_id))
+                    .unwrap_err();
+                drop(fault);
+                assert_manifest_error(&fixture, &error, &manifest, status, Some(&before));
+                let id = error.details["key_ids"]["a"].as_str().unwrap();
+                let material = fixture.root.join(format!(".work/items/{id}.md"));
+                let binding = fixture
+                    .ops
+                    .project
+                    .git_common_dir
+                    .join(format!("work/workspaces/items/{id}.yaml"));
+                assert!(material.is_file());
+                assert!(binding.is_file());
+                let created = error.details["partial"]["created"].as_array().unwrap();
+                assert_eq!(created.len(), 2);
+                for path in [&material, &binding] {
+                    assert!(created.contains(&json!({"id":id,"path":encode_path(path)})));
+                }
+                let updated = error.details["partial"]["updated"].as_array().unwrap();
+                assert_eq!(
+                    updated.len(),
+                    usize::from(update) + usize::from(status == "published")
+                );
+                if update {
+                    assert!(updated.contains(
+                        &json!({"id":fixture.wisp_id,"path":encode_path(&fixture.wisp_path)})
+                    ));
+                    assert!(
+                        String::from_utf8(fs::read(&fixture.wisp_path).unwrap())
+                            .unwrap()
+                            .contains(id)
+                    );
+                }
+                if status == "published" {
+                    assert!(
+                        updated
+                            .contains(&json!({"id":fixture.run_id,"path":encode_path(&manifest)}))
+                    );
+                }
+                if status == "not_published" {
+                    assert_eq!(fs::read(&manifest).unwrap(), before);
+                } else {
+                    let saved: Value =
+                        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+                    assert_eq!(saved["material_items"], json!([id]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn start_manifest_faults_report_creation_separately_from_binding_setup() {
+        for status in ["not_published", "possible", "published"] {
+            let fixture = RunFixture::new();
+            let root_id = new_id().unwrap();
+            let header =
+                super::super::operations::default_header(root_id.clone(), "new root".into());
+            fs::write(
+                fixture.root.join(format!(".work/items/{root_id}.md")),
+                super::super::operations::serialize(&header, b"root body"),
+            )
+            .unwrap();
+            let fault = manifest_fault(&fixture, status, 2);
+            let error = fixture.ops.run_start(&root_id, None, None).unwrap_err();
+            drop(fault);
+            let id = error.details["run_id"].as_str().unwrap();
+            let manifest = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join(format!("work/runs/{id}/run.yaml"));
+            assert_manifest_error(&fixture, &error, &manifest, status, None);
+            let binding = fixture
+                .ops
+                .project
+                .git_common_dir
+                .join(format!("work/workspaces/items/{root_id}.yaml"));
+            assert!(binding.is_file());
+            let created = error.details["partial"]["created"].as_array().unwrap();
+            assert!(created.contains(&json!({"id":root_id,"path":encode_path(&binding)})));
+            assert_eq!(created.len(), if status == "published" { 2 } else { 1 });
+            if status == "published" {
+                assert!(created.contains(&json!({"id":id,"path":encode_path(&manifest)})));
+            }
+            assert_eq!(error.details["partial"]["updated"], json!([]));
+            assert_eq!(manifest.is_file(), status != "not_published");
+            assert_eq!(
+                error.details["run_directory"],
+                encode_path(manifest.parent().unwrap())
+            );
+        }
     }
 }

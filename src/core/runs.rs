@@ -55,6 +55,39 @@ fn manifest_path(id: &str) -> PathBuf {
     run_path(id).join("run.yaml")
 }
 
+/// Annotate only the attempted manifest write; directory/setup progress stays
+/// with the caller and the IO boundary's publication evidence remains intact.
+fn manifest_write_error(
+    mut error: ExecutionError,
+    guard: &CoordinationGuard,
+    id: &str,
+    creating: bool,
+) -> ExecutionError {
+    use serde_json::json;
+    let path = super::coordination::encode_path(&guard.root_path().join(manifest_path(id)));
+    let entry = match error.details["publication"].as_str() {
+        Some("published") => Some((
+            if creating { "created" } else { "updated" },
+            json!({"id":id,"path":path}),
+        )),
+        Some("possible") => Some(("uncertain_paths", json!(path))),
+        _ => None,
+    };
+    if let Some((bucket, record)) = entry {
+        let mut partial = error.details.get("partial").cloned().unwrap_or_else(
+            || json!({"created":[],"updated":[],"deleted":[],"uncertain_paths":[]}),
+        );
+        let mut records = partial[bucket].as_array().cloned().unwrap_or_default();
+        if !records.contains(&record) {
+            records.push(record);
+        }
+        partial[bucket] = json!(records);
+        error.details["partial"] = partial;
+    }
+    error.details["run_id"] = json!(id);
+    error
+}
+
 impl RunRecord {
     pub fn members(&self) -> BTreeSet<String> {
         self.manifest
@@ -331,7 +364,9 @@ impl RunStore {
             guard.ensure_dir(&dir)?;
             guard.ensure_dir(&dir.join("items"))?;
             guard.ensure_dir(&dir.join("sessions"))?;
-            guard.create(&manifest_path(&id), &yaml_bytes(&run.to_json()))
+            guard
+                .create(&manifest_path(&id), &yaml_bytes(&run.to_json()))
+                .map_err(|error| manifest_write_error(error, guard, &id, true))
         };
         publish().map_err(|mut error| {
             error.details["run_id"] = serde_json::json!(id);
@@ -422,11 +457,13 @@ impl RunStore {
         let finished = next.finished(snapshot)?;
         let changed = next.manifest != record.manifest;
         if changed {
-            guard.replace(
-                &manifest_path(run_id),
-                &record.source,
-                &yaml_bytes(&next.manifest.to_json()),
-            )?;
+            guard
+                .replace(
+                    &manifest_path(run_id),
+                    &record.source,
+                    &yaml_bytes(&next.manifest.to_json()),
+                )
+                .map_err(|error| manifest_write_error(error, guard, run_id, false))?;
         }
         Ok(RunMutation {
             run: next.manifest,

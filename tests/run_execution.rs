@@ -625,3 +625,98 @@ fn membership_validates_all_references_before_setup_with_cli_mcp_lookup_parity()
         }
     }
 }
+
+#[test]
+fn frozen_target_expansion_is_lifecycle_conflict_while_preview_stays_read_only() {
+    for phase in ["squashing", "discarding"] {
+        let f = Fixture::new();
+        let root = f.item();
+        f.init();
+        let started = ok(cli(&f.root, &["run", "start", &root]));
+        let run = started["run"]["id"].as_str().unwrap();
+        template(
+            &f,
+            "seed",
+            "format_version: 2\nname: seed\nitems: [{key: a, title: Seed, persistence: wisp}]\n",
+        );
+        template(
+            &f,
+            "mixed",
+            "format_version: 2\nname: mixed\nitems: [{key: a, title: Material}, {key: b, title: Wisp, persistence: wisp}]\nedges: [{from: 'local:b', kind: depends_on, to: 'local:a'}]\n",
+        );
+        // Malformed expansion input on an active target keeps its input code.
+        let before = operational_files(&f);
+        let (exit, failed) = cli_status(
+            &f.root,
+            &[
+                "template", "expand", "mixed", "--run", run, "--root", "invalid",
+            ],
+        );
+        assert_eq!(exit, 2, "{failed}");
+        assert_eq!(failed["error"]["code"], "invalid_argument");
+        let failed = mcp(
+            &f.root,
+            "template_expand",
+            json!({"name":"mixed","run_id":run,"root":"invalid"}),
+        );
+        assert_eq!(failed["error"]["code"], "invalid_argument", "{failed}");
+        assert_eq!(operational_files(&f), before);
+
+        let seeded = ok(cli(&f.root, &["template", "expand", "seed", "--run", run]));
+        let wisp = seeded["items"][0]["id"].as_str().unwrap();
+        freeze_run(&f, run, phase, wisp);
+        let before = operational_files(&f);
+        let manifest = f.root.join(format!(".git/work/runs/{run}/run.yaml"));
+        let (exit, failed) = cli_status(&f.root, &["template", "expand", "mixed", "--run", run]);
+        assert_eq!(exit, 5, "{failed}");
+        let failed_mcp = mcp(
+            &f.root,
+            "template_expand",
+            json!({"name":"mixed","run_id":run}),
+        );
+        for failed in [&failed, &failed_mcp] {
+            assert_eq!(failed["error"]["code"], "run_not_current", "{failed}");
+            assert_eq!(failed["error"]["run_id"], run);
+            assert_eq!(failed["error"]["phase"], phase);
+            assert_eq!(failed["error"]["path"], manifest.to_str().unwrap());
+            assert_eq!(failed["error"]["publication"], "not_published");
+            // Refusal precedes expansion ID allocation and setup.
+            assert!(failed["error"]["key_ids"].is_null());
+        }
+        assert_eq!(operational_files(&f), before);
+        let preview = ok(cli(
+            &f.root,
+            &["template", "preview", "mixed", "--run", run],
+        ));
+        assert_eq!(
+            preview,
+            mcp(
+                &f.root,
+                "template_preview",
+                json!({"name":"mixed","run_id":run})
+            )
+        );
+        assert_eq!(preview["preview"]["items"].as_object().unwrap().len(), 2);
+        assert_eq!(operational_files(&f), before);
+        assert_eq!(
+            ok(cli(&f.root, &["run", "inspect", run]))["run"]["phase"],
+            phase
+        );
+
+        // An invalid target reference remains an argument failure even when
+        // another current run is frozen.
+        let (exit, failed) = cli_status(
+            &f.root,
+            &["template", "expand", "mixed", "--run", "invalid"],
+        );
+        assert_eq!(exit, 2, "{failed}");
+        assert_eq!(failed["error"]["code"], "invalid_argument");
+        let failed = mcp(
+            &f.root,
+            "template_expand",
+            json!({"name":"mixed","run_id":"invalid"}),
+        );
+        assert_eq!(failed["error"]["code"], "invalid_argument", "{failed}");
+        assert_eq!(operational_files(&f), before);
+    }
+}
