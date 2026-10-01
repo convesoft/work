@@ -2,22 +2,25 @@
 
 The product model and initial scope are established. The remaining work below concerns engineering contracts and small interface conventions, not another workflow or orchestration layer. Record concrete decisions in Mara as those contracts are designed; keep unresolved details distinct from accepted behavior.
 
-## Engineering contracts to finish
+## Contracts ready for implementation
 
-| Choice | What remains unresolved | Affected contract |
+The beta execution contracts are specified. Accepted knowledge is not implementation or test evidence. The next claims/run handoffs use these exact contracts; workers may choose private Rust helpers without reopening the settled product model.
+
+| Area | Settled contract | Delivery owner |
 | --- | --- | --- |
-| File formats | Item/template formats are defined. The entity layout and lifetimes are settled; exact envelopes for emitted claims and retirement, runs and workspace references, sessions, workspaces and handoffs still need fields and ID rules. The per-item material/wisp selector is a planned template extension; it is not implemented in current preview | [[DES-ENTITY-LIFECYCLES]], [[DES-ITEM-FORMAT]], [[DES-TEMPLATE-FORMAT]] |
-| Worktree views and claims | Source-change detection, claim mutation integration with checkout-local locks, and representation of the surviving output checkout. Reading and writing the whole material item in its associated worktree, explicit path inspection, one current run per root with later fresh runs, and repository-wide claim exclusion are settled | [[DES-FILE-COORDINATION]], [[REQ-SINGLE-RUN]], [[REQ-WORKTREE-VIEWS]] |
-| Ownership recovery | Foundation initialization, detectable loss, explicit recreation and status-only scope are defined in [[DES-STORE-FOUNDATION]] and [[DES-STORAGE-API]]. Claim ID plus session identity replaces separate ownership tokens. New acquisitions retain distinct claim identities; exact release/retirement encoding remains to be defined. Backup/restore is deferred until relevant entity formats exist. No automatic expiry or mandatory heartbeat | [[REQ-CLAIM-RECOVERY]], [[DES-FILE-COORDINATION]] |
-| Session reuse | Assignment-hint and optional availability-observation serialization. Names are run-scoped and removed during successful finalization cleanup; one-time workers need no named registration | [[DES-CLAIM-CONTEXT]] |
-| Workspace cleanup protocol | Cleanup-target representation and recovery after physical deletion but before reporting success. Check users and mark closing before removal, reject new assignments, execute from a surviving checkout, and retain failure context | [[REQ-WORKSPACE-CLEANUP]], [[DES-WORKSPACE-ASSOCIATIONS]] |
-| Run file protocol | Exact run/workspace-reference envelopes and CLI/MCP creation results. Mixed templates create material items in the selected checkout and wisps inside a run; material-only expansion needs no run. No application records or atomic multi-file publication: agents inspect partial files, remove them and retry. A run finishes when member obligations resolve and no active claims remain; the root is separate | [[REQ-RUN-ATOMICITY]], [[DES-TEMPLATE-RUNS]], [[DES-FILE-COORDINATION]] |
-| Squash and cleanup | Exact representation and repeat-call behavior of the caller-authored root digest extension. Squash retains it before cleanup without creating a digest item or closing the root. Explicit discard needs no digest and may abandon unfinished wisps; its exact CLI/MCP and disposal representation remain to be specified. Both paths refuse active target claims and outside references needing the deletion set | [[REQ-RUN-FINALIZATION]], [[DES-SQUASH-DIGEST]] |
-| Handoff operations | Concurrent receiver changes and recoverable save/release/cleanup. Cancellation resolves a receiver; reopening does not resurrect deleted notes | [[DES-HANDOFF-RECORDS]] |
-| Selection metadata | Scope/filter operation schema remains open; [[DES-TEMPLATE-FORMAT]] settles model/thinking template defaults. Version 1 defines priority 0–4 with ID tie-breaking, exact case-sensitive labels, and no parent inheritance | [[DES-ITEM-FORMAT]], [[REQ-WORK-SELECTION]], [[REQ-EXECUTOR-HINTS]] |
-| Operation schemas | The first durable CLI and MCP slice is defined in [[DES-CLI-JSON]] and [[DES-MCP-STDIO]]; [[DES-TEMPLATE-FORMAT]] defines template discovery, validation, and preview. Later claim and run schemas, pagination, and compatibility guarantees remain | [[REQ-CLI-MCP-PARITY]], [[REQ-CLI-JSON]] |
-| Graph errors | Diagnostic representation and repair interfaces. An invalid selected graph blocks readiness and claims; inspection/repair and other projects remain available | [[REQ-GRAPH-INTEGRITY]] |
-| Repository storage | Per-entity format compatibility, safe initialization, lock/error interfaces, backups and recovery-copy/receipt retention. All authority is in plain files; linked worktrees share coordination, independent clones do not | [[DES-SHARED-FILES]], [[DES-ENTITY-LIFECYCLES]], [[REQ-GIT-CHECKOUT]] |
+| File IO, errors and transport | [[DES-EXECUTION-IO]] defines IDs, strict envelopes, held-lock integration, resolved item sources, authorization and partial results | Main session coordinates shared core/adapters |
+| Claims and selection | [[DES-CLAIM-API]] defines acquisition/ending files, session-pair checks, release/recovery/reassignment and scoped claim-next | Claims item; claim-next remains its dependent item |
+| Runs and templates | [[DES-RUN-API]] defines manifests, membership, one current run with later fresh runs, template v2, optional planning root and partial expansion | Runs item |
+| Workspaces, sessions and handoffs | [[DES-CONTEXT-API]] defines exact files and commands, source bindings, context retention and external cleanup reporting | Basic source binding in main integration; context/handoff/cleanup items deliver their own operations |
+| Squash and discard | [[DES-FINALIZATION-API]] defines per-root/run digest documents, bounded cleanup state, selected/full discard and repeat-call behavior | Finalization item |
+
+No application records, separate material-state overlays, secret ownership tokens, notification daemon, generic transaction engine or additional hardening program are prerequisites. The current storage foundation is reused. Template creation permits partial results and explicit caller cleanup. Claims and run-aware mutations do not treat unavailable storage as healthy.
+
+## Deliberately later work
+
+Backup/restore, automatic pruning/expiry, arbitrary wisp promotion, pagination, remote coordination and the accepted foundation recovery follow-up remain deferred; they do not block these handoffs. Release verification and actual beta version/publication remain the release item's responsibility. CLI command names and JSON fields for the execution slices are now specified; internal Rust decomposition beyond the ownership handoff is an implementation choice.
+
+The implementation dispatch checklist and file ownership are in [the beta handoff](../.work/handoffs/beta-execution.md). The contracts must land on main before fresh implementation worktrees are created from that main. This preparation neither publishes/merges a PR nor authorizes starting a worker.
 
 The confirmed initial scope is recorded in [[ADR-INITIAL-SCOPE]]. [[ADR-RELATION-SEMANTICS]] settles the four relationships, parent completion policies, inherited prerequisites, and lifecycle versus informational distinction. Built-in agent execution, worktree management, and PR/CI actions are outside the initial scope. A TUI remains a later product direction. Multi-machine synchronization, a hosted service, arbitrary workflow scripting, and automatic provider polling have no accepted requirements in this corpus.
 
