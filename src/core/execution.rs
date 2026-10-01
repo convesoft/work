@@ -5,7 +5,7 @@ use super::claims::{ClaimAuthorization, ClaimCandidate, ClaimStore, OwnershipSna
 use super::context::{ContextStore, ResolvedView};
 use super::coordination::*;
 use super::graph::ItemGraph;
-use super::items::{Completion, ItemHeader, ItemStore, LookupError, ManualState};
+use super::items::{Completion, ItemFile, ItemHeader, ItemStore, LookupError, ManualState};
 use super::operations::{
     self, CheckoutWriter, DurableOperations, Inspection, MetadataChange, OperationError,
     RawInspection, RelationKind,
@@ -593,11 +593,7 @@ pub(crate) fn validate_candidate(
         Err(OperationError::InvalidCandidate(graph.diagnostics().to_vec()).into())
     }
 }
-fn candidate(
-    g: &CoordinationGuard,
-    v: &ResolvedView,
-    input: &str,
-) -> ExecutionResult<ClaimCandidate> {
+fn validate_item_reference(input: &str) -> ExecutionResult<()> {
     let id = input.strip_prefix("w-").unwrap_or(input);
     if id.len() == 32 && !valid_id(id) {
         return Err(ExecutionError::new(
@@ -605,8 +601,13 @@ fn candidate(
             "full item ID must be a lowercase UUIDv4",
         ));
     }
-    require_valid(&v.store)?;
-    let source = v.store.resolve(input).map_err(|error| match error {
+    Ok(())
+}
+
+/// Shared run/claim item lookup; callers retain their graph/source validation.
+pub(crate) fn resolve_item<'a>(store: &'a ItemStore, input: &str) -> ExecutionResult<&'a ItemFile> {
+    validate_item_reference(input)?;
+    store.resolve(input).map_err(|error| match error {
         LookupError::InvalidInput => ExecutionError::new(
             "invalid_argument",
             "item ID must be lowercase hexadecimal, optionally prefixed with w-",
@@ -619,7 +620,17 @@ fn candidate(
             format!("item {input} matches {}", ids.join(", ")),
         ),
         LookupError::Invalid(diagnostics) => OperationError::InvalidSource(diagnostics).into(),
-    })?;
+    })
+}
+
+fn candidate(
+    g: &CoordinationGuard,
+    v: &ResolvedView,
+    input: &str,
+) -> ExecutionResult<ClaimCandidate> {
+    validate_item_reference(input)?;
+    require_valid(&v.store)?;
+    let source = resolve_item(&v.store, input)?;
     let h = source
         .header
         .clone()
@@ -2169,5 +2180,31 @@ mod tests {
                 .contains("saved wisp")
         );
         assert_eq!(error.details["recovery_paths"].as_array().unwrap().len(), 1);
+    }
+    #[test]
+    fn shared_item_lookup_preserves_invalid_source_diagnostics() {
+        let id = new_id().unwrap();
+        let file = super::super::items::parse_candidate(
+            std::path::PathBuf::from("/fixture/wrong.md"),
+            operations::serialize(
+                &operations::default_header(id.clone(), "item".into()),
+                b"body",
+            ),
+        );
+        let store = ItemStore::from_candidate_files(vec![file]);
+        for input in [&id, &format!("w-{id}")] {
+            let error = resolve_item(&store, input).unwrap_err();
+            assert_eq!(error.code, "invalid_source");
+            assert!(
+                error.details["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|diagnostic| diagnostic["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("filename must be"))
+            );
+        }
     }
 }

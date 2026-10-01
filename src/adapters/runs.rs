@@ -186,7 +186,11 @@ pub(super) fn execute(
                 } else {
                     ops.view()?
                 };
-                json!({"preview":template_preview_value(&catalog.preview(text(m,"name").unwrap(),&req,&view)?)})
+                super::storage::attach_read(
+                    project,
+                    json!({"preview":template_preview_value(&catalog.preview(text(m,"name").unwrap(),&req,&view)?)}),
+                    ops.take_read_storage(),
+                )
             }
         }
         _ => return Err(invalid("unknown operation")),

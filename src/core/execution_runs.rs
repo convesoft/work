@@ -2,7 +2,7 @@
 use super::claims::ClaimStore;
 use super::context::{ContextStore, ResolvedView, Workspace};
 use super::coordination::*;
-use super::execution::{ExecutionOperations, require_valid, with_setup_progress};
+use super::execution::{ExecutionOperations, require_valid, resolve_item, with_setup_progress};
 use super::operations::CheckoutWriter;
 use super::runs::{RunMutation, RunPhase, RunRecord, RunSnapshot, RunStore};
 use super::templates::{Persistence, PreviewRequest, TemplateCatalog, TemplateError};
@@ -89,10 +89,7 @@ impl ExecutionOperations {
         let g = CoordinationGuard::acquire(&self.project, true)?;
         let v = ResolvedView::load(&g)?;
         require_valid(&v.store)?;
-        let root = v
-            .store
-            .resolve(input)
-            .map_err(|e| ExecutionError::new("not_found", format!("root: {e:?}")))?
+        let root = resolve_item(&v.store, input)?
             .header
             .as_ref()
             .unwrap()
@@ -184,10 +181,7 @@ impl ExecutionOperations {
         let material: BTreeSet<_> = v.sources.keys().cloned().collect();
         let mut ids = Vec::new();
         for input in inputs {
-            let item = v
-                .store
-                .resolve(input)
-                .map_err(|e| ExecutionError::new("not_found", format!("member: {e:?}")))?
+            let item = resolve_item(&v.store, input)?
                 .header
                 .as_ref()
                 .unwrap()
@@ -233,6 +227,10 @@ impl ExecutionOperations {
                     }
                 }
             }
+            // Setup may publish workspaces/bindings while an external editor
+            // changes the captured material sources. Refuse before membership
+            // publication, retaining setup progress on the returned error.
+            v.recheck(&g)?;
             let snapshot = RunSnapshot {
                 view: &v.store,
                 active_claims: &active,
@@ -734,5 +732,166 @@ mod tests {
             current.file.header.unwrap().depends_on,
             vec![result["items"][0]["id"].as_str().unwrap().to_owned()]
         );
+    }
+    #[test]
+    fn membership_rechecks_sources_after_binding_setup_and_keeps_known_progress() {
+        for change in ["delete", "edit", "swap"] {
+            for new_workspace in [false, true] {
+                let fixture = RunFixture::new();
+                let member_id = new_id().unwrap();
+                let member_header = super::super::operations::default_header(
+                    member_id.clone(),
+                    "completed member".into(),
+                );
+                let mut member_header = member_header;
+                member_header.state = Some(super::super::items::ManualState::Done);
+                let source_root = if new_workspace {
+                    // Register a different linked caller checkout during setup.
+                    assert!(
+                        Command::new("git")
+                            .arg("-C")
+                            .arg(&fixture.root)
+                            .args([
+                                "-c",
+                                "user.name=Test",
+                                "-c",
+                                "user.email=test@example.invalid",
+                                "commit",
+                                "--allow-empty",
+                                "-qm",
+                                "fixture"
+                            ])
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                    let linked = fixture.root.join("linked");
+                    assert!(
+                        Command::new("git")
+                            .arg("-C")
+                            .arg(&fixture.root)
+                            .args(["worktree", "add", "-q", "-b", "feature"])
+                            .arg(&linked)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                    fs::create_dir_all(linked.join(".work/items")).unwrap();
+                    linked
+                } else {
+                    fixture.root.clone()
+                };
+                let member = source_root.join(format!(".work/items/{member_id}.md"));
+                let raw = super::super::operations::serialize(&member_header, b"completed body");
+                fs::write(&member, &raw).unwrap();
+                let ops = ExecutionOperations::new(
+                    super::super::project::discover(Some(&source_root)).unwrap(),
+                );
+                let shared = ops.project.git_common_dir.join("work");
+                let manifest = shared.join(format!("runs/{}/run.yaml", fixture.run_id));
+                let before = fs::read(&manifest).unwrap();
+                let changed_member = member.clone();
+                let hook = super::super::storage::files::on_nth(
+                    "after_directory_sync",
+                    if new_workspace { 2 } else { 1 },
+                    move || match change {
+                        "delete" => fs::remove_file(&changed_member).unwrap(),
+                        "edit" => fs::write(
+                            &changed_member,
+                            super::super::operations::serialize(&member_header, b"external edit"),
+                        )
+                        .unwrap(),
+                        "swap" => {
+                            let replacement = changed_member.with_extension("replacement");
+                            fs::write(&replacement, &raw).unwrap();
+                            fs::rename(replacement, &changed_member).unwrap();
+                        }
+                        _ => unreachable!(),
+                    },
+                );
+                let error = ops
+                    .run_membership(&fixture.run_id, std::slice::from_ref(&member_id), true)
+                    .unwrap_err();
+                drop(hook);
+                assert_eq!(error.code, "conflict", "{change}: {error:?}");
+                assert!(error.message.contains("material sources changed"));
+                assert_eq!(error.path.as_deref(), Some(source_root.as_path()));
+                assert_eq!(error.details["publication"], "not_published");
+                assert_eq!(fs::read(&manifest).unwrap(), before);
+                let binding_path = shared.join(format!("workspaces/items/{member_id}.yaml"));
+                assert!(binding_path.is_file());
+                let binding: Value =
+                    serde_json::from_slice(&fs::read(&binding_path).unwrap()).unwrap();
+                let workspace_id = binding["workspace_id"].as_str().unwrap();
+                let created = error.details["partial"]["created"].as_array().unwrap();
+                assert!(
+                    created.contains(&json!({"id":member_id,"path":encode_path(&binding_path)}))
+                );
+                assert_eq!(created.len(), if new_workspace { 2 } else { 1 });
+                if new_workspace {
+                    let workspace_path = shared.join(format!("workspaces/{workspace_id}.yaml"));
+                    assert!(workspace_path.is_file());
+                    assert!(
+                        created.contains(
+                            &json!({"id":workspace_id,"path":encode_path(&workspace_path)})
+                        )
+                    );
+                }
+                assert_eq!(error.details["partial"]["updated"], json!([]));
+                assert_eq!(error.details["partial"]["uncertain_paths"], json!([]));
+            }
+        }
+    }
+
+    #[test]
+    fn run_start_rechecks_root_after_binding_setup_before_creating_manifest() {
+        let root =
+            std::env::temp_dir().join(format!("work-start-post-setup-{}", new_id().unwrap()));
+        fs::create_dir_all(root.join(".work/items")).unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let project = super::super::project::discover(Some(&root)).unwrap();
+        let ops = ExecutionOperations::new(project.clone());
+        let id = new_id().unwrap();
+        let header = super::super::operations::default_header(id.clone(), "root".into());
+        let path = root.join(format!(".work/items/{id}.md"));
+        fs::write(
+            &path,
+            super::super::operations::serialize(&header, b"root body"),
+        )
+        .unwrap();
+        super::super::storage::Storage::new(project.clone())
+            .initialize()
+            .unwrap();
+        let hook = super::super::storage::files::on_nth("after_directory_sync", 2, move || {
+            fs::remove_file(path).unwrap()
+        });
+        let error = ops.run_start(&id, None, None).unwrap_err();
+        drop(hook);
+        assert_eq!(error.code, "conflict");
+        assert_eq!(error.details["publication"], "not_published");
+        let created = error.details["partial"]["created"].as_array().unwrap();
+        assert_eq!(created.len(), 2);
+        for record in created {
+            assert!(
+                decode_path(record["path"].as_str().unwrap())
+                    .unwrap()
+                    .is_file()
+            );
+        }
+        assert_eq!(
+            fs::read_dir(project.git_common_dir.join("work/runs"))
+                .unwrap()
+                .count(),
+            0
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

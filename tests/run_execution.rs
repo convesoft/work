@@ -86,6 +86,9 @@ impl Drop for Fixture {
     }
 }
 fn cli(root: &Path, args: &[&str]) -> Value {
+    cli_status(root, args).1
+}
+fn cli_status(root: &Path, args: &[&str]) -> (i32, Value) {
     let o = Command::new(env!("CARGO_BIN_EXE_work"))
         .arg("--json")
         .arg("--worktree")
@@ -93,13 +96,14 @@ fn cli(root: &Path, args: &[&str]) -> Value {
         .args(args)
         .output()
         .unwrap();
-    serde_json::from_slice(&o.stdout).unwrap_or_else(|_| {
+    let value = serde_json::from_slice(&o.stdout).unwrap_or_else(|_| {
         panic!(
             "{} {}",
             String::from_utf8_lossy(&o.stdout),
             String::from_utf8_lossy(&o.stderr)
         )
-    })
+    });
+    (o.status.code().unwrap(), value)
 }
 fn ok(v: Value) -> Value {
     assert_eq!(v["ok"], true, "{v}");
@@ -479,5 +483,145 @@ fn frozen_run_root_material_and_wisps_match_ready_vs_acquire_in_cli_and_mcp() {
         assert_eq!(inspected["item"]["claim"]["session"], session());
         assert_eq!(inspected["item"]["persistence"], "wisp");
         assert_eq!(inspected["item"]["run_id"], run);
+    }
+}
+
+const LOOKUP_ROOT: &str = "11111111000040008000000000000000";
+const LOOKUP_MEMBER: &str = "22222222000040008000000000000000";
+fn lookup_fixture() -> Fixture {
+    let f = Fixture::new();
+    for id in [
+        LOOKUP_ROOT,
+        "11111112000040008000000000000000",
+        LOOKUP_MEMBER,
+        "22222223000040008000000000000000",
+    ] {
+        fs::write(
+            f.root.join(format!(".work/items/{id}.md")),
+            format!("---\nformat_version: 1\nid: '{id}'\ntitle: Lookup fixture\ncompletion: manual\nstate: open\npriority: 2\n---\nFixture body\n"),
+        ).unwrap();
+    }
+    f.init();
+    f
+}
+fn lookup_failures(ambiguous: &str) -> Vec<(String, &'static str, i32)> {
+    let mut failures = Vec::new();
+    for input in [
+        "invalid",
+        "w-",
+        "DEADBEEF",
+        "dead/beef",
+        "00000000000000000000000000000000",
+        "11111111000010008000000000000000",
+        "11111111000040007000000000000000",
+    ] {
+        for input in [input.to_owned(), format!("w-{input}")] {
+            failures.push((input, "invalid_argument", 2));
+        }
+    }
+    for input in [ambiguous, "99999999", "99999999000040008000000000000000"] {
+        for reference in [input.to_owned(), format!("w-{input}")] {
+            failures.push((
+                reference,
+                if input == ambiguous {
+                    "ambiguous_id"
+                } else {
+                    "not_found"
+                },
+                3,
+            ));
+        }
+    }
+    failures
+}
+#[test]
+fn run_start_lookup_errors_and_reference_forms_match_cli_and_mcp_without_invalid_writes() {
+    let f = lookup_fixture();
+    let before = operational_files(&f);
+    for (input, code, exit) in lookup_failures("1111111") {
+        let (status, failed) = cli_status(&f.root, &["run", "start", &input]);
+        assert_eq!(status, exit, "{input}: {failed}");
+        assert_eq!(failed["error"]["code"], code, "{input}: {failed}");
+        assert_eq!(operational_files(&f), before, "CLI {input}");
+        let failed = mcp(&f.root, "run_start", json!({"root":input}));
+        assert_eq!(failed["error"]["code"], code, "{input}: {failed}");
+        assert_eq!(operational_files(&f), before, "MCP {input}");
+    }
+    let mut run = None;
+    for reference in [
+        LOOKUP_ROOT.to_owned(),
+        format!("w-{LOOKUP_ROOT}"),
+        "11111111".into(),
+        "w-11111111".into(),
+    ] {
+        let (status, result) = cli_status(&f.root, &["run", "start", &reference]);
+        assert_eq!(status, 0, "{result}");
+        let result = ok(result);
+        assert_eq!(result["run"]["root_item_id"], LOOKUP_ROOT);
+        let current = result["run"]["id"].as_str().unwrap().to_owned();
+        if let Some(run) = &run {
+            assert_eq!(run, &current);
+        }
+        run = Some(current.clone());
+        let result = mcp(&f.root, "run_start", json!({"root":reference}));
+        assert!(result["error"].is_null(), "{result}");
+        assert_eq!(result["run"]["root_item_id"], LOOKUP_ROOT);
+        assert_eq!(result["run"]["id"], current);
+    }
+}
+#[test]
+fn membership_validates_all_references_before_setup_with_cli_mcp_lookup_parity() {
+    let f = lookup_fixture();
+    let result = ok(cli(&f.root, &["run", "start", LOOKUP_ROOT]));
+    let run = result["run"]["id"].as_str().unwrap();
+    let before = operational_files(&f);
+    for verb in ["attach", "detach"] {
+        for (input, code, exit) in lookup_failures("2222222") {
+            // Resolve a valid unbound member first: a later bad argument must
+            // still refuse before registering any member binding.
+            let (status, failed) = cli_status(&f.root, &["run", verb, run, LOOKUP_MEMBER, &input]);
+            assert_eq!(status, exit, "{verb} {input}: {failed}");
+            assert_eq!(failed["error"]["code"], code, "{verb} {input}: {failed}");
+            assert_eq!(operational_files(&f), before, "CLI {verb} {input}");
+            let failed = mcp(
+                &f.root,
+                &format!("run_{verb}"),
+                json!({"run_id":run,"items":[LOOKUP_MEMBER,input]}),
+            );
+            assert_eq!(failed["error"]["code"], code, "{verb} {input}: {failed}");
+            assert_eq!(operational_files(&f), before, "MCP {verb} {input}");
+        }
+    }
+    for reference in [
+        LOOKUP_MEMBER.to_owned(),
+        format!("w-{LOOKUP_MEMBER}"),
+        "22222222".into(),
+        "w-22222222".into(),
+    ] {
+        for transport in ["cli", "mcp"] {
+            for verb in ["attach", "detach"] {
+                let result = if transport == "cli" {
+                    let (status, result) = cli_status(&f.root, &["run", verb, run, &reference]);
+                    assert_eq!(status, 0, "{result}");
+                    ok(result)
+                } else {
+                    mcp(
+                        &f.root,
+                        &format!("run_{verb}"),
+                        json!({"run_id":run,"items":[reference]}),
+                    )
+                };
+                assert!(result["error"].is_null(), "{result}");
+                assert_eq!(result["changed"], true, "{result}");
+                assert_eq!(
+                    result["run"]["material_items"],
+                    if verb == "attach" {
+                        json!([LOOKUP_MEMBER])
+                    } else {
+                        json!([])
+                    }
+                );
+            }
+        }
     }
 }
