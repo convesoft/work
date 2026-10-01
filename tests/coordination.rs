@@ -530,3 +530,103 @@ fn malformed_bound_sources_remain_diagnostics_independent_of_binding_order() {
         assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
     }
 }
+
+#[test]
+fn malformed_context_records_report_the_actual_path_in_cli_and_mcp() {
+    let f = Fixture::new();
+    let id = f.item();
+    f.init();
+    acquire(&f.root, &id);
+    let directory = f.root.join(".git/work/workspaces");
+    let workspace = fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "yaml"))
+        .unwrap();
+    let binding = directory.join(format!("items/{id}.yaml"));
+    for path in [workspace, binding] {
+        let original = fs::read(&path).unwrap();
+        let value: Value = serde_json::from_slice(&original).unwrap();
+        for case in ["yaml", "keys", "identity", "future"] {
+            let mut changed = value.clone();
+            match case {
+                "keys" => changed["unexpected"] = json!(true),
+                "identity" => changed["store_id"] = json!("wrong"),
+                "future" => changed["format_version"] = json!(2),
+                _ => {}
+            }
+            let bytes = if case == "yaml" {
+                b"broken: [".to_vec()
+            } else {
+                serde_json::to_vec(&changed).unwrap()
+            };
+            fs::write(&path, &bytes).unwrap();
+            for (args, tool, input) in [
+                (
+                    vec!["item", "inspect", &id],
+                    "item_inspect",
+                    json!({"id":id}),
+                ),
+                (
+                    vec![
+                        "claim",
+                        "acquire",
+                        &id,
+                        "--actor",
+                        "worker",
+                        "--session-namespace",
+                        "codex",
+                        "--session-id",
+                        "session / opaque:α",
+                    ],
+                    "claim_acquire",
+                    json!({"item":id,"actor":"worker","session":session()}),
+                ),
+            ] {
+                let actual = cli(&f.root, &args);
+                let error = &actual["error"];
+                let code = match case {
+                    "identity" => "identity_mismatch",
+                    "future" => "unsupported_format",
+                    _ => "invalid_format",
+                };
+                assert_eq!(error["code"], code, "{actual}");
+                assert_eq!(error["path"], path.to_str().unwrap(), "{actual}");
+                if case == "yaml" {
+                    let diagnostics = error["diagnostics"].as_array().unwrap();
+                    assert!(!diagnostics.is_empty());
+                    assert!(
+                        diagnostics
+                            .iter()
+                            .all(|d| d["path"] == path.to_str().unwrap())
+                    );
+                }
+                assert_eq!(mcp(&f.root, tool, input)["error"], *error);
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+            }
+        }
+        fs::write(&path, original).unwrap();
+    }
+}
+
+#[test]
+fn complete_claim_item_filters_do_not_require_a_live_bound_source() {
+    let f = Fixture::new();
+    let id = f.item();
+    let linked = f.linked();
+    f.init();
+    let acquired = acquire(&linked, &id);
+    fs::remove_file(linked.join(format!(".work/items/{id}.md"))).unwrap();
+    for reference in [&id, &format!("w-{id}")] {
+        let list = ok(cli(&f.root, &["claim", "list", "--item", reference]));
+        assert_eq!(list["claims"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            list["claims"][0]["claim"]["id"], acquired["claim"]["id"],
+            "{list}"
+        );
+        assert_eq!(
+            mcp(&f.root, "claim_list", json!({"item":reference}))["claims"],
+            list["claims"]
+        );
+    }
+}

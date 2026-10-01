@@ -188,8 +188,9 @@ pub(super) fn execute(
                 .get("item")
                 .and_then(Value::as_str)
                 .map(|s| {
-                    if valid_id(s) {
-                        Ok(s.to_owned())
+                    let full = s.strip_prefix("w-").unwrap_or(s);
+                    if valid_id(full) {
+                        Ok(full.to_owned())
                     } else {
                         super::cli::resolve(project, s)
                     }

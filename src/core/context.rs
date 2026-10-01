@@ -51,6 +51,14 @@ fn envelope(v: &Value, g: &CoordinationGuard) -> ExecutionResult<()> {
     }
     Ok(())
 }
+fn decode_record<T>(
+    raw: &[u8],
+    path: &Path,
+    validate: impl FnOnce(Value) -> ExecutionResult<T>,
+) -> ExecutionResult<T> {
+    let value = super::storage::format::yaml(raw, path)?;
+    validate(value).map_err(|error| error.at(path))
+}
 impl ContextStore {
     pub fn load(g: &CoordinationGuard) -> ExecutionResult<Self> {
         let mut workspaces = BTreeMap::new();
@@ -66,55 +74,54 @@ impl ContextStore {
                         .at(g.root_path().join("workspaces").join(&name))
                 })?;
             let path = Path::new("workspaces").join(&name);
-            let v = parse_yaml(&g.read(&path)?.raw)?;
-            envelope(&v, g)?;
-            exact_keys(
-                &v,
-                &[
-                    "format_version",
-                    "store_id",
-                    "recovery_generation",
-                    "id",
-                    "path",
-                    "state",
-                    "created_at",
-                ],
-                &["branch", "commit", "cleanup"],
-            )?;
-            if string(&v, "id")? != id {
-                return Err(ExecutionError::new(
-                    "invalid_format",
-                    "workspace ID does not match filename",
-                ));
-            }
-            let state = string(&v, "state")?;
-            if !matches!(state.as_str(), "open" | "closing") {
-                return Err(ExecutionError::new(
-                    "invalid_format",
-                    "invalid workspace state",
-                ));
-            }
-            for key in ["created_at", "branch", "commit"] {
-                if v.get(key).is_some() {
-                    string(&v, key)?;
+            let workspace = decode_record(&g.read(&path)?.raw, &g.root_path().join(&path), |v| {
+                envelope(&v, g)?;
+                exact_keys(
+                    &v,
+                    &[
+                        "format_version",
+                        "store_id",
+                        "recovery_generation",
+                        "id",
+                        "path",
+                        "state",
+                        "created_at",
+                    ],
+                    &["branch", "commit", "cleanup"],
+                )?;
+                if string(&v, "id")? != id {
+                    return Err(ExecutionError::new(
+                        "invalid_format",
+                        "workspace ID does not match filename",
+                    ));
                 }
-            }
-            let path = decode_path(&string(&v, "path")?)?;
-            if workspaces.values().any(|w: &Workspace| w.path == path) {
-                return Err(ExecutionError::new(
-                    "invalid_format",
-                    "duplicate workspace path",
-                ));
-            }
-            workspaces.insert(
-                id.to_owned(),
-                Workspace {
+                let state = string(&v, "state")?;
+                if !matches!(state.as_str(), "open" | "closing") {
+                    return Err(ExecutionError::new(
+                        "invalid_format",
+                        "invalid workspace state",
+                    ));
+                }
+                for key in ["created_at", "branch", "commit"] {
+                    if v.get(key).is_some() {
+                        string(&v, key)?;
+                    }
+                }
+                let path = decode_path(&string(&v, "path")?)?;
+                if workspaces.values().any(|w: &Workspace| w.path == path) {
+                    return Err(ExecutionError::new(
+                        "invalid_format",
+                        "duplicate workspace path",
+                    ));
+                }
+                Ok(Workspace {
                     id: id.to_owned(),
                     path,
                     state,
                     value: v,
-                },
-            );
+                })
+            })?;
+            workspaces.insert(id.to_owned(), workspace);
         }
         let names = match g.names(Path::new("workspaces/items")) {
             Ok(v) => v,
@@ -123,37 +130,41 @@ impl ContextStore {
         };
         let mut bindings = BTreeMap::new();
         for name in names {
+            let path = Path::new("workspaces/items").join(&name);
+            let absolute = g.root_path().join(&path);
             let id = name
                 .strip_suffix(".yaml")
                 .filter(|s| valid_id(s))
-                .ok_or_else(|| ExecutionError::new("invalid_format", "unexpected binding entry"))?;
-            let v = parse_yaml(&g.read(&Path::new("workspaces/items").join(&name))?.raw)?;
-            envelope(&v, g)?;
-            exact_keys(
-                &v,
-                &[
-                    "format_version",
-                    "store_id",
-                    "recovery_generation",
-                    "item_id",
-                    "workspace_id",
-                ],
-                &[],
-            )?;
-            let wid = string(&v, "workspace_id")?;
-            if string(&v, "item_id")? != id || !valid_id(&wid) || !workspaces.contains_key(&wid) {
-                return Err(ExecutionError::new(
-                    "invalid_format",
-                    "invalid material workspace binding",
-                ));
-            }
-            bindings.insert(
-                id.into(),
-                MaterialBinding {
+                .ok_or_else(|| {
+                    ExecutionError::new("invalid_format", "unexpected binding entry").at(&absolute)
+                })?;
+            let binding = decode_record(&g.read(&path)?.raw, &absolute, |v| {
+                envelope(&v, g)?;
+                exact_keys(
+                    &v,
+                    &[
+                        "format_version",
+                        "store_id",
+                        "recovery_generation",
+                        "item_id",
+                        "workspace_id",
+                    ],
+                    &[],
+                )?;
+                let wid = string(&v, "workspace_id")?;
+                if string(&v, "item_id")? != id || !valid_id(&wid) || !workspaces.contains_key(&wid)
+                {
+                    return Err(ExecutionError::new(
+                        "invalid_format",
+                        "invalid material workspace binding",
+                    ));
+                }
+                Ok(MaterialBinding {
                     item_id: id.into(),
                     workspace_id: wid,
-                },
-            );
+                })
+            })?;
+            bindings.insert(id.into(), binding);
         }
         Ok(Self {
             workspaces,
@@ -216,7 +227,7 @@ impl ContextStore {
         match g.optional(&path)? {
             None => create_context(g, &path, id, &yaml_bytes(&v)),
             Some(old) => {
-                if parse_yaml(&old.raw)? == v {
+                if super::storage::format::yaml(&old.raw, &g.root_path().join(&path))? == v {
                     Ok(())
                 } else {
                     Err(ExecutionError::new(
