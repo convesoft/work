@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "mara": {
+      "command": "mara",
+      "args": [
+        "mcp"
+      ],
+      "cwd": ".",
+      "exposure": "direct"
+    },
+    "work": {
+      "command": "work",
+      "args": [
+        "mcp"
+      ],
+      "cwd": ".",
+      "exposure": "direct"
+    }
+  }
+}

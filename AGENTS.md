@@ -39,12 +39,22 @@ This Rust project is a local, agent-first issue tracker for managing work state.
   and verification evidence that actually exists. Use `N/A` when appropriate.
 - Squash merge by default. Use rebase merge only when preserving multiple
   independently useful commits that already follow the commit convention.
-- When the user intends to publish or continue an item PR, the main session
-  uses the [Work PR flow](.agents/skills/work-pr-flow/SKILL.md) and delegates
-  GitHub operations to the [PR manager](.codex/agents/work_pr_manager.toml).
-  The PR manager does not use the main-session skill. Implementation, tests,
-  commits, local Work-item edits, and finding classification stay with the
-  main session. The PR manager reports evidence and never merges on its own.
+- When the user intends to publish or continue an item PR, identify the
+  canonical Work item path and ID, branch, exact ready-to-push SHA, relevant
+  Mara IDs, verification evidence, known limitations, and existing PR URL, if
+  any. Implementation, tests, commits, local Work-item edits, and finding
+  classification stay with the main session. Use the workflow for the active
+  host:
+  - In Pi, the main agent follows the
+    [Pi PR flow](.pi/skills/work-pr-flow-pi/SKILL.md), runs `gh` directly, and uses
+    Herdr shell monitoring when explicitly requested. No separate PR agent is
+    required. `/pr-status` provides read-only, on-demand inspection.
+    `.pi/settings.json` excludes the Codex-only skill from Pi discovery.
+  - In Codex, the main session follows the
+    [Work PR flow](.agents/skills/work-pr-flow/SKILL.md) and delegates GitHub
+    operations to the [PR manager](.codex/agents/work_pr_manager.toml).
+    The PR manager does not use the main-session skill; it reports evidence
+    and never merges on its own.
 
 ## Bootstrap and releases
 

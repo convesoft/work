@@ -1,15 +1,16 @@
 ---
 name: work-pr-flow
-description: Main-session handoff for publishing or continuing a Work item pull request when the user intends to send work to GitHub.
+description: Codex main-session handoff for publishing or continuing a Work item pull request when the user intends to send work to GitHub.
 ---
 
 # Work pull request flow
 
-This skill is for the implementation session. The project `work_pr_manager` agent
-owns publication, CI/review monitoring, and explicitly directed GitHub
+This skill is for the Codex implementation session. The project `work_pr_manager`
+agent owns publication, CI/review monitoring, and explicitly directed GitHub
 conversation operations. Its instructions live in
 `.codex/agents/work_pr_manager.toml`; do not ask it to use this skill. Keep the
-main session active during the review loop.
+main session active during the review loop. Pi excludes this skill and uses its
+own main-agent PR workflow.
 
 1. Complete and verify the authorized work, then commit it. Give the PR manager
    the canonical Work item path and ID, branch, exact ready-to-push SHA,
