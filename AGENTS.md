@@ -56,6 +56,34 @@ This Rust project is a local, agent-first issue tracker for managing work state.
     The PR manager does not use the main-session skill; it reports evidence
     and never merges on its own.
 
+## Code review
+
+- Review against the current task, applicable Mara contracts, and the actual
+  end-to-end workflow. Report only actionable, consequential defects with a
+  concrete impact. Leave deterministic style and formatting checks to CI.
+- Treat a defect as critical only when it prevents the primary workflow, makes
+  the current release unusable, risks unrecoverable user data, or creates a
+  directly exploitable vulnerability in the intended deployment. Style,
+  theoretical risk, premature optimization, extra defense in depth, and rare
+  non-blocking edge cases are not critical.
+- In ordinary reviews, a finding belongs in the current change only when
+  accepted requirements or acceptance criteria are unmet, or when it is critical
+  as defined above. Valid non-critical findings go to the backlog without
+  expanding the pull request. Duplicates, resolved findings, speculative
+  hardening, theoretical concerns, and non-actionable preferences are dismissed.
+- Do not accept mocks, placeholders, or isolated tests as evidence that a real
+  primary workflow works. Do not establish new product behavior solely in a
+  review comment; update the canonical Mara documents when meaning changes.
+- When a user request or delegated worker task explicitly requires the
+  [local Codex review loop](.pi/skills/codex-review-loop/SKILL.md), the implementing
+  agent runs it after implementation and before handoff. This opts into fixing
+  every finding in the supplied-base diff and repeating review until a completed
+  review explicitly reports no findings. The ordinary current-change filtering
+  does not apply to this opt-in workflow. If a finding cannot be resolved,
+  report the blocker rather than claiming a clean review. Product decisions,
+  source safety, verification, and publication authorization still follow the
+  other repository rules.
+
 ## Bootstrap and releases
 
 - The baseline on `main` contains no CI/release workflow files or generated changelog. Add initial workflow files in the first Rust-foundation feature branch.
