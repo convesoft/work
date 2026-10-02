@@ -173,6 +173,14 @@ fn tools() -> Vec<Value> {
                 json!({"type":"string","enum":["resolved","checkout"]});
         }
     }
+    for tool in &mut result {
+        if matches!(tool["name"].as_str(), Some("item_list" | "item_ready")) {
+            tool["inputSchema"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .extend(super::selection::properties().as_object().unwrap().clone());
+        }
+    }
     result.retain(|t| t["name"] != "template_preview");
     result.extend(super::runs::tools());
     result.extend(super::claims::tools());
@@ -510,8 +518,12 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         "discover" => Ok(
             json!({"worktree_root":cli::encode_path(&project.worktree_root),"git_common_dir":cli::encode_path(&project.git_common_dir)}),
         ),
-        "item_list" => Ok(json!({"items":cli::items_view(&ops,&ops.list()?)?})),
-        "item_ready" => Ok(json!({"items":cli::items_view(&ops,&ops.ready()?)?})),
+        "item_list" => Ok(
+            json!({"items":cli::items_view(&ops,&ops.list_filtered(&super::selection::parse(args)?)?)?}),
+        ),
+        "item_ready" => Ok(
+            json!({"items":cli::items_view(&ops,&ops.ready_filtered(&super::selection::parse(args)?)?)?}),
+        ),
         "template_list" => cli::template_command(&project, "list", &[]),
         "template_validate" => {
             cli::template_command(&project, "validate", &[required(args, "name").to_owned()])

@@ -35,6 +35,12 @@ Existing item bodies are opaque bytes. Metadata and relation operations preserve
 
 If an operation fails, inspect `error.code` and any diagnostics. Invalid source or graph state can block `item_ready` and structured mutations while `item_list`, `item_inspect`, `item_diagnose`, and raw inspection remain available. Check reported paths and any recovery copy after a conflict or publication error before retrying. Test state-changing examples on disposable copies when the real items must remain intact.
 
+## Scoped selection and claims
+
+When advertised by the selected binary, item_list/item_ready and claim_next share optional root, run_id, labels_all, priority_max (0–4), and persistence (material|wisp). CLI uses --root, --run, repeated --label, --priority-max, and --persistence. Filters combine with AND on the complete selected graph: outside prerequisites still gate work. Root includes transitive children; current run membership excludes the separate root; labels are exact, not inherited. Invalid/missing scope references return errors, not an empty match. A terminal run is run_not_current. --view checkout with --run is invalid_argument; the other filters can inspect physical checkout files.
+
+claim_next matches claim next --actor A --session-namespace N --session-id S plus filters. It selects and reserves under one shared lock, ordered by priority then canonical full ID. No eligible work returns {claim:null,item:null,changed:false}; unavailable or corrupt ownership refuses dispatch. Readiness alone never reserves. Claims are repository-wide across linked worktrees; notifications and process-local state do not determine ownership. claim acquire/inspect/list/release/recover/reassign provide explicit ownership lifecycle. Consult help/tool schemas and the usage guide for session-pair authorization, partial publication and recovery. Do not treat ending a claim as stopping an executor.
+
 ## Templates and shared storage
 
 When advertised by the selected binary, template_list/template_validate/template_preview match template list/validate/preview. Preview uses local keys and declared text variables without publishing items, runs or permanent IDs. See the tool schemas and template command help for bindings.
@@ -45,7 +51,7 @@ Item reads expose storage and storage_warning without losing available durable d
 
 ## Development execution context
 
-The development binary also advertises claim acquire/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
+The development binary also advertises claim acquire/next/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
 
 Workspace register/inspect/list/bind/unbind match workspace_register/workspace_inspect/workspace_list/workspace_bind/workspace_unbind. Register an existing checkout in the same Git repository; registering its canonical path again reuses its ID. Branch/commit fields are supplied observations, not live Git state. Material binding selects the whole item file; explicit rebind establishes a surviving source after external merge/relocation. Unbind removes only that reference and refuses active claims/current-run context. Workspace users are derived from bindings, current runs and claims; unresolved users do not prove safe cleanup.
 
@@ -55,4 +61,4 @@ Default item inspection resolves bound material files and live wisps. `--view ch
 
 Handoff create/inspect/list/receivers/prune expose opaque receiver-scoped context. Item inspection and claiming return incoming handoffs; close can save outgoing context before item completion and claim ending. Pruning waits until all receiver obligations resolve. Inspect command help and MCP schemas for authorization and partial-result details.
 
-Backup/restore, claim-next selection, workspace cleanup, run squash/discard/finalization, agent execution, physical Git worktree management, pull requests and CI actions are not implemented. Do not advertise or simulate those as Work operations.
+Backup/restore, workspace cleanup, run squash/discard/finalization, agent execution, physical Git worktree management, pull requests and CI actions are not implemented. Do not advertise or simulate those as Work operations.

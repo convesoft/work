@@ -5,7 +5,7 @@ use work::core::claims::{ClaimAuthorization, ClaimStore};
 use work::core::coordination::{CoordinationGuard, ExecutionError, SessionIdentity, valid_id};
 use work::core::execution::ExecutionOperations;
 use work::core::project::Project;
-pub(super) const HELP: &str = "Usage: work claim acquire ITEM --actor A --session-namespace N --session-id S [--session-record ID] | inspect CLAIM_ID | list [--item ITEM] [--current] | release CLAIM_ID --session-namespace N --session-id S [--reason TEXT] | recover CLAIM_ID --actor A --reason TEXT --executors-stopped | reassign CLAIM_ID --actor A --session-namespace N --session-id S --reason TEXT --executors-stopped\nClaim ID plus session identity authorizes ownership. No separate token or automatic expiry.";
+pub(super) const HELP: &str = "Usage: work claim next --actor A --session-namespace N --session-id S [--root ITEM] [--run RUN_ID] [--label TEXT]... [--priority-max 0..4] [--persistence material|wisp] | acquire ITEM --actor A --session-namespace N --session-id S [--session-record ID] | inspect CLAIM_ID | list [--item ITEM] [--current] | release CLAIM_ID --session-namespace N --session-id S [--reason TEXT] | recover CLAIM_ID --actor A --reason TEXT --executors-stopped | reassign CLAIM_ID --actor A --session-namespace N --session-id S --reason TEXT --executors-stopped\nClaim ID plus session identity authorizes ownership. No separate token or automatic expiry.";
 fn invalid(s: impl Into<String>) -> CliError {
     CliError::new("invalid_argument", s)
 }
@@ -42,13 +42,13 @@ pub(super) fn from_cli(words: &[String]) -> Result<(String, Map<String, Value>),
     let verb = words.first().ok_or_else(|| invalid(HELP))?.clone();
     if !matches!(
         verb.as_str(),
-        "acquire" | "inspect" | "list" | "release" | "recover" | "reassign"
+        "next" | "acquire" | "inspect" | "list" | "release" | "recover" | "reassign"
     ) {
         return Err(CliError::new("usage", "unknown claim command"));
     }
     let mut m = Map::new();
     let mut at = 1;
-    if verb != "list" {
+    if !matches!(verb.as_str(), "list" | "next") {
         let id = words
             .get(at)
             .ok_or_else(|| invalid("missing item or claim ID"))?;
@@ -65,6 +65,9 @@ pub(super) fn from_cli(words: &[String]) -> Result<(String, Map<String, Value>),
     }
     let mut session = Map::new();
     while at < words.len() {
+        if verb == "next" && super::selection::consume_cli(words, &mut at, &mut m)? {
+            continue;
+        }
         let flag = words[at].as_str();
         at += 1;
         let key = match flag {
@@ -107,6 +110,7 @@ fn text<'a>(m: &'a Map<String, Value>, key: &str) -> &'a str {
 }
 fn validate(verb: &str, m: &Map<String, Value>) -> Result<(), CliError> {
     let (required, optional): (&[&str], &[&str]) = match verb {
+        "next" => (&["actor", "session"], super::selection::FIELDS),
         "acquire" => (&["item", "actor", "session"], &["session_record_id"]),
         "inspect" => (&["claim_id"], &[]),
         "list" => (&[], &["item", "current_only"]),
@@ -131,7 +135,13 @@ fn validate(verb: &str, m: &Map<String, Value>) -> Result<(), CliError> {
     {
         return Err(invalid("unknown or missing claim fields"));
     }
+    if verb == "next" {
+        super::selection::parse(m)?;
+    }
     for (key, value) in m {
+        if verb == "next" && super::selection::FIELDS.contains(&key.as_str()) {
+            continue;
+        }
         let valid = match key.as_str() {
             "session" => SessionIdentity::from_json(value).is_ok(),
             "executors_stopped" | "current_only" => value.is_boolean(),
@@ -163,6 +173,15 @@ pub(super) fn execute(
 ) -> Result<Value, CliError> {
     validate(verb, m)?;
     let ops = ExecutionOperations::new(project.clone());
+    if verb == "next" {
+        let session = SessionIdentity::from_json(&m["session"])?;
+        return match ops.claim_next(&super::selection::parse(m)?, text(m, "actor"), &session)? {
+            Some((claim, item)) => {
+                Ok(json!({"claim":claim,"item":snapshot_item_value(&item)?,"changed":true}))
+            }
+            None => Ok(json!({"claim":null,"item":null,"changed":false})),
+        };
+    }
     if verb == "acquire" {
         let session = SessionIdentity::from_json(&m["session"])?;
         let (claim, item) = ops.acquire_with_session_record(
@@ -230,6 +249,11 @@ pub(super) fn tools() -> Vec<Value> {
     let mut result = Vec::new();
     for (verb, required, optional) in [
         (
+            "next",
+            vec!["actor", "session"],
+            super::selection::FIELDS.to_vec(),
+        ),
+        (
             "acquire",
             vec!["item", "actor", "session"],
             vec!["session_record_id"],
@@ -256,10 +280,14 @@ pub(super) fn tools() -> Vec<Value> {
     ] {
         let mut props = json!({"worktree":s});
         for k in required.iter().chain(optional.iter()) {
-            props[*k] = match *k {
-                "session" => session.clone(),
-                "current_only" | "executors_stopped" => json!({"type":"boolean"}),
-                _ => s.clone(),
+            props[*k] = if super::selection::FIELDS.contains(k) {
+                super::selection::properties()[*k].clone()
+            } else {
+                match *k {
+                    "session" => session.clone(),
+                    "current_only" | "executors_stopped" => json!({"type":"boolean"}),
+                    _ => s.clone(),
+                }
             };
         }
         result.push(json!({"name":format!("claim_{verb}"),"description":format!("{verb} repository-wide ownership; no executor process control."),"inputSchema":{"type":"object","properties":props,"required":required,"additionalProperties":false}}));

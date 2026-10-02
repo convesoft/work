@@ -336,6 +336,9 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
                 | "--handoff"
                 | "--source"
                 | "--root"
+                | "--run"
+                | "--priority-max"
+                | "--persistence"
                 | "--param"
                 | "--existing"
         ) {
@@ -392,11 +395,16 @@ fn command_help(words: &[String]) -> Option<&'static str> {
         ["item", "--help"] => Some(
             "Usage: work [--json] [--worktree PATH] item COMMAND\nCommands: create, list, inspect, diagnose, ready, update, close, reopen, repair. Run work item COMMAND --help for details.",
         ),
+        [
+            "claim",
+            "next" | "acquire" | "inspect" | "list" | "release" | "recover" | "reassign",
+            "--help",
+        ] => Some(super::claims::HELP),
         ["item", "create", "--help"] => Some(
             "Usage: work item create --title TEXT [--body TEXT|-] [METADATA OPTIONS]\nCreate a durable item with a generated full ID; completion is manual by default. Body text is opaque; --body - reads stdin. Metadata: --completion manual|children, --priority 0..4, --parent ID, --label TEXT (repeatable), --model TEXT, --thinking TEXT.",
         ),
         ["item", "list", "--help"] => Some(
-            "Usage: work item list\nList valid durable items in canonical ID order, including recorded state, graph state, relations, and blockers. Use item diagnose for malformed files.",
+            "Usage: work item list [--view resolved|checkout] [--root ITEM] [--run RUN_ID] [--label TEXT]... [--priority-max 0..4] [--persistence material|wisp]\nList matching items in canonical ID order, with state, relations, ownership and blockers. Filters combine with AND; labels are exact. --run requires the resolved view and a current run. Listing never reserves.",
         ),
         ["item", "inspect", "--help"] => Some(
             "Usage: work item inspect ID [--view resolved|checkout] [--raw]\nInspect an item by full ID or unique lowercase prefix, optionally prefixed with w-. --raw reads the physical selected checkout and requires a full ID and exposes original source bytes and diagnostics.",
@@ -405,7 +413,7 @@ fn command_help(words: &[String]) -> Option<&'static str> {
             "Usage: work item diagnose\nReport source and graph diagnostics for the selected checkout. Invalid graphs can still be inspected, but refuse readiness and structured mutations.",
         ),
         ["item", "ready", "--help"] => Some(
-            "Usage: work item ready [--view resolved|checkout]\nList open executable manual items whose lifecycle prerequisites are resolved, ordered by priority then ID. Resolved readiness excludes claimed items; inspect shows their owner.",
+            "Usage: work item ready [--view resolved|checkout] [--root ITEM] [--run RUN_ID] [--label TEXT]... [--priority-max 0..4] [--persistence material|wisp]\nList matching executable items by priority then full ID. Filters combine with AND without removing graph prerequisites. Resolved readiness excludes claimed items; list/inspect shows ownership. --run requires the resolved view and a current run.",
         ),
         ["item", "update", "--help"] => Some(
             "Usage: work item update ID OPTIONS\nEdit supplied header fields only; preserve the existing body. Options: --title TEXT, --completion manual|children, --priority 0..4, --parent ID, --clear-parent, --label TEXT (repeatable), --clear-labels, --model TEXT, --clear-model, --thinking TEXT, --clear-thinking.",
@@ -450,7 +458,8 @@ fn command_help(words: &[String]) -> Option<&'static str> {
 fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
     match words {
         [noun, verb, tail @ ..] if noun == "item" => match verb.as_str() {
-            "list" | "ready" | "diagnose" if tail.is_empty() => Ok(()),
+            "list" | "ready" => super::selection::from_cli(tail).map(|_| ()),
+            "diagnose" if tail.is_empty() => Ok(()),
             "inspect" if tail.len() == 1 || (tail.len() == 2 && tail[1] == "--raw") => Ok(()),
             "create" => validate_metadata_syntax(tail, true),
             "update" if tail.len() >= 2 => validate_metadata_syntax(&tail[1..], false),
@@ -542,8 +551,12 @@ fn item_command(
     args: &[String],
 ) -> Result<Value, CliError> {
     match verb {
-        "list" if args.is_empty() => Ok(json!({"items":items_view(ops,&ops.list()?)?})),
-        "ready" if args.is_empty() => Ok(json!({"items":items_view(ops,&ops.ready()?)?})),
+        "list" => Ok(
+            json!({"items":items_view(ops,&ops.list_filtered(&super::selection::from_cli(args)?)?)?}),
+        ),
+        "ready" => Ok(
+            json!({"items":items_view(ops,&ops.ready_filtered(&super::selection::from_cli(args)?)?)?}),
+        ),
         "diagnose" if args.is_empty() => {
             let store = ops.view()?;
             let graph = ItemGraph::from_store(&store);
@@ -1122,7 +1135,7 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|inspect|list|release|recover|reassign, handoff create|inspect|list|receivers|prune, run start|inspect|list|attach|detach, workspace register|inspect|list|bind|unbind, session set|list|remove, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|next|inspect|list|release|recover|reassign, handoff create|inspect|list|receivers|prune, run start|inspect|list|attach|detach, workspace register|inspect|list|bind|unbind, session set|list|remove, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
 Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, work handoff --help, work workspace --help, work session --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
