@@ -170,7 +170,24 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 45);
+    assert_eq!(tools.len(), 46);
+    let selection = [
+        "root",
+        "run_id",
+        "labels_all",
+        "priority_max",
+        "persistence",
+    ];
+    let next = tools.iter().find(|t| t["name"] == "claim_next").unwrap();
+    for name in ["item_list", "item_ready"] {
+        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+        for field in selection {
+            assert_eq!(
+                tool["inputSchema"]["properties"][field],
+                next["inputSchema"]["properties"][field]
+            );
+        }
+    }
     for name in [
         "item_create",
         "item_ready",

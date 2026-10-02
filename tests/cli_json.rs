@@ -221,11 +221,11 @@ fn durable_loop_and_machine_readable_errors() {
         2,
         "invalid_argument",
     );
-    error(f.call(&["claim", "next"]), 2, "usage");
+    error(f.call(&["claim", "next"]), 2, "invalid_argument");
     error(
         call(&std::env::temp_dir(), &["claim", "next"], None),
         2,
-        "usage",
+        "invalid_argument",
     );
     error(
         call(&std::env::temp_dir(), &["item", "create", "--title"], None),

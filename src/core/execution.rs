@@ -11,6 +11,7 @@ use super::operations::{
     RawInspection, RelationKind,
 };
 use super::project::Project;
+use super::selection::{SelectionFilters, SelectionScope};
 use super::storage::{Storage, StorageErrorCode, StorageInspection, StorageState};
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -120,55 +121,65 @@ impl ExecutionOperations {
         }
     }
     pub fn list(&self) -> ExecutionResult<Vec<Inspection>> {
-        match self.guard(false)? {
-            None => Ok(self.physical().list()?),
-            Some(g) => {
-                let v = ResolvedView::load(&g)?;
-                let graph = ItemGraph::from_store(&v.store);
-                let mut result: Vec<_> = v
-                    .store
-                    .files
-                    .iter()
-                    .filter(|f| f.is_valid())
-                    .filter_map(|f| f.header.as_ref())
-                    .map(|h| inspect_with_snapshot(&v, &graph, &v.ownership, &h.id))
-                    .collect::<ExecutionResult<_>>()?;
-                result.sort_by(|a, b| {
-                    a.file
-                        .header
-                        .as_ref()
-                        .unwrap()
-                        .id
-                        .cmp(&b.file.header.as_ref().unwrap().id)
-                });
-                Ok(result)
-            }
-        }
+        self.list_filtered(&SelectionFilters::default())
     }
     pub fn ready(&self) -> ExecutionResult<Vec<Inspection>> {
-        let Some(g) = self.guard(false)? else {
-            return Ok(self.physical().ready()?);
+        self.ready_filtered(&SelectionFilters::default())
+    }
+    pub fn list_filtered(&self, filters: &SelectionFilters) -> ExecutionResult<Vec<Inspection>> {
+        self.select_read(filters, false)
+    }
+    pub fn ready_filtered(&self, filters: &SelectionFilters) -> ExecutionResult<Vec<Inspection>> {
+        self.select_read(filters, true)
+    }
+    fn select_read(
+        &self,
+        filters: &SelectionFilters,
+        ready: bool,
+    ) -> ExecutionResult<Vec<Inspection>> {
+        filters.validate(self.checkout_view)?;
+        let guard = self.guard(false)?;
+        let resolved = guard.as_ref().map(ResolvedView::load).transpose()?;
+        let physical;
+        let store = if let Some(v) = &resolved {
+            &v.store
+        } else {
+            physical = ItemStore::load(&self.project)?;
+            &physical
         };
-        let v = ResolvedView::load(&g)?;
-        let graph = ItemGraph::from_store(&v.store);
-        if !graph.is_valid() {
-            return Err(OperationError::InvalidSource(graph.diagnostics().to_vec()).into());
+        let graph = ItemGraph::from_store(store);
+        let scope = SelectionScope::new(filters, store, &graph, resolved.as_ref())?;
+        if ready {
+            require_valid(store)?;
+            if let Some(v) = &resolved {
+                v.ownership.as_ref().map_err(Clone::clone)?.exclusion()?;
+            }
         }
-        let snapshot = v.ownership.as_ref().map_err(Clone::clone)?;
-        snapshot.exclusion()?;
         let mut result = Vec::new();
-        for file in &v.store.files {
-            if let Some(h) = &file.header {
-                let i = inspect_with_snapshot(&v, &graph, &v.ownership, &h.id)?;
-                if i.evaluation.as_ref().is_some_and(|e| e.executable) {
-                    result.push(i);
+        for file in store.files.iter().filter(|f| f.is_valid()) {
+            let h = file.header.as_ref().unwrap();
+            let material = resolved
+                .as_ref()
+                .is_none_or(|v| v.sources.contains_key(&h.id));
+            if scope.matches(h, material) {
+                let inspection = if let Some(v) = &resolved {
+                    inspect_with_snapshot(v, &graph, &v.ownership, &h.id)?
+                } else {
+                    operations::inspect_with_graph(store, &graph, &h.id)?
+                };
+                if !ready || inspection.evaluation.as_ref().is_some_and(|e| e.executable) {
+                    result.push(inspection);
                 }
             }
         }
-        result.sort_by_key(|i| {
-            let h = i.file.header.as_ref().unwrap();
-            (h.priority, h.id.clone())
-        });
+        if ready {
+            result.sort_by_key(|i| {
+                let h = i.file.header.as_ref().unwrap();
+                (h.priority, h.id.clone())
+            });
+        } else {
+            result.sort_by_key(|i| i.file.header.as_ref().unwrap().id.clone());
+        }
         Ok(result)
     }
     pub fn inspect_raw(&self, id: &str) -> ExecutionResult<RawInspection> {
@@ -620,19 +631,70 @@ impl ExecutionOperations {
             }
             candidate.session_record_id = Some(id.into());
         }
-        ClaimStore::validate_acquire(&g, &candidate, actor, session)?;
-        let source_lock = material_source_lock(&v, &candidate.header.id)?;
+        self.acquire_candidate(&g, &v, candidate, actor, session)
+    }
+    pub fn claim_next(
+        &self,
+        filters: &SelectionFilters,
+        actor: &str,
+        session: &SessionIdentity,
+    ) -> ExecutionResult<Option<(Value, Inspection)>> {
+        filters.validate(false)?;
+        if actor.is_empty() {
+            return Err(ExecutionError::new(
+                "invalid_argument",
+                "actor must be nonempty",
+            ));
+        }
+        session.validate()?;
+        let g = CoordinationGuard::acquire(&self.project, true)?;
+        let v = ResolvedView::load(&g)?;
+        require_valid(&v.store)?;
+        let graph = ItemGraph::from_store(&v.store);
+        let scope = SelectionScope::new(filters, &v.store, &graph, Some(&v))?;
+        v.ownership.as_ref().map_err(Clone::clone)?.exclusion()?;
+        let mut eligible = Vec::new();
+        for file in &v.store.files {
+            let h = file.header.as_ref().unwrap();
+            if scope.matches(h, v.sources.contains_key(&h.id)) {
+                let i = inspect_with_snapshot(&v, &graph, &v.ownership, &h.id)?;
+                if i.evaluation.as_ref().is_some_and(|e| e.executable) {
+                    eligible.push(h);
+                }
+            }
+        }
+        eligible.sort_by_key(|h| (h.priority, &h.id));
+        let Some(header) = eligible.first() else {
+            v.recheck(&g)?;
+            g.verify()?;
+            return Ok(None);
+        };
+        let candidate = candidate(&g, &v, &header.id)?;
+        self.acquire_candidate(&g, &v, candidate, actor, session)
+            .map(Some)
+    }
+    fn acquire_candidate(
+        &self,
+        g: &CoordinationGuard,
+        v: &ResolvedView,
+        mut candidate: ClaimCandidate,
+        actor: &str,
+        session: &SessionIdentity,
+    ) -> ExecutionResult<(Value, Inspection)> {
+        ClaimStore::validate_acquire(g, &candidate, actor, session)?;
+        let source_lock = material_source_lock(v, &candidate.header.id)?;
         let mut created = Vec::new();
         let result = (|| {
-            prepare_claim_context(&g, &v, &mut candidate, &mut created)?;
-            let result = ClaimStore::acquire_checked(&g, &candidate, actor, session, || {
-                verify_claim_source(&source_lock, &v, &g)
+            verify_claim_source(&source_lock, v, g)?;
+            prepare_claim_context(g, v, &mut candidate, &mut created)?;
+            let result = ClaimStore::acquire_checked(g, &candidate, actor, session, || {
+                verify_claim_source(&source_lock, v, g)
             })?;
             created.push(json!({"id":result.claim.id,"path":encode_path(&g.root_path().join(format!("claims/{}.yaml",result.claim.id)))}));
-            let current = ResolvedView::load(&g).map_err(claim_postpublication_error)?;
+            let current = ResolvedView::load(g).map_err(claim_postpublication_error)?;
             let inspection =
-                inspect(&g, &current, &candidate.header.id).map_err(claim_postpublication_error)?;
-            verify_claim_source(&source_lock, &v, &g).map_err(claim_postpublication_error)?;
+                inspect(g, &current, &candidate.header.id).map_err(claim_postpublication_error)?;
+            verify_claim_source(&source_lock, v, g).map_err(claim_postpublication_error)?;
             Ok((result.claim.to_json(), inspection))
         })();
         result.map_err(|error| with_setup_progress(error, &created))
@@ -1973,6 +2035,60 @@ mod tests {
             fixture.ops.inspect(&id).unwrap().file.header.unwrap().title,
             "original"
         );
+    }
+
+    #[test]
+    fn claim_next_source_conflicts_preserve_pre_and_post_publication_evidence() {
+        for after in [false, true] {
+            let fixture = Fixture::new();
+            let id = fixture_item(&fixture);
+            Storage::new(fixture.ops.project.clone())
+                .initialize()
+                .unwrap();
+            let path = fixture.root.join(format!(".work/items/{id}.md"));
+            let hook = super::super::storage::files::on_nth(
+                if after {
+                    "before_publication"
+                } else {
+                    "checkout_verify"
+                },
+                if after { 3 } else { 1 },
+                move || {
+                    let raw = fs::read_to_string(&path).unwrap();
+                    fs::write(path, format!("{raw}\nExternal editor change\n")).unwrap();
+                },
+            );
+            let error = fixture
+                .ops
+                .claim_next(&SelectionFilters::default(), "owner", &test_session())
+                .unwrap_err();
+            drop(hook);
+            assert_eq!(error.code, "conflict");
+            assert_eq!(
+                error.details["publication"],
+                if after { "published" } else { "not_published" }
+            );
+            let guard = CoordinationGuard::acquire(&fixture.ops.project, false).unwrap();
+            let current = ClaimStore::current(&guard, &id).unwrap();
+            if after {
+                let claim = current.unwrap();
+                assert!(
+                    error.details["partial"]["created"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|r| r["id"] == claim.id)
+                );
+            } else {
+                assert!(current.is_none());
+                assert!(
+                    error.details["partial"]["created"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[test]
