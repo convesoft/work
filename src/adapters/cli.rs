@@ -268,6 +268,16 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
         let (verb, fields) = super::handoffs::from_cli(&words[1..])?;
         return super::handoffs::execute(&discover(selected)?, &verb, &fields);
     }
+    if words
+        .first()
+        .is_some_and(|w| matches!(w.as_str(), "workspace" | "session"))
+    {
+        if words.get(1).is_some_and(|w| w == "--help") {
+            return Ok(json!({"help":super::context::HELP}));
+        }
+        let (name, fields) = super::context::from_cli(&words[0], &words[1..])?;
+        return super::context::execute(&discover(selected)?, &name, &fields);
+    }
     if words.first().is_some_and(|w| w == "claim") {
         if words.get(1).is_some_and(|w| w == "--help") {
             return Ok(json!({"help":super::claims::HELP}));
@@ -1112,8 +1122,8 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|inspect|list|release|recover|reassign, handoff create|inspect|list|receivers|prune, run start|inspect|list|attach|detach, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
-Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|inspect|list|release|recover|reassign, handoff create|inspect|list|receivers|prune, run start|inspect|list|attach|detach, workspace register|inspect|list|bind|unbind, session set|list|remove, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
+Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, work handoff --help, work workspace --help, work session --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
 pub(super) fn encode_path(path: &Path) -> String {

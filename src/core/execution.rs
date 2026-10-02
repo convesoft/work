@@ -575,9 +575,51 @@ impl ExecutionOperations {
         actor: &str,
         session: &SessionIdentity,
     ) -> ExecutionResult<(Value, Inspection)> {
+        self.acquire_with_session_record(input, actor, session, None)
+    }
+    pub fn acquire_with_session_record(
+        &self,
+        input: &str,
+        actor: &str,
+        session: &SessionIdentity,
+        session_record_id: Option<&str>,
+    ) -> ExecutionResult<(Value, Inspection)> {
         let g = CoordinationGuard::acquire(&self.project, true)?;
         let v = ResolvedView::load(&g)?;
         let mut candidate = candidate(&g, &v, input)?;
+        if let Some(id) = session_record_id {
+            if !valid_id(id) {
+                return Err(ExecutionError::new(
+                    "invalid_argument",
+                    "session_record_id must be a full UUIDv4",
+                ));
+            }
+            let run_id = candidate.run_id.as_deref().ok_or_else(|| {
+                ExecutionError::new(
+                    "invalid_argument",
+                    "named-session context requires current run membership",
+                )
+            })?;
+            let record = v
+                .runs
+                .get(run_id)?
+                .sessions
+                .iter()
+                .find(|r| r.id == id)
+                .ok_or_else(|| {
+                    ExecutionError::new(
+                        "not_found",
+                        "session record is not in the item's current run",
+                    )
+                })?;
+            if &record.session != session {
+                return Err(ExecutionError::new(
+                    "invalid_argument",
+                    "session identity does not match named record",
+                ));
+            }
+            candidate.session_record_id = Some(id.into());
+        }
         ClaimStore::validate_acquire(&g, &candidate, actor, session)?;
         let source_lock = material_source_lock(&v, &candidate.header.id)?;
         let mut created = Vec::new();

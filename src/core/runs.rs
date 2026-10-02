@@ -22,6 +22,7 @@ pub struct RunRecord {
     pub source: EntitySource,
     pub wisps: Vec<ItemFile>,
     pub wisp_sources: BTreeMap<String, EntitySource>,
+    pub sessions: Vec<super::sessions::NamedSession>,
 }
 
 /// Validated material routing and claim IDs supplied by the coordinator under
@@ -213,8 +214,7 @@ impl RunStore {
                 wisp_sources.insert(item_id.to_owned(), item_source);
                 wisps.push(item);
             }
-            // Verify required empty directory exists, without implementing sessions.
-            guard.names(&dir.join("sessions"))?;
+            let sessions = super::sessions::load(guard, &id)?;
             if manifest.phase.is_terminal() && !wisps.is_empty() {
                 return Err(fail(
                     "invalid_format",
@@ -245,6 +245,7 @@ impl RunStore {
                 source,
                 wisps,
                 wisp_sources,
+                sessions,
             });
         }
         if records.iter().any(|r| {

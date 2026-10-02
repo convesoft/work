@@ -9,7 +9,6 @@
 #![allow(clippy::result_large_err)]
 
 mod format;
-pub(crate) use format::valid_timestamp;
 mod store;
 
 use serde_json::{Value, json};
@@ -19,6 +18,7 @@ use super::coordination::{ExecutionResult, SessionIdentity};
 use super::graph::Evaluation;
 use super::items::ItemHeader;
 
+pub(crate) use format::valid_timestamp;
 pub use store::ClaimStore;
 pub(crate) use store::OwnershipSnapshot;
 

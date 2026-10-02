@@ -5,7 +5,7 @@ use work::core::claims::{ClaimAuthorization, ClaimStore};
 use work::core::coordination::{CoordinationGuard, ExecutionError, SessionIdentity, valid_id};
 use work::core::execution::ExecutionOperations;
 use work::core::project::Project;
-pub(super) const HELP: &str = "Usage: work claim acquire ITEM --actor A --session-namespace N --session-id S | inspect CLAIM_ID | list [--item ITEM] [--current] | release CLAIM_ID --session-namespace N --session-id S [--reason TEXT] | recover CLAIM_ID --actor A --reason TEXT --executors-stopped | reassign CLAIM_ID --actor A --session-namespace N --session-id S --reason TEXT --executors-stopped\nClaim ID plus session identity authorizes ownership. No separate token or automatic expiry.";
+pub(super) const HELP: &str = "Usage: work claim acquire ITEM --actor A --session-namespace N --session-id S [--session-record ID] | inspect CLAIM_ID | list [--item ITEM] [--current] | release CLAIM_ID --session-namespace N --session-id S [--reason TEXT] | recover CLAIM_ID --actor A --reason TEXT --executors-stopped | reassign CLAIM_ID --actor A --session-namespace N --session-id S --reason TEXT --executors-stopped\nClaim ID plus session identity authorizes ownership. No separate token or automatic expiry.";
 fn invalid(s: impl Into<String>) -> CliError {
     CliError::new("invalid_argument", s)
 }
@@ -73,6 +73,7 @@ pub(super) fn from_cli(words: &[String]) -> Result<(String, Map<String, Value>),
             "--item" => "item",
             "--session-namespace" => "namespace",
             "--session-id" => "id",
+            "--session-record" => "session_record_id",
             "--current" => "current_only",
             "--executors-stopped" => "executors_stopped",
             _ => return Err(invalid(format!("unknown claim argument {flag}"))),
@@ -106,7 +107,7 @@ fn text<'a>(m: &'a Map<String, Value>, key: &str) -> &'a str {
 }
 fn validate(verb: &str, m: &Map<String, Value>) -> Result<(), CliError> {
     let (required, optional): (&[&str], &[&str]) = match verb {
-        "acquire" => (&["item", "actor", "session"], &[]),
+        "acquire" => (&["item", "actor", "session"], &["session_record_id"]),
         "inspect" => (&["claim_id"], &[]),
         "list" => (&[], &["item", "current_only"]),
         "release" => (&["claim_id", "session"], &["reason"]),
@@ -164,7 +165,12 @@ pub(super) fn execute(
     let ops = ExecutionOperations::new(project.clone());
     if verb == "acquire" {
         let session = SessionIdentity::from_json(&m["session"])?;
-        let (claim, item) = ops.acquire(text(m, "item"), text(m, "actor"), &session)?;
+        let (claim, item) = ops.acquire_with_session_record(
+            text(m, "item"),
+            text(m, "actor"),
+            &session,
+            m.get("session_record_id").and_then(Value::as_str),
+        )?;
         return Ok(json!({"claim":claim,"item":snapshot_item_value(&item)?,"changed":true}));
     }
     if verb == "reassign" {
@@ -223,7 +229,11 @@ pub(super) fn tools() -> Vec<Value> {
     let session = json!({"type":"object","properties":{"namespace":s,"id":s},"required":["namespace","id"],"additionalProperties":false});
     let mut result = Vec::new();
     for (verb, required, optional) in [
-        ("acquire", vec!["item", "actor", "session"], vec![]),
+        (
+            "acquire",
+            vec!["item", "actor", "session"],
+            vec!["session_record_id"],
+        ),
         ("inspect", vec!["claim_id"], vec![]),
         ("list", vec![], vec!["item", "current_only"]),
         ("release", vec!["claim_id", "session"], vec!["reason"]),
