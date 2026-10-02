@@ -261,6 +261,7 @@ fn create_context(g: &CoordinationGuard, path: &Path, id: &str, raw: &[u8]) -> E
     })
 }
 pub struct ResolvedView {
+    pub handoffs: ExecutionResult<Vec<super::handoffs::Handoff>>,
     pub runs: super::runs::RunStore,
     pub project: Project,
     pub store: ItemStore,
@@ -404,6 +405,7 @@ impl ResolvedView {
         }
         let store = ItemStore::from_candidate_files(files);
         Ok(Self {
+            handoffs: super::handoffs::HandoffStore::load(g),
             project,
             store,
             context,

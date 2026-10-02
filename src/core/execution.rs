@@ -225,11 +225,20 @@ impl ExecutionOperations {
         )
     }
     pub fn close(&self, id: &str, reason: Option<String>) -> ExecutionResult<Inspection> {
+        self.close_with_handoffs(id, reason, &[])
+    }
+    pub fn close_with_handoffs(
+        &self,
+        id: &str,
+        reason: Option<String>,
+        handoffs: &[super::handoffs::HandoffInput],
+    ) -> ExecutionResult<Inspection> {
         let fallback = reason.clone();
-        self.mutate(
-            id,
+        self.mutate_selected_handoffs(
             true,
-            |h| {
+            handoffs,
+            |_| Ok((id.to_owned(), ())),
+            |h, ()| {
                 if h.completion != Completion::Manual {
                     return Err(ExecutionError::new(
                         "invalid_argument",
@@ -282,7 +291,23 @@ impl ExecutionOperations {
         edit: impl FnOnce(&mut ItemHeader, T) -> ExecutionResult<()>,
         fallback: impl FnOnce(&DurableOperations) -> Result<Inspection, OperationError>,
     ) -> ExecutionResult<Inspection> {
-        let Some(g) = self.guard(true)? else {
+        self.mutate_selected_handoffs(complete, &[], select, edit, fallback)
+    }
+    fn mutate_selected_handoffs<T>(
+        &self,
+        complete: bool,
+        handoffs: &[super::handoffs::HandoffInput],
+        select: impl FnOnce(&ItemStore) -> ExecutionResult<(String, T)>,
+        edit: impl FnOnce(&mut ItemHeader, T) -> ExecutionResult<()>,
+        fallback: impl FnOnce(&DurableOperations) -> Result<Inspection, OperationError>,
+    ) -> ExecutionResult<Inspection> {
+        // Supplying context requires initialized coordination, even on a fresh clone.
+        let guard = if handoffs.is_empty() {
+            self.guard(true)?
+        } else {
+            Some(CoordinationGuard::acquire(&self.project, true)?)
+        };
+        let Some(g) = guard else {
             // The original operation loads and applies only its requested edit
             // under the checkout lock, preserving concurrent unrelated changes.
             return Ok(fallback(&self.fresh_physical())?);
@@ -303,74 +328,143 @@ impl ExecutionOperations {
         edit(&mut h, selected)?;
         let body = before.body.as_deref().unwrap();
         validate_candidate(&v.store, &before.path, &h, body)?;
+        if !handoffs.is_empty() {
+            super::handoffs::HandoffStore::load(&g)?;
+        }
+        let prepared = handoffs
+            .iter()
+            .map(|input| super::execution_handoffs::prepare(&g, &v, input, &self.authorization))
+            .collect::<ExecutionResult<Vec<_>>>()?;
         v.recheck(&g)?;
         g.verify()?;
         let changed = before.header.as_ref() != Some(&h);
-        let recovery = if let Some(root) = v.sources.get(&h.id) {
-            let mut writer = CheckoutWriter::open(root)?;
+        let mut saved = Vec::new();
+        let result = (|| {
+            for input in &prepared {
+                let handoff = super::handoffs::HandoffStore::create(&g, input)?;
+                saved.push(json!({"id":handoff.id(),"path":encode_path(&handoff.path)}));
+            }
+            // Outgoing context is now retained. Recheck before modifying the source.
+            #[cfg(test)]
+            if !prepared.is_empty() {
+                super::storage::files::inject("handoffs_saved", &before.path)?;
+            }
             v.recheck(&g)?;
-            if !changed {
-                None
-            } else {
-                writer.publish(&h, body, Some(&before))?
-            }
-        } else if changed {
-            let run = v
-                .runs
-                .membership(&h.id)
-                .ok_or_else(|| ExecutionError::new("source_unavailable", "wisp run missing"))?;
-            let expected = &run.wisp_sources[&h.id];
-            let (_, recovery) = super::runs::RunStore::replace_wisp_with_recovery(
-                &g,
-                &run.manifest.id,
-                expected,
-                &h,
-                body,
-            )
-            .map_err(|error| {
-                if error.details["publication"] == "published" {
-                    saved_item_error(error, &h.id, &before.path, "updated")
+            let recovery = if let Some(root) = v.sources.get(&h.id) {
+                let mut writer = CheckoutWriter::open(root)?;
+                v.recheck(&g)?;
+                if !changed {
+                    None
                 } else {
-                    error
+                    writer.publish(&h, body, Some(&before))?
                 }
-            })?;
-            recovery
-        } else {
-            None
-        };
-        let mut endings = Vec::new();
-        if complete && let Some(claim) = claim {
-            let ended = ClaimStore::completed(
-                &g,
-                &claim.id,
-                &claim.session,
-                h.close_reason.as_deref().unwrap_or(""),
-            )
-            .map_err(|e| {
-                let mut error = completion_error(e, &h.id, &before.path);
-                if let Some(path) = &recovery {
-                    error.details["previous_source_path"] = json!(encode_path(path));
-                }
-                error
-            })?;
-            if ended.changed {
-                endings.push(json!({"id":claim.id,"path":encode_path(&g.root_path().join(format!("claims/{}.end.yaml",claim.id)))}));
-            }
-        }
-        let mut result = reload_valid_inspection(&g, &h.id).map_err(|e| {
-            let error = if changed {
-                published_reload_error(e, &h.id, &before.path, recovery.as_deref(), false)
+            } else if changed {
+                let run = v
+                    .runs
+                    .membership(&h.id)
+                    .ok_or_else(|| ExecutionError::new("source_unavailable", "wisp run missing"))?;
+                let expected = &run.wisp_sources[&h.id];
+                let (_, recovery) = super::runs::RunStore::replace_wisp_with_recovery(
+                    &g,
+                    &run.manifest.id,
+                    expected,
+                    &h,
+                    body,
+                )
+                .map_err(|error| {
+                    if error.details["publication"] == "published" {
+                        saved_item_error(error, &h.id, &before.path, "updated")
+                    } else {
+                        error
+                    }
+                })?;
+                recovery
             } else {
-                e
+                None
             };
-            if endings.is_empty() {
-                error
-            } else {
-                with_setup_progress(claim_postpublication_error(error), &endings)
+            let mut endings = Vec::new();
+            if complete && let Some(claim) = claim {
+                let ended = ClaimStore::completed(
+                    &g,
+                    &claim.id,
+                    &claim.session,
+                    h.close_reason.as_deref().unwrap_or(""),
+                )
+                .map_err(|e| {
+                    let mut error = completion_error(e, &h.id, &before.path);
+                    if let Some(path) = &recovery {
+                        error.details["previous_source_path"] = json!(encode_path(path));
+                    }
+                    error
+                })?;
+                if ended.changed {
+                    endings.push(json!({"id":claim.id,"path":encode_path(&g.root_path().join(format!("claims/{}.end.yaml",claim.id)))}));
+                }
             }
-        })?;
-        result.recovery_path = recovery;
-        Ok(result)
+            let mut result = reload_valid_inspection(&g, &h.id).map_err(|e| {
+                let error = if changed {
+                    published_reload_error(e, &h.id, &before.path, recovery.as_deref(), false)
+                } else {
+                    e
+                };
+                if endings.is_empty() {
+                    error
+                } else {
+                    with_setup_progress(claim_postpublication_error(error), &endings)
+                }
+            })?;
+            result.recovery_path = recovery;
+            if !saved.is_empty() {
+                result.context["saved_handoffs"] = json!(saved);
+            }
+            // Best-effort retention cleanup is after completion and its ending.
+            // Failure is explicit; completed work is never rolled back.
+            if complete {
+                let pruning = (|| {
+                    let current = ResolvedView::load(&g)?;
+                    super::handoffs::HandoffStore::prune(&g, &current, None)
+                })();
+                let pruned = pruning.map_err(|mut e| {
+                    if e.details.get("publication").is_none() {
+                        e.details["publication"] = json!("published");
+                    }
+                    if let Some(path) = &result.recovery_path {
+                        e.details["previous_source_path"] = json!(encode_path(path));
+                    }
+                    let e = completion_error(e, &h.id, &before.path);
+                    with_setup_progress(e, &endings)
+                })?;
+                if let Some(incoming) = result.context["incoming_handoffs"].as_array_mut() {
+                    incoming.retain(|h| {
+                        !pruned["deleted"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|d| d["id"] == h["id"])
+                    });
+                }
+                result.context["handoff_pruning"] = pruned;
+            }
+            Ok(result)
+        })();
+        result.map_err(|mut e| {
+            e = with_setup_progress(e, &saved);
+            let known: Vec<_> = e.details["partial"]["created"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|record| {
+                    record["path"]
+                        .as_str()
+                        .is_some_and(|path| path.contains("/handoffs/"))
+                })
+                .cloned()
+                .collect();
+            if !known.is_empty() {
+                e.details["saved_handoffs"] = json!(known);
+            }
+            e
+        })
     }
     pub fn relation_add(
         &self,
@@ -786,6 +880,21 @@ fn inspect_with_snapshot(
     i.context = json!({"source_worktree":v.sources.get(id).map(|p|encode_path(p)),"persistence":if v.sources.contains_key(id){"material"}else{"wisp"},"run_id":v.run_ids.get(id),"claim":claim.map(|c|c.to_json())});
     if let Some(w) = warning {
         i.context["ownership_warning"] = w;
+    }
+    match &v.handoffs {
+        Ok(handoffs) => {
+            i.context["incoming_handoffs"] = json!(
+                handoffs
+                    .iter()
+                    .filter(|h| h.receivers().any(|receiver| receiver == id))
+                    .map(|h| h.to_json())
+                    .collect::<Vec<_>>()
+            )
+        }
+        Err(e) => {
+            i.context["incoming_handoffs"] = Value::Null;
+            i.context["handoff_warning"] = json!({"code":e.code,"message":e.message,"path":e.path.as_deref().map(encode_path)});
+        }
     }
     Ok(i)
 }

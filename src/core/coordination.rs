@@ -346,10 +346,17 @@ impl CoordinationGuard {
         }
         dir.verify()?;
         self.verify()?;
+        #[cfg(test)]
+        super::storage::files::inject("entity_before_delete", &dir.path.join(&name))?;
         rustix::fs::unlinkat(&dir.file, name.as_str(), rustix::fs::AtFlags::empty())
             .map_err(std::io::Error::from)?;
-        dir.sync()
+        #[cfg(test)]
+        let synced = super::storage::files::inject("entity_delete_sync", &dir.path.join(&name))
             .map_err(ExecutionError::from)
+            .and_then(|_| dir.sync().map_err(ExecutionError::from));
+        #[cfg(not(test))]
+        let synced = dir.sync().map_err(ExecutionError::from);
+        synced
             .and_then(|_| dir.verify().map_err(ExecutionError::from))
             .and_then(|_| self.verify())
             .map_err(|e| {

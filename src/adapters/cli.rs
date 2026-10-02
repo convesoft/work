@@ -259,6 +259,15 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
             result
         };
     }
+    if words.first().is_some_and(|w| w == "handoff") {
+        if words.get(1).is_some_and(|w| w == "--help")
+            || words.get(2).is_some_and(|w| w == "--help")
+        {
+            return Ok(json!({"help":super::handoffs::HELP}));
+        }
+        let (verb, fields) = super::handoffs::from_cli(&words[1..])?;
+        return super::handoffs::execute(&discover(selected)?, &verb, &fields);
+    }
     if words.first().is_some_and(|w| w == "claim") {
         if words.get(1).is_some_and(|w| w == "--help") {
             return Ok(json!({"help":super::claims::HELP}));
@@ -314,6 +323,7 @@ fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
                 | "--model"
                 | "--thinking"
                 | "--reason"
+                | "--handoff"
                 | "--source"
                 | "--root"
                 | "--param"
@@ -391,7 +401,7 @@ fn command_help(words: &[String]) -> Option<&'static str> {
             "Usage: work item update ID OPTIONS\nEdit supplied header fields only; preserve the existing body. Options: --title TEXT, --completion manual|children, --priority 0..4, --parent ID, --clear-parent, --label TEXT (repeatable), --clear-labels, --model TEXT, --clear-model, --thinking TEXT, --clear-thinking.",
         ),
         ["item", "close", "--help"] => Some(
-            "Usage: work item close ID [--reason TEXT]\nRecord a manual item as done with an optional opaque reason. Closing resolves its obligation; it does not close other manual items.",
+            "Usage: work item close ID [--reason TEXT] [--handoff JSON]...\nRecord a manual item as done with an optional opaque reason. Closing resolves its obligation; it does not close other manual items.",
         ),
         ["item", "reopen", "--help"] => Some(
             "Usage: work item reopen ID\nRecord a manual item as open and remove its close reason. Graph state is recomputed without reopening other manual items.",
@@ -434,7 +444,7 @@ fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
             "inspect" if tail.len() == 1 || (tail.len() == 2 && tail[1] == "--raw") => Ok(()),
             "create" => validate_metadata_syntax(tail, true),
             "update" if tail.len() >= 2 => validate_metadata_syntax(&tail[1..], false),
-            "close" if tail.len() == 1 || (tail.len() == 3 && tail[1] == "--reason") => Ok(()),
+            "close" if !tail.is_empty() => parse_close(&tail[1..]).map(|_| ()),
             "reopen" if tail.len() == 1 => Ok(()),
             "repair" if tail.len() == 3 && tail[1] == "--source" && tail[2] == "-" => Ok(()),
             _ => Err(usage("unknown item command or arguments")),
@@ -494,6 +504,27 @@ fn validate_metadata_syntax(args: &[String], create: bool) -> Result<(), CliErro
     Ok(())
 }
 
+fn parse_close(
+    args: &[String],
+) -> Result<(Option<String>, Vec<work::core::handoffs::HandoffInput>), CliError> {
+    let mut reason = None;
+    let mut handoffs = Vec::new();
+    let mut chunks = args.chunks_exact(2);
+    for pair in &mut chunks {
+        match pair[0].as_str() {
+            "--reason" if reason.is_none() => reason = Some(pair[1].clone()),
+            "--handoff" => handoffs.push(work::core::handoffs::HandoffInput::from_json(
+                &serde_json::from_str::<Value>(&pair[1])
+                    .map_err(|_| usage("invalid handoff JSON"))?,
+            )?),
+            _ => return Err(usage("item close ID [--reason TEXT] [--handoff JSON]...")),
+        }
+    }
+    if !chunks.remainder().is_empty() {
+        return Err(usage("missing close option value"));
+    }
+    Ok((reason, handoffs))
+}
 fn item_command(
     project: &Project,
     ops: &ExecutionOperations,
@@ -545,12 +576,10 @@ fn item_command(
         }
         "close" if !args.is_empty() => {
             let id = resolve(project, &args[0])?;
-            let reason = match &args[1..] {
-                [] => None,
-                [flag, value] if flag == "--reason" => Some(value.clone()),
-                _ => return Err(usage("item close ID [--reason TEXT]")),
-            };
-            Ok(json!({"item":mutation_item_value(project,&ops.close(&id,reason)?)?}))
+            let (reason, handoffs) = parse_close(&args[1..])?;
+            Ok(
+                json!({"item":snapshot_item_value(&ops.close_with_handoffs(&id,reason,&handoffs)?)?}),
+            )
         }
         "reopen" if args.len() == 1 => {
             let id = resolve(project, &args[0])?;
@@ -1083,7 +1112,7 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|inspect|list|release|recover|reassign, run start|inspect|list|attach|detach, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|inspect|list|release|recover|reassign, handoff create|inspect|list|receivers|prune, run start|inspect|list|attach|detach, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
 Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
