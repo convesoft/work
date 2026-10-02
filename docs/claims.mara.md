@@ -21,7 +21,7 @@ All mutations reload claims under an exclusive `CoordinationGuard`. Acquire/reas
 
 | CLI | MCP | Arguments beyond selected worktree | Result |
 | --- | --- | --- | --- |
-| `claim acquire ITEM --actor A --session-namespace N --session-id S` | `claim_acquire` | `item, actor, session` | `{claim, item, changed:true}` |
+| `claim acquire ITEM --actor A --session-namespace N --session-id S [--session-record ID]` | `claim_acquire` | `item, actor, session, session_record_id?` | `{claim, item, changed:true}` |
 | `claim inspect CLAIM_ID` | `claim_inspect` | `claim_id` | `{claim, ending, current}` |
 | `claim list [--item ITEM] [--current]` | `claim_list` | optional `item`, `current_only` default false | `{claims:[{claim,ending,current}]}` |
 | `claim release CLAIM_ID --session-namespace N --session-id S [--reason TEXT]` | `claim_release` | `claim_id, session, reason?` | `{claim, ending, changed}` |

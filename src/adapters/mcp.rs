@@ -95,6 +95,7 @@ fn handle(request: Value, initialized: &mut bool) -> Option<Value> {
             if !TOOL_NAMES.contains(&name)
                 && !super::claims::tools().iter().any(|t| t["name"] == name)
                 && !super::runs::tools().iter().any(|t| t["name"] == name)
+                && !super::context::tools().iter().any(|t| t["name"] == name)
                 && !super::handoffs::tools().iter().any(|t| t["name"] == name)
             {
                 return Some(rpc_error(id, -32602, "Unknown tool"));
@@ -175,6 +176,7 @@ fn tools() -> Vec<Value> {
     result.retain(|t| t["name"] != "template_preview");
     result.extend(super::runs::tools());
     result.extend(super::claims::tools());
+    result.extend(super::context::tools());
     result.extend(super::handoffs::tools());
     result
 }
@@ -489,6 +491,9 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
     if let Some(verb) = name.strip_prefix("storage_") {
         let request = super::storage::from_fields(verb, args)?;
         return super::storage::execute(&selected(args)?, request);
+    }
+    if name.starts_with("workspace_") || name.starts_with("session_") {
+        return super::context::execute(&selected(args)?, name, args);
     }
     if name.starts_with("run_") || matches!(name, "template_preview" | "template_expand") {
         super::runs::validate(name, args)?;

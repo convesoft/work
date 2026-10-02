@@ -24,8 +24,10 @@ pub struct MaterialBinding {
 pub struct ContextStore {
     pub workspaces: BTreeMap<String, Workspace>,
     pub bindings: BTreeMap<String, MaterialBinding>,
+    pub(crate) workspace_sources: BTreeMap<String, EntitySource>,
+    pub(crate) binding_sources: BTreeMap<String, EntitySource>,
 }
-fn envelope(v: &Value, g: &CoordinationGuard) -> ExecutionResult<()> {
+pub(crate) fn envelope(v: &Value, g: &CoordinationGuard) -> ExecutionResult<()> {
     match v.get("format_version").and_then(Value::as_u64) {
         Some(1) => {}
         Some(n) if n > 1 => {
@@ -63,6 +65,7 @@ fn decode_record<T>(
 impl ContextStore {
     pub fn load(g: &CoordinationGuard) -> ExecutionResult<Self> {
         let mut workspaces = BTreeMap::new();
+        let mut workspace_sources = BTreeMap::new();
         for name in g.names(Path::new("workspaces"))? {
             if name == "items" {
                 continue;
@@ -75,7 +78,8 @@ impl ContextStore {
                         .at(g.root_path().join("workspaces").join(&name))
                 })?;
             let path = Path::new("workspaces").join(&name);
-            let workspace = decode_record(&g.read(&path)?.raw, &g.root_path().join(&path), |v| {
+            let source = g.read(&path)?;
+            let workspace = decode_record(&source.raw, &g.root_path().join(&path), |v| {
                 envelope(&v, g)?;
                 exact_keys(
                     &v,
@@ -103,6 +107,31 @@ impl ContextStore {
                         "invalid workspace state",
                     ));
                 }
+                if !super::claims::valid_timestamp(&string(&v, "created_at")?) {
+                    return Err(ExecutionError::new(
+                        "invalid_format",
+                        "created_at must be RFC3339",
+                    ));
+                }
+                if let Some(cleanup) = v.get("cleanup") {
+                    exact_keys(
+                        cleanup,
+                        &["item_id", "controller_workspace_id", "started_at"],
+                        &["failure"],
+                    )?;
+                    if !valid_id(&string(cleanup, "item_id")?)
+                        || !valid_id(&string(cleanup, "controller_workspace_id")?)
+                        || !super::claims::valid_timestamp(&string(cleanup, "started_at")?)
+                    {
+                        return Err(ExecutionError::new(
+                            "invalid_format",
+                            "invalid workspace cleanup context",
+                        ));
+                    }
+                    if cleanup.get("failure").is_some() {
+                        string(cleanup, "failure")?;
+                    }
+                }
                 for key in ["created_at", "branch", "commit"] {
                     if v.get(key).is_some() {
                         string(&v, key)?;
@@ -123,6 +152,7 @@ impl ContextStore {
                 })
             })?;
             workspaces.insert(id.to_owned(), workspace);
+            workspace_sources.insert(id.to_owned(), source);
         }
         let names = match g.names(Path::new("workspaces/items")) {
             Ok(v) => v,
@@ -130,6 +160,7 @@ impl ContextStore {
             Err(e) => return Err(e),
         };
         let mut bindings = BTreeMap::new();
+        let mut binding_sources = BTreeMap::new();
         for name in names {
             let path = Path::new("workspaces/items").join(&name);
             let absolute = g.root_path().join(&path);
@@ -139,7 +170,8 @@ impl ContextStore {
                 .ok_or_else(|| {
                     ExecutionError::new("invalid_format", "unexpected binding entry").at(&absolute)
                 })?;
-            let binding = decode_record(&g.read(&path)?.raw, &absolute, |v| {
+            let source = g.read(&path)?;
+            let binding = decode_record(&source.raw, &absolute, |v| {
                 envelope(&v, g)?;
                 exact_keys(
                     &v,
@@ -166,13 +198,24 @@ impl ContextStore {
                 })
             })?;
             bindings.insert(id.into(), binding);
+            binding_sources.insert(id.into(), source);
         }
         Ok(Self {
             workspaces,
             bindings,
+            workspace_sources,
+            binding_sources,
         })
     }
     pub fn register(g: &CoordinationGuard, path: &Path) -> ExecutionResult<Workspace> {
+        Self::register_observed(g, path, None, None)
+    }
+    pub(crate) fn register_observed(
+        g: &CoordinationGuard,
+        path: &Path,
+        branch: Option<&str>,
+        commit: Option<&str>,
+    ) -> ExecutionResult<Workspace> {
         let p = discover(Some(path))
             .map_err(|e| ExecutionError::new("source_unavailable", e.to_string()).at(path))?;
         if p.git_common_dir != g.project().git_common_dir {
@@ -196,7 +239,13 @@ impl ContextStore {
             return Ok(w.clone());
         }
         let id = new_id()?;
-        let value = json!({"format_version":1,"store_id":g.metadata.store_id,"recovery_generation":g.metadata.recovery_generation,"id":id,"path":encode_path(&p.worktree_root),"state":"open","created_at":now_timestamp()});
+        let mut value = json!({"format_version":1,"store_id":g.metadata.store_id,"recovery_generation":g.metadata.recovery_generation,"id":id,"path":encode_path(&p.worktree_root),"state":"open","created_at":now_timestamp()});
+        if let Some(branch) = branch {
+            value["branch"] = json!(branch);
+        }
+        if let Some(commit) = commit {
+            value["commit"] = json!(commit);
+        }
         create_context(
             g,
             &Path::new("workspaces").join(format!("{id}.yaml")),
@@ -434,6 +483,22 @@ impl ResolvedView {
             .at(g.root_path().join("runs")));
         }
         for run in &self.runs.records {
+            let sessions = super::sessions::directory(&run.manifest.id);
+            let expected: Vec<_> = run
+                .sessions
+                .iter()
+                .map(|r| format!("{}.yaml", r.id))
+                .collect();
+            if g.names(&sessions)? != expected {
+                return Err(ExecutionError::new(
+                    "conflict",
+                    "session entries changed after validation",
+                )
+                .at(g.root_path().join(&sessions)));
+            }
+            for r in &run.sessions {
+                g.recheck(&sessions.join(format!("{}.yaml", r.id)), &r.source)?;
+            }
             let items = Path::new("runs").join(&run.manifest.id).join("items");
             let expected_wisps: Vec<_> = run
                 .wisp_sources

@@ -7,7 +7,7 @@ description: Use Work to inspect and manage durable work items, relationships, c
 
 Work stores durable items as Git-tracked `.work/items/<full-id>.md` files. A consumer chooses its own items, bodies, and graph; Work does not require a particular workflow or interpret Markdown headings as structured acceptance fields. It tracks state and graph eligibility but does not execute work.
 
-This skill describes the durable item, template-preview and file-storage slices in this checkout. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
+This skill describes the durable item, shared storage, claim/run, workspace and named-session slices in this development checkout. The published alpha has fewer operations. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
 
 ## Select the view
 
@@ -43,4 +43,16 @@ Storage tools storage_inspect/storage_init/storage_recreate/storage_recover matc
 
 Item reads expose storage and storage_warning without losing available durable data. coordination_available describes foundation structure only; it does not prove claim ownership. For detected damage, inspect the exact diagnostic and pending operation before choosing explicit recovery. Recreation discards live operational meaning, retains surviving bytes and uses a fresh generation. Require stopped-executor and loss acknowledgements, exact observed identity/generation, and all clients stopped if the root/lock was lost. Never silently recreate or erase the intact lock. Resume only a supported reported operation ID; post-publication errors require inspecting retained context before retry.
 
-Backup/restore, claims, template publication, temporary runs, handoffs, sessions, workspace management, agent execution, Git worktree management, pull requests and CI actions are not implemented. Do not advertise or simulate those as Work operations.
+## Development execution context
+
+The development binary also advertises claim acquire/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
+
+Workspace register/inspect/list/bind/unbind match workspace_register/workspace_inspect/workspace_list/workspace_bind/workspace_unbind. Register an existing checkout in the same Git repository; registering its canonical path again reuses its ID. Branch/commit fields are supplied observations, not live Git state. Material binding selects the whole item file; explicit rebind establishes a surviving source after external merge/relocation. Unbind removes only that reference and refuses active claims/current-run context. Workspace users are derived from bindings, current runs and claims; unresolved users do not prove safe cleanup.
+
+Session set/list/remove match session_set/session_list/session_remove. Use `session set RUN NAME --namespace N --session-id S` with optional `--availability STATE --observed-at TIME`. Names are case-sensitive and run-scoped; rebinding retains the record ID. A claim may capture optional named context via `--session-record ID`/`session_record_id`, which must match its supplied external identity and current run at acquisition. Later name removal/rebinding never transfers current ownership or terminates the external session. Individual completion/release does not delete names or workspace context. Named mutations require active run phase; lists also inspect frozen/terminal metadata.
+
+Default item inspection resolves bound material files and live wisps. `--view checkout` (MCP `view:"checkout"`) explicitly selects physical durable files; raw inspect/repair remain physical. Missing bound sources are diagnostics, not permission to fall back to stale data. Test context mutations on disposable repos when the real backlog must remain intact.
+
+Handoff create/inspect/list/receivers/prune expose opaque receiver-scoped context. Item inspection and claiming return incoming handoffs; close can save outgoing context before item completion and claim ending. Pruning waits until all receiver obligations resolve. Inspect command help and MCP schemas for authorization and partial-result details.
+
+Backup/restore, claim-next selection, workspace cleanup, run squash/discard/finalization, agent execution, physical Git worktree management, pull requests and CI actions are not implemented. Do not advertise or simulate those as Work operations.
