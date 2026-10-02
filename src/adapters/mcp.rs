@@ -95,6 +95,7 @@ fn handle(request: Value, initialized: &mut bool) -> Option<Value> {
             if !TOOL_NAMES.contains(&name)
                 && !super::claims::tools().iter().any(|t| t["name"] == name)
                 && !super::runs::tools().iter().any(|t| t["name"] == name)
+                && !super::handoffs::tools().iter().any(|t| t["name"] == name)
             {
                 return Some(rpc_error(id, -32602, "Unknown tool"));
             }
@@ -159,6 +160,10 @@ fn tools() -> Vec<Value> {
         ) {
             tool["inputSchema"]["properties"]["authorization"] = json!({"type":"array","items":{"type":"object","properties":{"claim_id":{"type":"string"},"session":session},"required":["claim_id","session"],"additionalProperties":false}});
         }
+        if name == "item_close" {
+            tool["inputSchema"]["properties"]["handoffs"] =
+                json!({"type":"array","items":super::handoffs::input_schema()});
+        }
         if matches!(
             name.as_str(),
             "item_list" | "item_inspect" | "item_ready" | "item_diagnose"
@@ -170,6 +175,7 @@ fn tools() -> Vec<Value> {
     result.retain(|t| t["name"] != "template_preview");
     result.extend(super::runs::tools());
     result.extend(super::claims::tools());
+    result.extend(super::handoffs::tools());
     result
 }
 fn base_tools() -> Vec<Value> {
@@ -345,6 +351,7 @@ fn validate<'a>(name: &str, args: &'a Value) -> Result<&'a Map<String, Value>, C
             "boolean" => value.is_boolean(),
             "integer" => value.as_u64().is_some_and(|n| n <= 4),
             "array" if key == "authorization" => super::claims::authorization(Some(value)).is_ok(),
+            "array" if key == "handoffs" => super::handoffs::close_inputs(Some(value)).is_ok(),
             "array" => value
                 .as_array()
                 .is_some_and(|a| a.iter().all(Value::is_string)),
@@ -476,6 +483,9 @@ fn call(name: &str, input: &Value) -> Result<Value, CliError> {
 
 fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
     let args = validate(name, input)?;
+    if let Some(verb) = name.strip_prefix("handoff_") {
+        return super::handoffs::execute(&selected(args)?, verb, args);
+    }
     if let Some(verb) = name.strip_prefix("storage_") {
         let request = super::storage::from_fields(verb, args)?;
         return super::storage::execute(&selected(args)?, request);
@@ -583,7 +593,7 @@ fn call_inner(name: &str, input: &Value) -> Result<Value, CliError> {
         "item_close" => {
             let id = cli::resolve(&project, required(args, "id"))?;
             Ok(
-                json!({"item":cli::mutation_item_value(&project,&ops.close(&id,string(args,"reason").map(str::to_owned))?)?}),
+                json!({"item":cli::snapshot_item_value(&ops.close_with_handoffs(&id,string(args,"reason").map(str::to_owned),&super::handoffs::close_inputs(args.get("handoffs"))?)?)?}),
             )
         }
         "item_reopen" => {

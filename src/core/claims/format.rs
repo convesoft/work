@@ -62,7 +62,7 @@ fn timestamp(value: &Value, key: &str) -> ExecutionResult<String> {
     }
     Ok(text)
 }
-fn valid_timestamp(text: &str) -> bool {
+pub(crate) fn valid_timestamp(text: &str) -> bool {
     let bytes = text.as_bytes();
     if bytes.len() < 20
         || bytes[4] != b'-'

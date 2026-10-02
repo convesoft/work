@@ -9,6 +9,7 @@
 #![allow(clippy::result_large_err)]
 
 mod format;
+pub(crate) use format::valid_timestamp;
 mod store;
 
 use serde_json::{Value, json};
