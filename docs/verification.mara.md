@@ -128,7 +128,9 @@ Retired with REQ-GATE-CONTEXT. This proposed check assumed a Work-owned external
 :method: test
 :verifies: REQ-CLI-MCP-PARITY
 
-Use equivalent isolated fixtures to perform core item, relationship, readiness, claim, template, and run operations through CLI and MCP. Normalize transport envelopes and compare resulting files, coordination state, semantic results, and failure meanings. Cover invalid inputs and claim conflicts as well as success. Expect both surfaces to invoke the same product behavior.
+Use equivalent isolated fixtures to perform core item, relationship, readiness, claim, template, run, workspace, session, handoff and finalization operations through CLI and MCP. Normalize transport envelopes and fixture-specific generated IDs, paths, clocks and filesystem observations; compare complete semantic results, resulting authoritative files, coordination state and domain failure meanings. Cover invalid inputs, stale ownership, claim/lock conflicts, selected/full discard and independent retention as well as success. CLI syntax errors and MCP schema errors may have transport-specific codes, but must reject invalid input without publishing state. Expect both surfaces to invoke the same product behavior.
+
+Exercise the connected workflow, not just isolated helpers: parameterized material planning without an implicit run, explicit run start, mixed expansion in linked checkouts, distinct ready-child claims under contention, supplied context and handoffs, member results, caller-authored root digest and independent root lifecycle. Repeat the public workflow through genuine locally assembled/installed native and dispatcher packages on each available supported host, recording exact source/artifacts and untested hosts. Do not infer release/public-install or power-loss evidence from local smoke. The reusable harness is `scripts/verify-beta.mjs`, also invoked by `tests/beta_adoption.rs` and `scripts/smoke-packaged.sh`; a definition or accepted item is not a passing execution result.
 :::
 
 :::mara verification VER-EXECUTION-BOUNDARY

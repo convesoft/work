@@ -7,7 +7,7 @@ description: Use Work to inspect and manage durable work items, relationships, c
 
 Work stores durable items as Git-tracked `.work/items/<full-id>.md` files. A consumer chooses its own items, bodies, and graph; Work does not require a particular workflow or interpret Markdown headings as structured acceptance fields. It tracks state and graph eligibility but does not execute work.
 
-This skill describes the durable item, shared storage, claim/run, workspace and named-session slices in this development checkout. The published alpha has fewer operations. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
+This skill describes the item, storage, claim/run, template, workspace/session, handoff and finalization capabilities in this development checkout. The published alpha has only the durable loop. The unchanged alpha version string alone does not identify these development capabilities. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
 
 ## Select the view
 
@@ -51,7 +51,7 @@ Item reads expose storage and storage_warning without losing available durable d
 
 ## Development execution context
 
-The development binary also advertises claim acquire/next/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
+The development binary also advertises claim acquire/next/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach/squash/discard, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
 
 Workspace register/inspect/list/bind/unbind match workspace_register/workspace_inspect/workspace_list/workspace_bind/workspace_unbind. Register an existing checkout in the same Git repository; registering its canonical path again reuses its ID. Branch/commit fields are supplied observations, not live Git state. Material binding selects the whole item file; explicit rebind establishes a surviving source after external merge/relocation. Unbind removes only that reference and refuses active claims/current-run context. Workspace users are derived from bindings, current runs, claims and closing cleanup controller references; unresolved users do not prove safe cleanup.
 
@@ -63,4 +63,18 @@ Handoff create/inspect/list/receivers/prune expose opaque receiver-scoped contex
 
 Workspace cleanup begin/report/cancel match workspace_cleanup_begin/workspace_cleanup_report/workspace_cleanup_cancel. Retain commits/results externally and explicitly rebind/unbind all target material sources first. `workspace cleanup begin ID --item ITEM --controller-workspace ID` attests retention and marks closing under the shared lock; use a different surviving controller checkout. Work releases the lock before external removal and refuses new assignments while closing. Report external success with `workspace cleanup report ID --removed` (MCP `removed:true`), or failure with `--failure TEXT` (MCP `removed:false,failure`). Retry preserves the original context. Cancel reopens only the original path with the same repository identity. These commands never physically delete worktrees or close the cleanup item. After record deletion, inspect-not-found plus absent target path establishes completed cleanup; no extra receipt is created.
 
-Backup/restore, run squash/discard/finalization, agent execution, physical Git worktree management, pull requests and CI actions are not implemented. Do not advertise or simulate those as Work operations.
+## Retention and finalization
+
+Template expansion never starts a run implicitly. Material-only planning can expand without a run; wisps require an explicit current run. Finished active runs still retain wisps and named sessions, and their material roots remain independent.
+
+`run squash RUN --summary TEXT|-` / `run_squash` (`run_id,summary`) retains the caller's exact summary at `.work/digests/<root-id>/<run-id>.md` in the captured output workspace before deleting run wisps/sessions. It neither edits/closes the root nor creates a digest item. Explicitly bind the root to its intended output source first. Active claims and surviving references block cleanup, including completed material dependencies on wisps: retain results and explicitly remove those relations before squash.
+
+`run discard RUN --item WISP` (repeatable) or `--all` / `run_discard` (`run_id` and exactly `items` or `all:true`) abandons selected or all ephemeral work without a digest. Selected discard keeps the run active and its sessions. Full discard disposes the run; material files/bindings, historical claims, workspaces and existing digests survive. Independent handoffs whose unresolved receivers were all discarded remain inspectable with missing-receiver diagnostics; do not invent orphan cleanup.
+
+Inspect `partial`, `publication` and remaining IDs after an error. Pending cleanup freezes the recorded set; retry squash with the same summary or discard with the same set/mode. Matching terminal repeats are unchanged; completed subset deletion has no retry receipt. Use the [usage guide](../../docs/using-work.md) and actual help/schemas for exact results and safety rules.
+
+## Verification and boundaries
+
+`cargo test --locked --test beta_adoption -j 2` runs the connected public workflow on disposable linked fixtures through both surfaces. `scripts/smoke-packaged.sh` reuses that harness against installed native/dispatcher packages. Tests need Git and Node.js >=18. They inspect real resulting files, compare success/domain errors, and cover claims under contention, explicit recovery, retention and external cleanup. CLI syntax `usage` and MCP schema `invalid_argument` are both rejected input; domain failures retain matching codes. A passing local invocation is not other-host or publication evidence.
+
+Backup/restore, automatic expiry/orphan repair, the deferred storage-recovery follow-up, agent execution, physical Git worktree management, pull requests and CI actions remain outside the implemented slice. Do not advertise or simulate those as Work operations.

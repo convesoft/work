@@ -2,9 +2,9 @@
 
 The product model and initial scope are established. The remaining work below concerns engineering contracts and small interface conventions, not another workflow or orchestration layer. Record concrete decisions in Mara as those contracts are designed; keep unresolved details distinct from accepted behavior.
 
-## Contracts ready for implementation
+## Specified execution contracts
 
-The beta execution contracts are specified. Accepted knowledge is not implementation or test evidence. The next claims/run handoffs use these exact contracts; workers may choose private Rust helpers without reopening the settled product model.
+The beta execution APIs below are implemented in the development checkout, not in the published alpha. Accepted knowledge is not implementation or test evidence; consult actual source/checks and the [usage guide](using-work.md). Private Rust helpers do not reopen the settled product model. The delivery-owner column preserves the original decomposition, not an active dispatch or central-glue requirement.
 
 | Area | Settled contract | Delivery owner |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ No application records, separate material-state overlays, secret ownership token
 
 Backup/restore, automatic pruning/expiry, arbitrary wisp promotion, pagination, remote coordination and the accepted foundation recovery follow-up remain deferred; they do not block these handoffs. Release verification and actual beta version/publication remain the release item's responsibility. CLI command names and JSON fields for the execution slices are now specified; internal Rust decomposition beyond the ownership handoff is an implementation choice.
 
-The implementation dispatch checklist and file ownership are in [the beta handoff](../.work/handoffs/beta-execution.md). The contracts must land on main before fresh implementation worktrees are created from that main. This preparation neither publishes/merges a PR nor authorizes starting a worker.
+The [beta handoff](../.work/handoffs/beta-execution.md) is historical preparation for the now-integrated claims/runs pair. It does not authorize new dispatch, publication or integration. Current delivery follows [the conventions](delivery.mara.md), the selected Work item and explicit user authorization.
 
 The confirmed initial scope is recorded in [[ADR-INITIAL-SCOPE]]. [[ADR-RELATION-SEMANTICS]] settles the four relationships, parent completion policies, inherited prerequisites, and lifecycle versus informational distinction. Built-in agent execution, worktree management, and PR/CI actions are outside the initial scope. A TUI remains a later product direction. Multi-machine synchronization, a hosted service, arbitrary workflow scripting, and automatic provider polling have no accepted requirements in this corpus.
 
