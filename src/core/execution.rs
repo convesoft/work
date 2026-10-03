@@ -188,6 +188,7 @@ impl ExecutionOperations {
     pub fn repair(&self, id: &str, raw: Vec<u8>) -> ExecutionResult<RawInspection> {
         let g = self.guard(true)?;
         if let Some(g) = &g {
+            ContextStore::load(g)?.require_open_path(&self.project.worktree_root)?;
             ClaimStore::authorize(g, id, &self.authorization)?;
         }
         if g.is_some() {
@@ -206,6 +207,7 @@ impl ExecutionOperations {
             return Ok(self.fresh_physical().create(title, body, change)?);
         };
         let v = ResolvedView::load(&g)?;
+        v.context.require_open_path(&self.project.worktree_root)?;
         require_valid(&v.store)?;
         let h = operations::apply_change(operations::default_header(new_id()?, title), change);
         ClaimStore::authorize(&g, &h.id, &self.authorization)?;
@@ -335,6 +337,9 @@ impl ExecutionOperations {
             .header
             .clone()
             .ok_or_else(|| ExecutionError::new("invalid_source", "invalid item"))?;
+        if let Some(root) = v.sources.get(&h.id) {
+            v.context.require_open_path(root)?;
+        }
         let claim = ClaimStore::authorize(&g, &h.id, &self.authorization)?;
         edit(&mut h, selected)?;
         let body = before.body.as_deref().unwrap();

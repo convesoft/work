@@ -207,6 +207,24 @@ impl ContextStore {
             binding_sources,
         })
     }
+    /// A closing physical target cannot receive new material progress, even
+    /// through an unbound selected-checkout write or a nested checkout.
+    pub(crate) fn require_open_path(&self, path: &Path) -> ExecutionResult<()> {
+        if let Some(w) = self
+            .workspaces
+            .values()
+            .find(|w| w.state == "closing" && path.starts_with(&w.path))
+        {
+            let mut error = ExecutionError::new(
+                "workspace_busy",
+                "workspace is within a closing cleanup target",
+            )
+            .at(path);
+            error.details["workspace_id"] = json!(w.id);
+            return Err(error);
+        }
+        Ok(())
+    }
     pub fn register(g: &CoordinationGuard, path: &Path) -> ExecutionResult<Workspace> {
         Self::register_observed(g, path, None, None)
     }
@@ -225,6 +243,7 @@ impl ContextStore {
             ));
         }
         let current = Self::load(g)?;
+        current.require_open_path(&p.worktree_root)?;
         if let Some(w) = current
             .workspaces
             .values()

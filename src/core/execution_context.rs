@@ -13,7 +13,7 @@ use super::sessions;
 use serde_json::{Value, json};
 use std::path::Path;
 
-fn full_id(id: &str) -> ExecutionResult<()> {
+pub(crate) fn full_id(id: &str) -> ExecutionResult<()> {
     if valid_id(id) {
         Ok(())
     } else {
@@ -23,7 +23,7 @@ fn full_id(id: &str) -> ExecutionResult<()> {
         ))
     }
 }
-fn workspace<'a>(context: &'a ContextStore, id: &str) -> ExecutionResult<&'a Workspace> {
+pub(crate) fn workspace<'a>(context: &'a ContextStore, id: &str) -> ExecutionResult<&'a Workspace> {
     full_id(id)?;
     context
         .workspaces
@@ -71,7 +71,7 @@ fn name_valid(name: &str) -> ExecutionResult<()> {
     }
 }
 // Publication diagnostics retain the one attempted entity's identity and path.
-fn write_error(
+pub(crate) fn write_error(
     mut e: ExecutionError,
     g: &CoordinationGuard,
     path: &Path,
@@ -161,6 +161,13 @@ impl ExecutionOperations {
         for c in ClaimStore::list(&g, None, true)? {
             if c.claim.workspace_id.as_deref() == Some(id) {
                 users.push(json!({"kind":"claim","id":c.claim.id,"item_id":c.claim.item_id}));
+            }
+        }
+        for target in v.context.workspaces.values() {
+            if target.state == "closing"
+                && target.value["cleanup"]["controller_workspace_id"].as_str() == Some(id)
+            {
+                users.push(json!({"kind":"cleanup_controller","id":target.id,"item_id":target.value["cleanup"]["item_id"]}));
             }
         }
         users.sort_by_key(Value::to_string);

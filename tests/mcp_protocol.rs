@@ -170,7 +170,7 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 46);
+    assert_eq!(tools.len(), 49);
     let selection = [
         "root",
         "run_id",

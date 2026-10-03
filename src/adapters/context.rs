@@ -5,7 +5,7 @@ use std::path::Path;
 use work::core::coordination::SessionIdentity;
 use work::core::execution::ExecutionOperations;
 use work::core::project::Project;
-pub(super) const HELP: &str = "Usage: work workspace register PATH [--branch B] [--commit C] | inspect ID | list | bind ITEM WORKSPACE_ID | unbind ITEM\nwork session set RUN NAME --namespace N --session-id S [--availability available|unavailable|unknown --observed-at TIME] | list RUN | remove RUN NAME\nWork records externally managed context. It never creates or deletes worktrees or controls sessions. Cleanup and run finalization are not implemented.";
+pub(super) const HELP: &str = "Usage: work workspace register PATH [--branch B] [--commit C] | inspect ID | list | bind ITEM WORKSPACE_ID | unbind ITEM\nwork workspace cleanup begin ID --item ITEM --controller-workspace ID | report ID (--removed | --failure TEXT) | cancel ID\nwork session set RUN NAME --namespace N --session-id S [--availability available|unavailable|unknown --observed-at TIME] | list RUN | remove RUN NAME\nCleanup begin attests required commits/results are retained; transfer material bindings first. External tooling removes the target after begin returns. Work never creates or deletes worktrees, controls sessions, or closes the cleanup item. Run finalization is not implemented.";
 fn invalid(s: impl Into<String>) -> CliError {
     CliError::new("invalid_argument", s)
 }
@@ -16,6 +16,9 @@ fn spec(name: &str) -> Option<(&'static [&'static str], &'static [&'static str])
         "workspace_list" => (&[], &[]),
         "workspace_bind" => (&["item", "workspace_id"], &[]),
         "workspace_unbind" => (&["item"], &[]),
+        "workspace_cleanup_begin" => (&["workspace_id", "item", "controller_workspace_id"], &[]),
+        "workspace_cleanup_report" => (&["workspace_id", "removed"], &["failure"]),
+        "workspace_cleanup_cancel" => (&["workspace_id"], &[]),
         "session_set" => (&["run_id", "name", "session"], &["availability"]),
         "session_list" => (&["run_id"], &[]),
         "session_remove" => (&["run_id", "name"], &[]),
@@ -27,19 +30,30 @@ pub(super) fn from_cli(
     words: &[String],
 ) -> Result<(String, Map<String, Value>), CliError> {
     let verb = words.first().ok_or_else(|| invalid(HELP))?;
-    let name = format!("{noun}_{verb}");
+    let cleanup = noun == "workspace" && verb == "cleanup";
+    let name = if cleanup {
+        format!(
+            "workspace_cleanup_{}",
+            words.get(1).ok_or_else(|| invalid(HELP))?
+        )
+    } else {
+        format!("{noun}_{verb}")
+    };
     spec(&name).ok_or_else(|| invalid("unknown context operation"))?;
     let mut m = Map::new();
     let positional: &[&str] = match name.as_str() {
         "workspace_register" => &["path"],
-        "workspace_inspect" => &["workspace_id"],
+        "workspace_inspect"
+        | "workspace_cleanup_begin"
+        | "workspace_cleanup_report"
+        | "workspace_cleanup_cancel" => &["workspace_id"],
         "workspace_bind" => &["item", "workspace_id"],
         "workspace_unbind" => &["item"],
         "session_set" | "session_remove" => &["run_id", "name"],
         "session_list" => &["run_id"],
         _ => &[],
     };
-    let mut at = 1;
+    let mut at = if cleanup { 2 } else { 1 };
     for key in positional {
         m.insert(
             (*key).into(),
@@ -55,7 +69,17 @@ pub(super) fn from_cli(
     let mut availability = Map::new();
     while at < words.len() {
         let flag = &words[at];
+        if flag == "--removed" {
+            if m.insert("removed".into(), json!(true)).is_some() {
+                return Err(invalid("duplicate or conflicting --removed"));
+            }
+            at += 1;
+            continue;
+        }
         let key = match flag.as_str() {
+            "--item" => "item",
+            "--controller-workspace" => "controller_workspace_id",
+            "--failure" => "failure",
             "--branch" => "branch",
             "--commit" => "commit",
             "--namespace" => "namespace",
@@ -83,6 +107,12 @@ pub(super) fn from_cli(
     if !availability.is_empty() {
         m.insert("availability".into(), json!(availability));
     }
+    if m.contains_key("failure") {
+        if m.contains_key("removed") {
+            return Err(invalid("--failure conflicts with --removed"));
+        }
+        m.insert("removed".into(), json!(false));
+    }
     validate(&name, &m)?;
     Ok((name, m))
 }
@@ -95,13 +125,21 @@ fn validate(name: &str, m: &Map<String, Value>) -> Result<(), CliError> {
     {
         return Err(invalid("unknown or missing context fields"));
     }
+    if name == "workspace_cleanup_report"
+        && (!m["removed"].is_boolean()
+            || (m["removed"] == true && m.contains_key("failure"))
+            || (m["removed"] == false && !m.contains_key("failure")))
+    {
+        return Err(invalid("failure is required only when removed is false"));
+    }
     for (key, value) in m {
         match key.as_str() {
+            "removed" if value.is_boolean() => {}
             "session" => {
                 SessionIdentity::from_json(value).map_err(|e| invalid(e.message))?;
             }
             "availability" => work::core::sessions::validate_availability(value)?,
-            "run_id" | "workspace_id" => {
+            "run_id" | "workspace_id" | "controller_workspace_id" => {
                 if !value
                     .as_str()
                     .is_some_and(work::core::coordination::valid_id)
@@ -139,6 +177,17 @@ pub(super) fn execute(
         "workspace_list" => ops.workspace_list()?,
         "workspace_bind" => ops.workspace_bind(text("item"), text("workspace_id"))?,
         "workspace_unbind" => ops.workspace_unbind(text("item"))?,
+        "workspace_cleanup_begin" => ops.workspace_cleanup_begin(
+            text("workspace_id"),
+            text("item"),
+            text("controller_workspace_id"),
+        )?,
+        "workspace_cleanup_report" => ops.workspace_cleanup_report(
+            text("workspace_id"),
+            m["removed"].as_bool().unwrap(),
+            optional("failure"),
+        )?,
+        "workspace_cleanup_cancel" => ops.workspace_cleanup_cancel(text("workspace_id"))?,
         "session_list" => ops.session_list(text("run_id"))?,
         "session_remove" => ops.session_remove(text("run_id"), text("name"))?,
         "session_set" => ops.session_set(
@@ -154,11 +203,11 @@ pub(super) fn tools() -> Vec<Value> {
     let s = json!({"type":"string"});
     let session = json!({"type":"object","properties":{"namespace":s,"id":s},"required":["namespace","id"],"additionalProperties":false});
     let availability = json!({"type":"object","properties":{"state":{"type":"string","enum":["available","unavailable","unknown"]},"observed_at":s},"required":["state","observed_at"],"additionalProperties":false});
-    ["workspace_register", "workspace_inspect", "workspace_list", "workspace_bind", "workspace_unbind", "session_set", "session_list", "session_remove"].into_iter().map(|name| {
+    ["workspace_register", "workspace_inspect", "workspace_list", "workspace_bind", "workspace_unbind", "workspace_cleanup_begin", "workspace_cleanup_report", "workspace_cleanup_cancel", "session_set", "session_list", "session_remove"].into_iter().map(|name| {
         let (required, optional) = spec(name).unwrap();
         let mut properties = json!({"worktree":s});
         for k in required.iter().chain(optional) {
-            properties[*k] = match *k { "session" => session.clone(), "availability" => availability.clone(), _ => s.clone() };
+            properties[*k] = match *k { "session" => session.clone(), "availability" => availability.clone(), "removed" => json!({"type":"boolean"}), _ => s.clone() };
         }
         json!({"name":name,"description":format!("{name}: record or inspect external context; no process/worktree control."),"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})
     }).collect()

@@ -325,6 +325,7 @@ impl ExecutionOperations {
         }
         let mut writers = BTreeMap::new();
         for root in roots {
+            v.context.require_open_path(&root)?;
             let writer = if root == self.project.worktree_root
                 && plan
                     .items
