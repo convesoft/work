@@ -138,14 +138,28 @@ impl ExecutionOperations {
         let v = ResolvedView::load(&g)?;
         let active = owners(&g)?;
         let material = v.sources.keys().cloned().collect();
-        Ok(run_value(
-            v.runs.get(id)?,
+        let record = v.runs.get(id)?;
+        let mut value = run_value(
+            record,
             &RunSnapshot {
                 view: &v.store,
                 active_claims: &active,
                 material_ids: &material,
             },
-        ))
+        );
+        value["digest_path"] = json!(
+            record
+                .manifest
+                .output_workspace_id
+                .as_ref()
+                .and_then(|id| v.context.workspaces.get(id))
+                .map(|w| encode_path(&super::digests::path(
+                    &w.path,
+                    &record.manifest.root_item_id,
+                    id
+                )))
+        );
+        Ok(value)
     }
     pub fn run_list(&self, all: bool) -> ExecutionResult<Value> {
         let g = CoordinationGuard::acquire(&self.project, false)?;
@@ -286,6 +300,21 @@ impl ExecutionOperations {
             &self.project.worktree_root,
             run.map(|r| &r.manifest),
             g.root_path(),
+        )?;
+        let mut prospective = v.store.files.clone();
+        for file in &plan.updated {
+            let id = &file.header.as_ref().unwrap().id;
+            prospective.retain(|f| f.header.as_ref().is_none_or(|h| &h.id != id));
+            prospective.push(file.clone());
+        }
+        prospective.extend(
+            plan.items
+                .iter()
+                .map(|item| super::items::parse_candidate(item.path.clone(), item.raw.clone())),
+        );
+        super::execution_finalization::validate_squash_edits(
+            &v,
+            &super::items::ItemStore::from_candidate_files(prospective),
         )?;
         // Validate supplied pairs even when the template creates only new files.
         let check_id = plan

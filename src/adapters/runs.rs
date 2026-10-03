@@ -8,7 +8,7 @@ use work::core::{
     project::Project,
     templates::{PreviewRequest, TemplateCatalog},
 };
-pub(super) const HELP: &str = "Usage: work run start ROOT [--workspace ID] [--output-workspace ID] | inspect RUN_ID | list [--all] | attach RUN_ID ITEM... | detach RUN_ID ITEM...";
+pub(super) const HELP: &str = "Usage: work run start ROOT [--workspace ID] [--output-workspace ID] | inspect RUN_ID | list [--all] | attach RUN_ID ITEM... | detach RUN_ID ITEM... | squash RUN_ID --summary TEXT|- | discard RUN_ID --all | discard RUN_ID --item ITEM (repeatable)";
 fn invalid(s: impl Into<String>) -> CliError {
     CliError::new("invalid_argument", s)
 }
@@ -25,7 +25,9 @@ pub(super) fn from_cli(
     let mut at = 1;
     let key = match name.as_str() {
         "run_start" => Some("root"),
-        "run_inspect" | "run_attach" | "run_detach" => Some("run_id"),
+        "run_inspect" | "run_attach" | "run_detach" | "run_squash" | "run_discard" => {
+            Some("run_id")
+        }
         "template_preview" | "template_expand" => Some("name"),
         "run_list" => None,
         _ => return Err(invalid("unknown run/template operation")),
@@ -47,7 +49,10 @@ pub(super) fn from_cli(
         let key = match flag.as_str() {
             "--workspace" => "default_workspace_id",
             "--output-workspace" => "output_workspace_id",
+            "--all" if name == "run_discard" => "all",
             "--all" => "include_terminal",
+            "--item" => "items",
+            "--summary" => "summary",
             "--run" => "run_id",
             "--root" => "root",
             "--param" => "parameters",
@@ -55,7 +60,7 @@ pub(super) fn from_cli(
             "--authorize" => "authorization",
             _ => return Err(invalid(format!("unknown option {flag}"))),
         };
-        if key == "include_terminal" {
+        if matches!(key, "include_terminal" | "all") {
             if m.insert(key.into(), json!(true)).is_some() {
                 return Err(invalid("duplicate --all"));
             }
@@ -65,7 +70,13 @@ pub(super) fn from_cli(
             .get(at)
             .ok_or_else(|| invalid(format!("missing {flag} value")))?;
         at += 1;
-        if matches!(key, "parameters" | "existing") {
+        if key == "items" {
+            m.entry(key)
+                .or_insert(json!([]))
+                .as_array_mut()
+                .unwrap()
+                .push(json!(value));
+        } else if matches!(key, "parameters" | "existing") {
             let (k, v) = value
                 .split_once('=')
                 .ok_or_else(|| invalid("expected NAME=VALUE"))?;
@@ -86,6 +97,14 @@ pub(super) fn from_cli(
         }
     }
     validate(&name, &m)?;
+    if name == "run_squash" && m["summary"] == "-" {
+        use std::io::Read;
+        let mut body = String::new();
+        std::io::stdin()
+            .read_to_string(&mut body)
+            .map_err(|e| CliError::new("io", e.to_string()))?;
+        m.insert("summary".into(), json!(body));
+    }
     Ok((name, m))
 }
 pub(super) fn validate(name: &str, m: &Map<String, Value>) -> Result<(), CliError> {
@@ -104,7 +123,7 @@ pub(super) fn validate(name: &str, m: &Map<String, Value>) -> Result<(), CliErro
             return Err(invalid(format!("unknown {k}")));
         };
         let valid = match spec["type"].as_str().unwrap() {
-            "string" => v.as_str().is_some_and(|s| !s.is_empty()),
+            "string" => v.as_str().is_some_and(|s| k == "summary" || !s.is_empty()),
             "boolean" => v.is_boolean(),
             "array" if k == "authorization" => super::claims::authorization(Some(v)).is_ok(),
             "array" => v.as_array().is_some_and(|a| {
@@ -118,6 +137,12 @@ pub(super) fn validate(name: &str, m: &Map<String, Value>) -> Result<(), CliErro
         if !valid {
             return Err(invalid(format!("invalid {k}")));
         }
+    }
+    if name == "run_discard"
+        && (m.contains_key("all") == m.contains_key("items")
+            || m.get("all").is_some_and(|v| v != &json!(true)))
+    {
+        return Err(invalid("provide exactly all:true or nonempty items"));
     }
     for k in ["run_id", "default_workspace_id", "output_workspace_id"] {
         if text(m, k).is_some_and(|s| !valid_id(s)) {
@@ -139,6 +164,19 @@ pub(super) fn execute(
             text(m, "root").unwrap(),
             text(m, "default_workspace_id").map(str::to_owned),
             text(m, "output_workspace_id").map(str::to_owned),
+        )?,
+        "run_squash" => ops.run_squash(text(m, "run_id").unwrap(), text(m, "summary").unwrap())?,
+        "run_discard" => ops.run_discard(
+            text(m, "run_id").unwrap(),
+            m.get("all") == Some(&json!(true)),
+            &m.get("items")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|s| s.as_str().unwrap().to_owned())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
         )?,
         "run_inspect" => ops.run_inspect(text(m, "run_id").unwrap())?,
         "run_list" => ops.run_list(m.get("include_terminal") == Some(&json!(true)))?,
@@ -207,6 +245,8 @@ pub(super) fn tools() -> Vec<Value> {
             vec!["default_workspace_id", "output_workspace_id"],
         ),
         ("run_inspect", vec!["run_id"], vec![]),
+        ("run_squash", vec!["run_id", "summary"], vec![]),
+        ("run_discard", vec!["run_id"], vec!["all", "items"]),
         ("run_list", vec![], vec!["include_terminal"]),
         ("run_attach", vec!["run_id", "items"], vec![]),
         ("run_detach", vec!["run_id", "items"], vec![]),
@@ -224,7 +264,7 @@ pub(super) fn tools() -> Vec<Value> {
         let mut props = json!({"worktree":s});
         for k in required.iter().chain(optional.iter()) {
             props[*k] = match *k {
-                "include_terminal" => json!({"type":"boolean"}),
+                "include_terminal" | "all" => json!({"type":"boolean"}),
                 "items" => json!({"type":"array","items":s,"minItems":1}),
                 "parameters" | "existing" => json!({"type":"object","additionalProperties":s}),
                 "authorization" => {
@@ -233,7 +273,11 @@ pub(super) fn tools() -> Vec<Value> {
                 _ => s.clone(),
             };
         }
-        out.push(json!({"name":name,"description":format!("{name}: file-backed runs and mixed template items; no implicit finalization."),"inputSchema":{"type":"object","properties":props,"required":required,"additionalProperties":false}}));
+        let mut tool = json!({"name":name,"description":format!("{name}: file-backed runs, mixed template items and explicit bounded cleanup."),"inputSchema":{"type":"object","properties":props,"required":required,"additionalProperties":false}});
+        if name == "run_discard" {
+            tool["inputSchema"]["oneOf"] = json!([{"required":["all"],"properties":{"all":{"const":true}},"not":{"required":["items"]}},{"required":["items"],"not":{"required":["all"]}}]);
+        }
+        out.push(tool);
     }
     out
 }

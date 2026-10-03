@@ -233,6 +233,31 @@ impl ExecutionOperations {
         // several current-run items lost the same checkout: neither could be
         // rebound first, and membership would prevent unbinding them.
         let runs = RunStore::load(&g)?;
+        if changed {
+            super::execution_finalization::require_squash_mutable(&runs, &id)?;
+            if runs
+                .records
+                .iter()
+                .any(|r| r.manifest.phase == super::runs::RunPhase::Squashing)
+            {
+                let view = ResolvedView::load(&g)?;
+                let mut files: Vec<_> = view
+                    .store
+                    .files
+                    .iter()
+                    .filter(|f| {
+                        !f.header.as_ref().is_some_and(|h| h.id == id)
+                            && f.path.file_stem().and_then(|s| s.to_str()) != Some(id.as_str())
+                    })
+                    .cloned()
+                    .collect();
+                files.push(file.clone());
+                super::execution_finalization::validate_squash_edits(
+                    &view,
+                    &ItemStore::from_candidate_files(files),
+                )?;
+            }
+        }
         if runs
             .records
             .iter()
@@ -317,6 +342,49 @@ impl ExecutionOperations {
         }
         let path = Path::new("workspaces/items").join(format!("{id}.yaml"));
         let old = context.binding_sources.get(&id);
+        let mut source_locks = Vec::new();
+        if old.is_some()
+            && runs
+                .records
+                .iter()
+                .any(|r| r.manifest.phase == super::runs::RunPhase::Squashing)
+        {
+            let view = ResolvedView::load(&g)?;
+            let physical = ItemStore::load_optional_catalog(&self.project.worktree_root)?;
+            let mut files: Vec<_> = view
+                .store
+                .files
+                .iter()
+                .filter(|f| {
+                    !f.header.as_ref().is_some_and(|h| h.id == id)
+                        && f.path.file_stem().and_then(|s| s.to_str()) != Some(id.as_str())
+                })
+                .cloned()
+                .collect();
+            files.extend(
+                physical
+                    .files
+                    .iter()
+                    .filter(|f| {
+                        f.header.as_ref().is_some_and(|h| h.id == id)
+                            || f.path.file_stem().and_then(|s| s.to_str()) == Some(id.as_str())
+                    })
+                    .cloned(),
+            );
+            super::execution_finalization::validate_squash_edits(
+                &view,
+                &ItemStore::from_candidate_files(files),
+            )?;
+            let mut roots: std::collections::BTreeSet<_> = view.sources.values().cloned().collect();
+            roots.insert(self.project.worktree_root.clone());
+            for root in roots {
+                source_locks.push(CheckoutWriter::open(&root)?);
+            }
+            view.recheck(&g)?;
+            for lock in &source_locks {
+                lock.verify()?;
+            }
+        }
         if let Some(old) = old {
             g.delete(&path, old)
                 .map_err(|e| write_error(e, &g, &path, &id, "deleted"))?;

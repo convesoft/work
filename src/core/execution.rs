@@ -112,7 +112,15 @@ impl ExecutionOperations {
     }
     pub fn inspect(&self, id: &str) -> ExecutionResult<Inspection> {
         match self.guard(false)? {
-            None => Ok(self.physical().inspect(id)?),
+            None => {
+                let mut item = self.physical().inspect(id)?;
+                if !self.checkout_view {
+                    let id = &item.file.header.as_ref().unwrap().id;
+                    item.context["digests"] =
+                        json!(super::digests::list(&self.project.worktree_root, id)?);
+                }
+                Ok(item)
+            }
             Some(g) => {
                 let v = ResolvedView::load(&g)?;
                 let graph = ItemGraph::from_store(&v.store);
@@ -165,7 +173,12 @@ impl ExecutionOperations {
                 let inspection = if let Some(v) = &resolved {
                     inspect_with_snapshot(v, &graph, &v.ownership, &h.id)?
                 } else {
-                    operations::inspect_with_graph(store, &graph, &h.id)?
+                    let mut inspection = operations::inspect_with_graph(store, &graph, &h.id)?;
+                    if !self.checkout_view {
+                        inspection.context["digests"] =
+                            json!(super::digests::list(&self.project.worktree_root, &h.id)?);
+                    }
+                    inspection
                 };
                 if !ready || inspection.evaluation.as_ref().is_some_and(|e| e.executable) {
                     result.push(inspection);
@@ -190,6 +203,16 @@ impl ExecutionOperations {
         if let Some(g) = &g {
             ContextStore::load(g)?.require_open_path(&self.project.worktree_root)?;
             ClaimStore::authorize(g, id, &self.authorization)?;
+            let v = ResolvedView::load(g)?;
+            super::execution_finalization::require_squash_mutable(&v.runs, id)?;
+            let path = self
+                .project
+                .worktree_root
+                .join(format!(".work/items/{id}.md"));
+            super::execution_finalization::validate_squash_edits(
+                &v,
+                &operations::candidate_store(&v.store, &path, raw.clone())?,
+            )?;
         }
         if g.is_some() {
             Ok(self.physical().repair(id, raw)?)
@@ -216,6 +239,10 @@ impl ExecutionOperations {
             .worktree_root
             .join(format!(".work/items/{}.md", h.id));
         validate_candidate(&v.store, &path, &h, &body)?;
+        super::execution_finalization::validate_squash_edits(
+            &v,
+            &operations::candidate_store(&v.store, &path, operations::serialize(&h, &body))?,
+        )?;
         let mut writer = CheckoutWriter::open(&self.project.worktree_root)?;
         v.recheck(&g)?;
         g.verify()?;
@@ -344,6 +371,10 @@ impl ExecutionOperations {
         edit(&mut h, selected)?;
         let body = before.body.as_deref().unwrap();
         validate_candidate(&v.store, &before.path, &h, body)?;
+        super::execution_finalization::validate_squash_edits(
+            &v,
+            &operations::candidate_store(&v.store, &before.path, operations::serialize(&h, body))?,
+        )?;
         if !handoffs.is_empty() {
             super::handoffs::HandoffStore::load(&g)?;
         }
@@ -962,6 +993,8 @@ fn inspect_with_snapshot(
     id: &str,
 ) -> ExecutionResult<Inspection> {
     let mut i = operations::inspect_with_graph(&v.store, graph, id)?;
+    let canonical_id = i.file.header.as_ref().unwrap().id.clone();
+    let id = canonical_id.as_str();
     let claim = match ownership {
         Ok(snapshot) => snapshot.current(id),
         Err(error) => Err(error.clone()),
@@ -987,6 +1020,13 @@ fn inspect_with_snapshot(
         e.executable = false;
     }
     i.context = json!({"source_worktree":v.sources.get(id).map(|p|encode_path(p)),"persistence":if v.sources.contains_key(id){"material"}else{"wisp"},"run_id":v.run_ids.get(id),"claim":claim.map(|c|c.to_json())});
+    i.context["digests"] = json!(
+        v.sources
+            .get(id)
+            .map(|root| super::digests::list(root, id))
+            .transpose()?
+            .unwrap_or_default()
+    );
     if let Some(w) = warning {
         i.context["ownership_warning"] = w;
     }

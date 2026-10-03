@@ -289,6 +289,13 @@ impl CoordinationGuard {
         names.sort();
         Ok(names)
     }
+    pub(crate) fn sync_dir(&self, path: &Path) -> ExecutionResult<()> {
+        self.writable()?;
+        let dir = self.directory(path, false)?;
+        dir.sync()?;
+        dir.verify()?;
+        self.verify()
+    }
     pub fn ensure_dir(&self, path: &Path) -> ExecutionResult<()> {
         self.writable()?;
         self.directory(path, true)?.verify()?;
