@@ -437,7 +437,7 @@ fn command_help(words: &[String]) -> Option<&'static str> {
             "Usage: work relation remove KIND SOURCE TARGET\nRemove an existing edge. SOURCE is the child for parent and the dependent for depends_on. related may be removed from either endpoint.",
         ),
         ["template", "--help"] => Some(
-            "Usage: work template list|validate|preview|expand\nDiscover version-1/version-2 YAML templates and render a symbolic item graph without publishing a run or items.",
+            "Usage: work template list|validate|preview|expand\nDiscover and preview version-1/version-2 YAML templates without writes. Expansion publishes material items and explicit-run wisps; it never starts a run implicitly.",
         ),
         ["template", "list", "--help"] => Some(
             "Usage: work template list\nList valid and invalid templates under .work/templates/.",
@@ -1135,8 +1135,8 @@ fn print_human(value: &Value) {
     }
 }
 const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|next|inspect|list|release|recover|reassign, handoff create|inspect|list|receivers|prune, run start|inspect|list|attach|detach, workspace register|inspect|list|bind|unbind|cleanup, session set|list|remove, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
-Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, work handoff --help, work workspace --help, work session --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
+Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|next|inspect|list|release|recover|reassign, handoff create|inspect|list|receivers|prune, run start|inspect|list|attach|detach|squash|discard, workspace register|inspect|list|bind|unbind|cleanup, session set|list|remove, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
+Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, work handoff --help, work run --help, work workspace --help, work session --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
 const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
 // Preserve unusual Unix path bytes while keeping JSON paths single-line.
 pub(super) fn encode_path(path: &Path) -> String {

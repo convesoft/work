@@ -5,7 +5,7 @@ use std::path::Path;
 use work::core::coordination::SessionIdentity;
 use work::core::execution::ExecutionOperations;
 use work::core::project::Project;
-pub(super) const HELP: &str = "Usage: work workspace register PATH [--branch B] [--commit C] | inspect ID | list | bind ITEM WORKSPACE_ID | unbind ITEM\nwork workspace cleanup begin ID --item ITEM --controller-workspace ID | report ID (--removed | --failure TEXT) | cancel ID\nwork session set RUN NAME --namespace N --session-id S [--availability available|unavailable|unknown --observed-at TIME] | list RUN | remove RUN NAME\nCleanup begin attests required commits/results are retained; transfer material bindings first. External tooling removes the target after begin returns. Work never creates or deletes worktrees, controls sessions, or closes the cleanup item. Run finalization is not implemented.";
+pub(super) const HELP: &str = "Usage: work workspace register PATH [--branch B] [--commit C] | inspect ID | list | bind ITEM WORKSPACE_ID | unbind ITEM\nwork workspace cleanup begin ID --item ITEM --controller-workspace ID | report ID (--removed | --failure TEXT) | cancel ID\nwork session set RUN NAME --namespace N --session-id S [--availability available|unavailable|unknown --observed-at TIME] | list RUN | remove RUN NAME\nCleanup begin attests required commits/results are retained; transfer material bindings first. External tooling removes the target after begin returns. Work never creates or deletes worktrees, controls sessions, or closes the cleanup item. Use run squash to retain a root digest or run discard for explicit ephemeral cleanup; neither removes a worktree.";
 fn invalid(s: impl Into<String>) -> CliError {
     CliError::new("invalid_argument", s)
 }

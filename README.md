@@ -4,13 +4,13 @@ A local, agent-first issue tracker, being built in Rust. Work will track work it
 
 ## Current state
 
-The published `0.1.0-alpha.1` release supports durable item operations through the CLI and MCP stdio, with equivalent structured results from the shared core. Claims, templates, temporary runs, sessions, workspaces, handoffs, and run finalization are later work.
+The published `0.1.0-alpha.1` release supports durable item operations through the CLI and MCP stdio, with equivalent structured results from the shared core. It does not contain the execution capabilities described below.
 
-This development checkout adds shared file storage, repository-wide claims, run creation/membership, mixed material/wisp template expansion, reusable workspaces, run-scoped named sessions, receiver-scoped handoffs, atomic scoped claim-next, and explicit workspace cleanup reporting. These capabilities are not in the published alpha. Run finalization and backup/restore remain separate work. Work never executes agents or creates/deletes physical worktrees. See [the usage guide](docs/using-work.md) for the alpha loop and [context interfaces](docs/execution-context.mara.md) for the workspace/session contract.
+This development checkout adds shared file storage, repository-wide claims, run creation/membership, mixed material/wisp template expansion, reusable workspaces, run-scoped named sessions, receiver-scoped handoffs, atomic scoped claim-next, explicit workspace cleanup reporting, caller-authored root digests, and selected/full ephemeral discard. These capabilities are not in the published alpha; the development version string is still `0.1.0-alpha.1`, not a beta release. Check command help or MCP `tools/list`, not the version string alone. Backup/restore remains deferred. Work never executes agents or creates/deletes physical worktrees. See [the usage guide](docs/using-work.md) for the connected workflow and exact limits.
 
 For development context management, initialize storage explicitly with `work storage init`, then use `work workspace register PATH`, `work workspace bind ITEM WORKSPACE_ID`, and `work workspace inspect WORKSPACE_ID`. `workspace unbind ITEM` removes only the location reference; it refuses current claims or run membership. Explicit rebinding after an external merge/relocation selects the surviving item file, without copying item state.
 
-Use `work session set RUN NAME --namespace PROVIDER --session-id EXTERNAL_ID` to create or rebind a run-scoped name. `session list RUN` and `session remove RUN NAME` inspect or remove names without controlling the external session. Optional `--availability STATE --observed-at RFC3339` records supplied observation only. `claim acquire ITEM --actor ACTOR --session-namespace PROVIDER --session-id EXTERNAL_ID --session-record RECORD_ID` captures matching named context; the name may later be rebound or removed without transferring that claim's ownership. Names and workspaces survive individual item completion and claim release. Named mutations require an active run; finalization remains a successor operation.
+Use `work session set RUN NAME --namespace PROVIDER --session-id EXTERNAL_ID` to create or rebind a run-scoped name. `session list RUN` and `session remove RUN NAME` inspect or remove names without controlling the external session. Optional `--availability STATE --observed-at RFC3339` records supplied observation only. `claim acquire ITEM --actor ACTOR --session-namespace PROVIDER --session-id EXTERNAL_ID --session-record RECORD_ID` captures matching named context; the name may later be rebound or removed without transferring that claim's ownership. Names and workspaces survive individual item completion and claim release. Named mutations require an active run; squash/full discard removes the run's named records, not external sessions.
 
 For explicit cleanup, retain required commits/results externally and transfer all target material bindings to surviving sources first. From a surviving checkout, use `work workspace cleanup begin TARGET_ID --item CLEANUP_ITEM --controller-workspace CONTROLLER_ID`. Begin records the caller's retention attestation and marks the target closing, refusing new assignments. External tooling then removes the worktree after Work releases its locks. Use `workspace cleanup report TARGET_ID --removed` only after removal, or `--failure TEXT` to preserve retry context. `workspace cleanup cancel TARGET_ID` reopens only the original checkout in the same repository. Work never performs deletion or closes the cleanup item.
 
@@ -22,12 +22,13 @@ For explicit cleanup, retain required commits/results externally and transfer al
 
 ## Development
 
-Start with the selected implementation item and its referenced Mara contracts. The toolchain is pinned in `rust-toolchain.toml`; Cargo.lock is committed. Run:
+Start with the selected implementation item and its referenced Mara contracts. The toolchain is pinned in `rust-toolchain.toml`; Cargo.lock is committed. Tests require Git and Node.js >=18 (the connected CLI/MCP harness also runs against installed packages). Run:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets
+cargo build --locked -j 2
+cargo clippy --locked --all-targets --all-features -j 2 -- -D warnings
+cargo test --locked --all-targets -j 2
 mara --project "$PWD" --format json schema validate
 mara --project "$PWD" --format json project validate
 cargo run --locked -- discover [PATH]
@@ -38,10 +39,27 @@ cargo run --locked -- --help
 
 For the durable item loop, use `work --json item create --title "Task" --body -`, `work --json item list`, `work --json item ready`, and `work --json item inspect ID`. Add a dependency with `work --json relation add depends_on SOURCE TARGET`; close or reopen with `work --json item close ID` and `work --json item reopen ID`. Prefix the command with `--worktree PATH` to select another linked checkout without switching branches. `work --help` lists the implemented commands. [DES-CLI-JSON](docs/design.mara.md) defines the command, JSON, and exit contracts.
 
-[Using the first durable item loop](docs/using-work.md) shows the supported CLI commands and MCP tools, how to start using the existing backlog, and the limits of this slice.
+[Using Work](docs/using-work.md) shows the supported CLI commands and MCP tools, how to start using the existing backlog, a disposable connected beta workflow, and the current limits.
 The repository [Work skill](skills/work/SKILL.md) guides an agent through those operations without prescribing a project workflow. It is source guidance; no skill package has been published.
 
-Run `work mcp` from a Git working checkout to serve the same durable operations to an MCP client over stdio. Each tool also accepts an optional `worktree` path. [DES-MCP-STDIO](docs/design.mara.md) defines the first tool and transport contract.
+Run `work mcp` from a Git working checkout to serve the same item and execution operations to an MCP client over stdio. Each tool also accepts an optional `worktree` path. [DES-MCP-STDIO](docs/design.mara.md) defines the first tool and transport contract.
+
+## Local packaged verification
+
+Build and install the development artifacts without selecting a release version or publishing:
+
+```sh
+cargo build --locked --release -j 2
+scratch=$(mktemp -d)
+native=$(node scripts/package-npm.mjs platform x86_64-unknown-linux-gnu target/release/work "$scratch/stage")
+native_tgz=$(npm pack "$native" --pack-destination "$scratch" --silent)
+dispatcher=$(node scripts/package-npm.mjs main "$scratch/stage")
+dispatcher_tgz=$(npm pack "$dispatcher" --pack-destination "$scratch" --silent)
+scripts/smoke-packaged.sh "$scratch/$native_tgz" x86_64-unknown-linux-gnu
+scripts/smoke-packaged.sh "$scratch/$native_tgz" x86_64-unknown-linux-gnu "$scratch/$dispatcher_tgz"
+```
+
+Substitute the available supported target on ARM Linux or Apple Silicon. Keep artifact hashes and the exact source revision with local evidence: these development tarballs have the unchanged alpha metadata but are **not** the published alpha artifacts. `scripts/smoke-packaged.sh` installs offline into a disposable prefix, verifies metadata/licenses/executability, and runs the connected `scripts/verify-beta.mjs` acceptance through the installed native binary or dispatcher. The harness exercises all advertised operations through real CLI/MCP processes on equivalent disposable linked repositories, compares semantic results and authoritative files, and checks contention, explicit recovery, digest/discard retention and external cleanup. Local smoke is not other-host, registry-install, release or power-loss evidence.
 
 ## Alpha distribution
 

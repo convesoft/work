@@ -87,4 +87,6 @@ const requests = [
 })().catch(error => { console.error(error); process.exitCode = 1; });
 NODE
 
+node "$(dirname "${BASH_SOURCE[0]}")/verify-beta.mjs" "$binary"
+
 echo "packaged CLI/MCP smoke passed: @convesoft/$name@$version ($target)${dispatcher:+ via @convesoft/work}"
