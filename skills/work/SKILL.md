@@ -7,7 +7,7 @@ description: Use Work to inspect and manage durable work items, relationships, c
 
 Work stores durable items as Git-tracked `.work/items/<full-id>.md` files. A consumer chooses its own items, bodies, and graph; Work does not require a particular workflow or interpret Markdown headings as structured acceptance fields. It tracks state and graph eligibility but does not execute work.
 
-This skill describes the item, storage, claim/run, template, workspace/session, handoff and finalization capabilities in this development checkout. The published alpha has only the durable loop. The unchanged alpha version string alone does not identify these development capabilities. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
+This skill describes the item, storage, claim/run, template, workspace/session, handoff and finalization capabilities in the unpublished `0.1.0-beta.1` candidate checkout. The published alpha has only the durable loop. Candidate metadata does not establish publication or verification. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
 
 ## Select the view
 
@@ -49,9 +49,9 @@ Storage tools storage_inspect/storage_init/storage_recreate/storage_recover matc
 
 Item reads expose storage and storage_warning without losing available durable data. coordination_available describes foundation structure only; it does not prove claim ownership. For detected damage, inspect the exact diagnostic and pending operation before choosing explicit recovery. Recreation discards live operational meaning, retains surviving bytes and uses a fresh generation. Require stopped-executor and loss acknowledgements, exact observed identity/generation, and all clients stopped if the root/lock was lost. Never silently recreate or erase the intact lock. Resume only a supported reported operation ID; post-publication errors require inspecting retained context before retry.
 
-## Development execution context
+## Beta execution context
 
-The development binary also advertises claim acquire/next/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach/squash/discard, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
+The candidate binary also advertises claim acquire/next/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach/squash/discard, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
 
 Workspace register/inspect/list/bind/unbind match workspace_register/workspace_inspect/workspace_list/workspace_bind/workspace_unbind. Register an existing checkout in the same Git repository; registering its canonical path again reuses its ID. Branch/commit fields are supplied observations, not live Git state. Material binding selects the whole item file; explicit rebind establishes a surviving source after external merge/relocation. Unbind removes only that reference and refuses active claims/current-run context. Workspace users are derived from bindings, current runs, claims and closing cleanup controller references; unresolved users do not prove safe cleanup.
 

@@ -1,10 +1,10 @@
-# Using Work: durable items and development execution
+# Using Work: durable items and beta execution
 
 Work reads version-1 files directly from `.work/items/<full-id>.md` in the selected Git checkout. Existing authored files need no import or ID migration. Their Markdown bodies are opaque: metadata edits, relation changes, close, and reopen preserve the body bytes. Work may normalize the YAML header and retain hidden recovery copies when replacing a file. Keep `.work/items/` under Git and review intended item changes before committing them.
 
 The commands below are examples for this repository's backlog. Consumers can model their own items and dependencies, or use independent items without a workflow. The [Work skill](../skills/work/SKILL.md) gives agents the same basic operation guidance.
 
-Build the current checkout with `cargo build --locked`; run `target/debug/work` in the commands below (or substitute `cargo run --locked --`). The published `0.1.0-alpha.1` supports only the durable loop. This checkout still reports that version but also implements the development execution operations below. Inspect help or MCP `tools/list` to distinguish capabilities; do not substitute an older installed alpha or its MCP schemas. Run `work --help` for the command list, then `work item --help` or `work item COMMAND --help` for detail. `--json` returns the same help inside a structured result.
+Build the current checkout with `cargo build --locked`; run `target/debug/work` in the commands below (or substitute `cargo run --locked --`). The published `0.1.0-alpha.1` supports only the durable loop. This checkout prepares the unpublished `0.1.0-beta.1` candidate with the execution operations below. Candidate metadata is not publication evidence; use the locally built or packaged candidate for these examples. Inspect help or MCP `tools/list` to distinguish capabilities; do not substitute an older installed alpha or its MCP schemas. Run `work --help` for the command list, then `work item --help` or `work item COMMAND --help` for detail. `--json` returns the same help inside a structured result.
 
 ## Inspect and advance the backlog
 
@@ -205,7 +205,7 @@ Errors expose known `partial` progress, `remaining_items`, `remaining_sessions` 
 
 MCP adds `run_squash` (`run_id,summary`) and `run_discard` (`run_id` and exactly `all:true` or nonempty `items`). Successful results include `run_id`, `phase`, `deleted`, `changed`, and for squash `digest_path`.
 
-## Connected development workflow (disposable projects only)
+## Connected beta workflow (disposable projects only)
 
 Run `node scripts/verify-beta.mjs /absolute/path/to/work` for an executable example, or use `cargo test --locked --test beta_adoption -j 2`. It creates and removes only its own temporary repositories. The packaged smoke runs the identical harness against the installed native binary or npm dispatcher. Git and Node.js >=18 are required.
 

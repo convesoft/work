@@ -4,7 +4,7 @@ The product model and initial scope are established. The remaining work below co
 
 ## Specified execution contracts
 
-The beta execution APIs below are implemented in the development checkout, not in the published alpha. Accepted knowledge is not implementation or test evidence; consult actual source/checks and the [usage guide](using-work.md). Private Rust helpers do not reopen the settled product model. The delivery-owner column preserves the original decomposition, not an active dispatch or central-glue requirement.
+The beta execution APIs below are implemented in the checkout preparing the unpublished `0.1.0-beta.1` candidate, not in the published alpha. Accepted knowledge is not implementation or test evidence; consult actual source/checks and the [usage guide](using-work.md). Private Rust helpers do not reopen the settled product model. The delivery-owner column preserves the original decomposition, not an active dispatch or central-glue requirement.
 
 | Area | Settled contract | Delivery owner |
 | --- | --- | --- |

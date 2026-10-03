@@ -8,6 +8,11 @@ This alpha delivers the durable Work item graph through the CLI and MCP server. 
 
 Claims, templates, temporary runs, sessions, workspaces, handoffs, and run finalization are planned for later candidates.
 {% endif %}
+{% if version == "v0.1.0-beta.1" %}
+This beta candidate adds shared file storage, exclusive claims and atomic scoped claim-next, parameterized templates, mixed material/wisp runs, receiver-scoped handoffs, reusable workspaces and named sessions, explicit external workspace cleanup reporting, and caller-authored root digests or ephemeral discard through the CLI and MCP.
+
+Work does not execute agents, manage physical worktrees, or perform PR/CI actions. Backup/restore, automatic expiry/pruning, remote coordination and the accepted storage-recovery follow-up remain deferred. Template expansion may leave inspectable partial results; explicit discard can retain handoffs with missing receivers. See docs/using-work.md for retention, retry and platform limits. Candidate preparation is not publication or final-main/all-host verification.
+{% endif %}
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{{ commit.message | upper_first }}
