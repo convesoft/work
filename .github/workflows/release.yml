@@ -141,7 +141,6 @@ jobs:
           retention-days: 7
 
   publish:
-    if: vars.WORK_RELEASE_READY == 'true'
     needs: [prepare, build]
     runs-on: ubuntu-24.04
     environment: release
