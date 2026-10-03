@@ -16,4 +16,6 @@ pub mod sessions;
 pub mod storage;
 pub mod templates;
 
+mod digests;
+mod execution_finalization;
 pub mod execution_runs;
