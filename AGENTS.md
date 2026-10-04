@@ -27,6 +27,10 @@ This Rust project is a local, agent-first issue tracker for managing work state.
 - During bootstrap, maintain item files manually according to `.work/README.md`. Keep canonical IDs, filenames, relationships, and unrelated body content intact. Do not invent claims or run records before the coordination layer exists.
 - For this repository's implementation tasks, close after verified integration into the declared delivery target, with acceptance passing and required review complete. Release preparation also requires the specified publication evidence. This delivery convention does not change Work's generic item lifecycle.
 - Keep acceptance criteria and release checklists in ordinary Markdown. Work does not parse or rewrite those sections.
+- Follow the **Backlog policy** section of
+  [triage-findings](.pi/skills/triage-findings/SKILL.md) for intake, organization
+  and scheduling. It is the single shared policy; priority scales and existing
+  topic labels remain project configuration.
 - Keep ChatGPT conversation links out of repository files.
 
 ## Pull requests

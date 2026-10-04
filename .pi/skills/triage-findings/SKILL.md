@@ -1,6 +1,6 @@
 ---
 name: triage-findings
-description: Classify review findings and combined-state defects as fix now, backlog, dismiss, or ask the user. Use after a completed review or when an implementer or integration coordinator assesses findings. Preserve evidence and record supported deferrals; a read-only reviewer must not perform tracker mutations.
+description: Classify review findings and combined-state defects as fix now, backlog, dismiss, or ask the user, and manage accepted unscheduled work under the shared label-based backlog policy. Use after completed reviews, when assessing defects, or for backlog intake and scheduling. Preserve evidence; a read-only reviewer must not mutate tracking.
 ---
 
 # Triage findings
@@ -51,19 +51,54 @@ evidence, and the actual fix/verification or backlog destination when available.
 Keep supplied base and actual merge base when the review workflow provides them.
 Do not claim a fix or passing check before producing its evidence.
 
-For an authorized backlog disposition:
-- Reuse existing accepted tracking. If the task names a shared backlog bucket,
-  append a separately identifiable entry there; otherwise follow project
-  conventions for one independently actionable outcome.
-- Keep the repository, source, reproduction/trigger, concrete impact, relevant
-  contract IDs when present, remedy/outcome and deferral rationale.
-- With Work, use the intended checkout and Work tools for metadata/relations.
-  Keep it open and labeled `backlog`, use canonical full IDs, preserve headers
-  during narrow opaque-body edits, and run diagnostics. Do not add a current
-  delivery prerequisite or release label merely to record unscheduled work.
-- Create nothing for resolved, duplicate or speculative reports. If recording
-  fails or is not authorized, report that no entry was recorded and the pending
-  disposition; do not claim the backlog step is complete.
+For an authorized backlog disposition, follow the single policy below.
+If recording fails or is not authorized, report that no entry was recorded
+and the pending disposition; do not claim the backlog step is complete.
+
+## Backlog policy
+
+This section owns backlog organization and scheduling policy, including intake
+outside reviews. Other guidance references it rather than defining another
+policy. Keep distributed copies identical; project priority scales and existing
+topic labels are configuration, not separate policies.
+
+1. **Membership:** `backlog` means accepted, actionable but unscheduled work.
+   It is not severity, rejection or authorization to start. Do not start backlog
+   work without an explicit request.
+2. **Items:** Use one open manual item per independently actionable outcome.
+   Close only after verified delivery under the declared acceptance/integration
+   gates. Do not create an empty container in advance.
+3. **Priority:** Use the project's existing scale for relative importance.
+   Priority alone neither schedules work nor authorizes execution.
+4. **Topics:** Optional topic labels are filters. Reuse existing labels; do not
+   introduce a growing mandatory taxonomy or another label for backlog membership.
+5. **Relations:** No universal "Backlog" parent. Parents represent bounded
+   initiatives with concrete completion conditions, not categories. Use a
+   `children` aggregate only when its children genuinely determine completion;
+   use a manual owner when separate acceptance gates remain. `depends_on`
+   represents real lifecycle prerequisites, not grouping or priority.
+6. **Content:** Record repository, source, reproduction/trigger and impact,
+   expected outcome/remedy, relevant contract IDs and deferral rationale.
+7. **Deduplication:** Inspect existing tracking before creating; update or link
+   the existing outcome. Create nothing for duplicate, resolved, speculative
+   or non-actionable reports.
+8. **Scheduling:** On authorized scheduling, remove `backlog` and record the
+   delivery target, acceptance criteria and actual prerequisites. Scheduling
+   does not close the item. Do not add release labels or delivery prerequisites
+   merely to record unscheduled work.
+9. **Eligibility:** Current-acceptance failures and critical defects cannot be
+   silently deferred. Material scope or contract changes require the user;
+   labels and priorities never waive accepted requirements.
+
+A shared bucket is an explicitly requested exception, not the default. Only
+small related outcomes without independent scheduling/acceptance needs belong
+there; give each entry a stable key and the same source/content evidence.
+Extract an independent item when those needs arise.
+
+With Work, select the intended checkout, use Work tools for metadata/relations
+and canonical full IDs, preserve headers during narrow opaque-body edits, and
+run diagnostics. This is a delivery policy, not a new persisted format or a
+change to the tracker's generic lifecycle.
 
 An existing deferral must be reassessed when impact, triggering conditions,
 acceptance or the reason for deferral changes. Re-report and cite its tracking

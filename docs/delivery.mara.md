@@ -35,7 +35,7 @@ If `main` advances, verify the updated integration result before merging. Updati
 
 ### Finding disposition
 
-Use [finding triage](../.pi/skills/triage-findings/SKILL.md) for issue, cloud and combined-tree findings; run the [Pi review loop](../.pi/skills/pi-review-loop/SKILL.md) when required. The implementer or integration coordinator records supported fix-now, backlog, dismiss or ask-user dispositions without rewriting the independent review.
+Use [finding triage](../.pi/skills/triage-findings/SKILL.md) for issue, cloud and combined-tree findings; run the [Pi review loop](../.pi/skills/pi-review-loop/SKILL.md) when required. The implementer or integration coordinator records supported fix-now, backlog, dismiss or ask-user dispositions without rewriting the independent review. Backlog organization and scheduling follow that skill's **Backlog policy** section; do not maintain a parallel policy here.
 
 No current-acceptance or critical defect is waived by deferral. Required fixes/clarifications and applicable verification must resolve before acceptance. Report a clean review only from completed no-finding/correct evidence; otherwise report accepted after triage with actual backlog references and disposition rationale. Preserve the reviewed/tested identities. This policy does not replace required approval, CI, integration checks or publication authorization.
 
