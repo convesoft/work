@@ -174,3 +174,20 @@ Reject ordinary metadata edits/reopening and claims on retained ended-run wisps 
 
 Run equivalent disposable primary/linked repository workflows through real CLI/MCP processes and installed native/dispatcher packages. Exercise default initialization, inherited execution, own child run, named claim-next/owner mutations, retirement, cross-run pull handoffs, promotion, external Git merge plus relocation, optional-summary finalization, recursive disposal and external checkout-removal reporting if exposed. Compare domain outcomes and authoritative files, and test invalid-input no-write behavior, contention, missing/ambiguous authority and operation-specific interruptions. Check help/tools-list against implemented contracts, not a hard-coded beta.1 tool count; superseded workspace/binding, attach/detach, rebind and receiver-pruning operations must not pretend success. Confirm no migration/dual-layout engine, agent/process control, Git merge/worktree deletion, PR/CI action, or notification transport is executed. Local passing evidence is not publication/all-host/power-loss evidence.
 :::
+
+:::mara verification VER-BETA2-RECOVERY-CLEANUP
+:mid: 01M443ZC0K6MQXMFPRXBAH6V7V
+:title: Verify successful-update cleanup and exceptional recovery retention
+:status: accepted
+:method: test
+:level: acceptance
+:verifies: DES-DURABLE-OPERATIONS
+
+Use disposable primary and linked Git checkouts and real CLI/MCP processes. Repeatedly update, close/reopen and mutate item relations; after each verified success, compare published item/body/graph results and assert that no old-source recovery copy or unused stage was added. Successful ordinary results expose no deleted recovery path. Confirm permissions, directory-bound access, no-overwrite creation and ownership checks remain intact.
+
+Inject prepublication rejection, publication/sync/reload failure, a detected external-source conflict, process interruption and cleanup failure after a verified save. Preserve uncertain or conflicting content and exact recovery paths; conflicting follow-up mutations must refuse until the affected operation is resolved, while inspection and permitted resolution remain available. A cleanup-only failure must identify the already-published item and remaining artifacts, not imply that the save failed to occur or can safely be replayed. Do not treat process-exit coverage as power-loss evidence.
+
+Repair malformed, misnamed and shadowed sources: retain displaced content and the existing exact-byte guarded canonical-publication/archive retry. After explicit caller resolution/discard, remove only selected operation artifacts. Exercise restart-created orphan stages and legacy `.operation-*` files with unknown provenance; filename, age or a valid current item alone must not authorize automatic deletion. Preserve unrelated files and changes made after inspection.
+
+Verify CLI/MCP semantic and publication-evidence parity and that cleanup never deletes material items, lock files or retained run/session/claim/handoff history. Document the stale-open-handle limitation instead of asserting a transaction against outside writers. Passing evidence must cite actual tested revisions; this definition does not claim that the planned policy is implemented.
+:::

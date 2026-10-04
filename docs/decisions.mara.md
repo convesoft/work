@@ -162,3 +162,18 @@ The same explicit-placement rule applies after creation: current-wisp reparentin
 
 Wire-review clarification: the user selected material-only roots for stored run/dedicated-host boundaries (promote a wisp first). The user also selected source recovery before adoption when old authoritative bytes are unavailable; attestation alone cannot verify continuing ownership. These choices preserve one-home temporary lifetimes and avoid treating an unverifiable copy as current state. Exact formats and selectors are specified by DES-BETA2-WIRE; no runtime or release evidence is implied.
 :::
+
+:::mara decision ADR-RECOVERY-ARTIFACT-LIFECYCLE
+:mid: 01M443ZBYD2M12DMRJDEJV1HNB
+:title: Use temporary staging instead of indefinite successful-update backups
+:status: accepted
+:justifies: DES-DURABLE-OPERATIONS
+
+Decision for planned `0.1.0-beta.2`: adopt Mara's temporary-staging lifecycle rather than preserving a previous-version file after every successful ordinary item replacement. Keep recovery information for unresolved publication, detected conflicts and displaced repair sources; remove operation artifacts after verified ordinary success or explicit resolution. The detailed lifecycle is specified by [[DES-DURABLE-OPERATIONS]].
+
+Rationale: retaining one copy per successful mutation makes local storage grow with the number of edits, even when nothing failed. Recovery artifacts should support a concrete unresolved operation, not provide an unlimited edit history. Retention by age or copy count does not prove that uncertain content is safe to discard.
+
+Trade-off: preserve detected conflicts and actionable publication evidence, but do not guarantee preservation of later writes through stale file handles held by outside editors. Callers must avoid concurrent direct editing and Work mutations of the same source. Work's advisory locks do not coordinate those editors or external Git operations.
+
+This revises beta.1's unconditional successful-replacement retention, not the descriptor-bound publication, permissions, sync, ownership or graph safeguards. It does not change run/session/claim/handoff lifetimes, authorize deletion of existing recovery files, or introduce Mara's general multi-file journal/rollback machinery into Work. This is accepted beta.2 knowledge, not implemented behavior or passing execution evidence.
+:::
