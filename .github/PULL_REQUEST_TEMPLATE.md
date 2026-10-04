@@ -4,7 +4,9 @@
 
 <!-- State the observable result. Keep durable product meaning in `*.mara.md`. -->
 
-- **Work item:** <!-- .work/items/<full-id>.md -->
+- **Delivery mode:** <!-- Individual issue (squash merge) or bounded scope (rebase merge) -->
+- **Work owner:** <!-- Canonical full ID or link to .work/items/<full-id>.md; N/A if none -->
+- **Included items:** <!-- Scope PR: all included canonical Work IDs/links; individual PR: N/A -->
 - **Mara items:** <!-- REQ-..., DES-..., SCN-..., or N/A -->
 
 ## Change
@@ -13,7 +15,7 @@
 
 ## Verification
 
-<!-- List commands run and end-to-end evidence; do not copy Work acceptance criteria. -->
+<!-- List commands, actual tested revision, and end-to-end evidence; scope PRs include combined acceptance. Do not copy Work acceptance criteria or relabel evidence after history rewriting. -->
 
 ## Known limitations
 

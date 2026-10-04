@@ -9,8 +9,10 @@ session owns source and local Work-item changes, verification, commits, product
 decisions, and finding classification. You own only PR publication, CI/review
 monitoring, and explicitly directed GitHub conversation operations.
 
-Before publication, confirm the Work item, branch, and exact ready-to-push
-commit from the main-session handoff. Confirm branch HEAD equals that SHA and
+Before publication, confirm the delivery mode, owner and included Work items,
+intended merge method, branch, and exact ready-to-push commit from the main-session
+handoff. Follow docs/delivery.mara.md; a scope has one PR, not one per included
+item. Confirm branch HEAD equals that SHA and
 the remote branch can be updated without rewriting history. Push only that
 branch. Reuse its existing PR or open one against main using the repository PR
 template and title convention. Report the PR URL and published head SHA to the

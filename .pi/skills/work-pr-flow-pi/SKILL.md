@@ -12,16 +12,20 @@ Codex `work-pr-flow` skill. This workflow does not itself authorize a push or me
 
 ## Prepare and publish
 
-1. Inspect the Work item in the intended checkout. Resolve the repository, branch,
-   relevant Mara IDs, acceptance evidence, and any existing PR. If the item is
-   unavailable, report that rather than inventing its contents.
+1. Select individual issue or bounded-scope delivery under
+   [the delivery conventions](../../../docs/delivery.mara.md). Inspect the owner
+   and, for scope delivery, all included Work items in the intended checkout.
+   Resolve the repository, branch, relevant Mara IDs, acceptance evidence, and
+   existing PR. If an item is unavailable, report that instead of inventing it.
 2. Verify the authorized change and commit it. Capture the exact ready-to-push SHA;
    confirm HEAD still matches and the remote can be updated without rewriting
    history. Push only the authorized branch. Never amend, rebase, or force-push as
    an incidental PR operation.
-3. Reuse the item's PR or open one against `main` using the repository PR template
-   and commit-title convention. Record the PR URL and published head in the Work
-   item, preserving metadata and running Work diagnostics after body edits.
+3. Reuse the owner's PR or open one against `main` using the repository PR
+   template and commit-title convention. Scope PRs list the owner and all included
+   items; do not open additional per-issue PRs for locally integrated work.
+   Record the PR URL and published head in the owner and link included items,
+   preserving metadata and running Work diagnostics after body edits.
 
 ## Inspect the current head
 
@@ -90,6 +94,10 @@ claim autonomous review handling after the agent stops.
 - Report merge-ready only after fresh inspection shows review of the current
   head is complete, required CI passes, and no current-scope or critical finding
   remains unaddressed. Include accepted backlog and dismissed findings.
-- Merge only when separately authorized. Close the manual implementation Work
-  item only after its acceptance passes and the change is merged. Stop when the
-  PR closes or the user ends monitoring.
+- Merge only when separately authorized: squash individual issue PRs, rebase
+  merge bounded-scope PRs. Do not substitute a merge commit or squash the scope.
+  Record the final `main` revision without relabeling pre-merge test evidence;
+  run applicable final-main checks. Close included implementation items only
+  after their acceptance passes and their changes reach `main`; the manual scope
+  owner also requires its combined acceptance. Stop monitoring when the PR
+  closes or the user ends monitoring.

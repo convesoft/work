@@ -12,8 +12,11 @@ conversation operations. Its instructions live in
 main session active during the review loop. Pi excludes this skill and uses its
 own main-agent PR workflow.
 
-1. Complete and verify the authorized work, then commit it. Give the PR manager
-   the canonical Work item path and ID, branch, exact ready-to-push SHA,
+1. Follow [the delivery conventions](../../../docs/delivery.mara.md). Complete
+   and verify the authorized work, then commit it. Give the PR manager the
+   delivery mode, canonical owner and included Work item paths and IDs, intended
+   merge method (squash for an individual issue; rebase for a scope), branch,
+   exact ready-to-push SHA,
    relevant Mara IDs, verification evidence, known limitations, and existing PR
    URL, if any. Select the project `work_pr_manager` agent when Codex CLI
    supports custom agent selection. Otherwise, use a `gpt-6-luna` subagent at

@@ -23,7 +23,7 @@ This Rust project is a local, agent-first issue tracker for managing work state.
 
 - Mara owns durable product meaning. `.work/items/` owns delivery tasks, task-specific acceptance criteria, priority, dependencies, and progress. GitHub owns pull requests, reviews, CI results, and merge/publication evidence. Do not introduce Mara task or release flavours to mirror the backlog.
 - Read the selected Work item and its Mara references before implementation. If a task or review reveals a product decision, update the canonical knowledge instead of leaving that decision only in a task or PR.
-- Follow [the delivery conventions](docs/delivery.mara.md). Start each implementation item on a dedicated branch from current `main`; use `feature/w-<short-id>-<description>` and one bounded PR per item. Squash merging is the default.
+- Follow [the delivery conventions](docs/delivery.mara.md). Choose individual issue delivery or bounded local scope delivery; local integration is progress, not completion. Delivery scopes do not change Work's generic lifecycle or execution-scope product contracts.
 - During bootstrap, maintain item files manually according to `.work/README.md`. Keep canonical IDs, filenames, relationships, and unrelated body content intact. Do not invent claims or run records before the coordination layer exists.
 - For this repository's implementation tasks, mark done only after their acceptance criteria pass and the change is merged. Release preparation also requires the specified publication evidence. This delivery convention does not change Work's generic item lifecycle.
 - Keep acceptance criteria and release checklists in ordinary Markdown. Work does not parse or rewrite those sections.
@@ -31,17 +31,28 @@ This Rust project is a local, agent-first issue tracker for managing work state.
 
 ## Pull requests
 
-- Start each implementation item from current `main` using
-  `feature/w-<short-id>-<description>`. Open one bounded pull request per item
-  against `main` and use a Conventional Commit title suitable for squash merge.
+- Individual issue branches start from current `main`. Bounded version or
+  milestone scopes start from current `main` with one manual Work owner;
+  included issue branches start from the current scope tip. Use
+  `feature/w-<short-id>-<description>` with the branch owner's ID unless the
+  user explicitly selects another branch. Keep scopes short-lived.
+- Open one PR per individual issue, or one scope PR after local issue
+  verification, review, squash integration, and combined verification. Target
+  `main`; identify the scope owner and all included items for scope PRs.
+  Use a Conventional Commit title.
 - Draft the PR from [the template](.github/PULL_REQUEST_TEMPLATE.md). Preserve
   its sections and cite the canonical `.work/items/` path, relevant Mara IDs,
   and verification evidence that actually exists. Use `N/A` when appropriate.
-- Squash merge by default. Use rebase merge only when preserving multiple
-  independently useful commits that already follow the commit convention.
-- When the user intends to publish or continue an item PR, identify the
-  canonical Work item path and ID, branch, exact ready-to-push SHA, relevant
-  Mara IDs, verification evidence, known limitations, and existing PR URL, if
+- Squash merge individual issue PRs. Rebase merge bounded-scope PRs, preserving
+  one logical Conventional Commit per locally squashed issue in linear history.
+  Do not use merge commits or squash an entire scope. Local integration does
+  not close implementation items; acceptance and integration into `main` do.
+  Keep actual tested SHAs in evidence; rebase merging does not transfer evidence
+  to new commit identities.
+- When the user intends to publish or continue an item or scope PR, identify
+  the delivery mode, canonical owner and included Work item paths and IDs,
+  branch, exact ready-to-push SHA, relevant Mara IDs, verification evidence,
+  known limitations, and existing PR URL, if
   any. Implementation, tests, commits, local Work-item edits, and finding
   classification stay with the main session. Use the workflow for the active
   host:
@@ -88,7 +99,11 @@ This Rust project is a local, agent-first issue tracker for managing work state.
 
 - The baseline on `main` contains no CI/release workflow files or generated changelog. Add initial workflow files in the first Rust-foundation feature branch.
 - CI should check PRs targeting `main` and pushes to `main`. Validate Mara knowledge using Mara, separately from the future Work executable.
-- Release preparation is a separate Work item and PR. Generate `CHANGELOG.md` only for an intentional release candidate; with the planned main-plus-changelog trigger, adding it can start release verification.
+- One manual Work item owns release preparation and publication follow-through.
+  It may use an individual PR or an enclosing scope PR; keep release preparation
+  independently identifiable and reviewed. Generate `CHANGELOG.md` only for an
+  intentional release candidate; with the planned main-plus-changelog trigger,
+  adding it can start release verification.
 - Build and verify one captured main revision before protected publication. Configure the GitHub release environment and any registry trust before publishing; workflow YAML alone does not establish those settings.
 - Package names, supported hosts, licensing, and the first version must be explicitly settled before publication. Do not imply that Mara's distribution choices automatically apply to Work.
 

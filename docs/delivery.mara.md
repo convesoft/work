@@ -16,15 +16,38 @@ Configure CI for PRs targeting `main` and pushes to `main`. Validate the first f
 
 ## Implementation delivery
 
-Start each item from current `main` on `feature/w-<short-id>-<description>`. Keep one bounded PR per item, identify the canonical Work item, and reference relevant Mara knowledge. Describe the change and actual validation. Use a Conventional Commit PR title and squash merge by default.
+Both delivery modes are supported. Select the mode before starting new work; keep existing branches unless explicitly changing their placement.
 
-Keep implementation items open through implementation, review, and fixes. Mark them done after acceptance passes and the change is merged. This is this repository's delivery policy; generic Work items remain governed by [[DES-LIFECYCLE]]. Aggregate completion remains derived from children. Never mark the live backlog complete merely to exercise acceptance tests; use disposable copies.
+### Individual issue
+
+Start the item branch from current `main` using `feature/w-<short-id>-<description>`. Open one bounded PR against `main` and squash merge it.
+
+### Bounded local scope
+
+1. Use one manual Work item to own a bounded version or milestone scope. Record the repository, intended outcome, included canonical Work IDs, relevant Mara IDs, integration order, and final acceptance checks. Reuse the release-preparation owner when it already owns this scope; a version name is not a release or publication approval.
+2. Start a short-lived scope branch from current `main` using `feature/w-<short-id>-<description>` with the scope owner's ID. Start each included issue branch from the current scope tip using the same convention with that issue's ID. Do not introduce long-lived development or release branches.
+3. Implement, verify, and locally review each issue against its scope base before integration. Follow the repository's review rules; run the independent Pi review loop only when explicitly required. Squash integration is not review or CI.
+4. With a clean scope checkout, run `git merge --squash <issue-branch>`, inspect the staged result, and commit one logical Conventional Commit for that issue. Identify its canonical Work ID in the commit body or footer. This creates no merge commit and does not record merge ancestry. Verify the integrated result before starting dependent work; after integration, branch subsequent work from the new scope tip rather than reusing the old issue branch.
+5. Keep issue acceptance evidence in its item and record the integrated commit and remaining work in the scope owner. Local integration does not close an implementation item.
+6. Run the final combined acceptance checks on the exact scope head. Open one scope PR against `main`, identifying the owner and all included items, relevant Mara IDs, actual verification evidence, and limitations. Every retained commit must be independently useful and follow the commit convention. Rebase merge the scope PR to preserve per-issue commits in linear `main` history; do not squash the entire scope or use a merge commit.
+
+If `main` advances, verify the updated integration result before merging. Updating or rewriting an existing branch requires explicit authorization; this workflow does not authorize incidental rebases or force-pushes. A changed PR head requires fresh applicable checks and review. GitHub must allow rebase merging for scope PRs; unavailable merge methods are a blocker, not permission to silently choose another method.
+
+### Evidence and completion
+
+Work IDs remain stable across Git history rewriting. Local squashing and GitHub rebase merging change commit identities. Evidence records the actual tested revision and scope; do not relabel old evidence as testing a new SHA. Record the final `main` integration revision and run the applicable final-`main` checks. Release verification still targets one captured `main` revision.
+
+Keep implementation items open through local integration, PR review, and fixes. Close each only after its acceptance passes and its change reaches `main`. Close the manual scope owner only after its own combined acceptance and integration gates pass. Aggregate completion remains derived from children; a manual owner is not a derived aggregate.
+
+Pushes, PR merges, branch/history rewrites, and release publication require their respective authorization. Adoption of this workflow does not itself authorize them.
+
+These are repository delivery conventions, not changes to generic Work items under [[DES-LIFECYCLE]] or the product's execution-scope contracts. Never mark the live backlog complete merely to exercise acceptance tests; use disposable copies.
 
 ## Release preparation
 
-The [release-preparation item](../.work/items/74c22e40cbc249229f86e355a663a942.md) follows the first usable CLI/MCP milestone. It prepares a separately reviewed candidate and owns publication follow-through. An early alpha may contain just that usable slice, with its limitations explicit; it must not claim all of [[ADR-INITIAL-SCOPE]] is implemented.
+The [release-preparation item](../.work/items/74c22e40cbc249229f86e355a663a942.md) follows the first usable CLI/MCP milestone. One manual item owns release preparation and publication follow-through; reuse the owner of the intended release. It prepares an independently reviewed candidate through either delivery mode. In scope mode, identify and review release preparation within the scope PR. An early alpha may contain just that usable slice, with its limitations explicit; it must not claim all of [[ADR-INITIAL-SCOPE]] is implemented.
 
-The intended workflow follows Mara's separation between verification and protected publication. A push to `main` changing `CHANGELOG.md` starts release verification. Keep the changelog out of the foundation PR; generate it from Conventional Commit history with git-cliff in the release-preparation PR, alongside the manually selected version. Apply the `release` label to a release-preparation PR as a maintainer convention. Like Mara, the workflow does not inspect that label: the automated trigger is the `main` push changing `CHANGELOG.md`, not a label event.
+The intended workflow follows Mara's separation between verification and protected publication. A push to `main` changing `CHANGELOG.md` starts release verification. Keep the changelog out of the foundation PR; generate it from Conventional Commit history with git-cliff in the individual release-preparation PR or its enclosing scope PR, alongside the manually selected version. Apply the `release` label to the PR containing release preparation as a maintainer convention. Like Mara, the workflow does not inspect that label: the automated trigger is the `main` push changing `CHANGELOG.md`, not a label event.
 
 Capture one main commit for source checks, artifact builds, package/install inspection, and real CLI/MCP smoke tests on every declared supported host. Publication depends on successful verification and approval through the protected release environment. Use an annotated immutable version tag at that commit and publish a draft GitHub release only after distribution checks succeed. A failed staged publication may have created external artifacts; inspect completed stages and retry only the same revision and matching artifacts.
 
