@@ -1,6 +1,6 @@
 ## Historical beta.1 claim API
 
-This retired API is not the planned beta.2 ownership contract. See [scoped execution](scoped-execution.mara.md) for immutable named shortcuts and scope-local claims; exact command/tool schemas remain draft.
+This retired API is not the planned beta.2 ownership contract. See [scoped execution](scoped-execution.mara.md) for immutable named shortcuts and scope-local claims; exact command/tool schemas are frozen in [the accepted wire specification](beta2-wire.mara.md), not implemented beta.2 behavior.
 
 :::mara design DES-CLAIM-API
 :mid: 01M3TWR5NB3XQV4AK3DHK5BFJJ

@@ -1,6 +1,6 @@
 # Beta.2: acceptance scenarios and verification
 
-These scenarios and repeatable checks define required future behavior. They are not recorded passing runs. Execute state-changing checks on disposable repositories; capture actual source revisions and CLI/MCP outcomes before reporting implementation evidence.
+These scenarios and repeatable checks define required future behavior. They are not recorded passing runs. The [accepted wire specification](beta2-wire.mara.md) and [closed catalog](schemas/beta2-wire-v2.schema.json) freeze the fields, CLI/MCP inputs/results and failure/continuation contracts used by these checks. `node scripts/check-beta2-wire.mjs` checks specification consistency and `node --test tests/beta2_wire_spec.mjs` checks that checker; neither is runtime or package acceptance. Execute state-changing checks on disposable repositories; capture actual source revisions and CLI/MCP outcomes before reporting implementation evidence.
 
 ## Scenarios
 

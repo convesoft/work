@@ -20,7 +20,7 @@ The product decisions are settled in [[ADR-SCOPE-OWNED-EXECUTION]], [scope owner
 
 ## Confirmed lifecycle and routing details
 
-The scope review resolved the following observable choices. There are no remaining product-level questions identified by this review; the engineering specification gate below remains open.
+The scope review resolved the following observable choices. There are no remaining product-level questions identified by this review; the engineering specification gate below now has accepted wire knowledge, while runtime and delivery gates remain open.
 
 | Confirmed choice | Contract |
 | --- | --- |
@@ -39,7 +39,7 @@ These choices and their rationale are recorded in [[ADR-SCOPE-OWNED-EXECUTION]] 
 
 ## Specification gate before behavior implementation
 
-[[DES-BETA2-WIRE]] remains deliberately **draft**. The [w-10f481ed](../.work/items/10f481edd6d44c458e8c091aa76a5e7c.md) item must freeze exact root/scope/child-reference identifiers and envelopes, per-checkout host declarations, run phases and root rotation, named/qualified identity inputs, local claim authorization/endings, handoff/inbox schemas, narrow interrupted relocation/promotion/disposal continuation and the full CLI/MCP/error matrix. These are engineering details constrained by accepted behavior, not permission to restore superseded machinery.
+[[DES-BETA2-WIRE]] is **accepted specification knowledge**: [normative fields, grammar, authority and bounded retries](beta2-wire.mara.md) plus [closed envelope/input/result and operation/error schemas](schemas/beta2-wire-v2.schema.json). Its complete matrix covers 15 new envelope families and 53 CLI/MCP operations, with preserved template identifiers, typed failure/result shapes and bounded continuation. Specification checks and independent local review passed before acceptance. The [w-10f481ed](../.work/items/10f481edd6d44c458e8c091aa76a5e7c.md) delivery item remains open pending control-plane acceptance and verified scope integration; runtime behavior and package evidence are separate gates. No beta.2 runtime is advertised as implemented.
 
 If freezing those formats reveals a new behavioral choice, clarify it and update canonical knowledge before implementation. Do not silently accept illustrative file fields or command spellings. No root run/scope fixture is created in this live repository by documentation authoring.
 

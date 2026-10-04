@@ -159,4 +159,6 @@ Execution disposal preserves material hosting until separately validated relocat
 Rationale: these choices avoid silent changes in execution namespace, ownership, durable source or lifecycle graph while retaining explicit recovery of useful temporary work. Product questions in this review are settled; exact file fields, command spellings, tool schemas and bounded continuation representations remain the separate DES-BETA2-WIRE engineering gate, not implementation or release evidence.
 
 The same explicit-placement rule applies after creation: current-wisp reparenting into a different effective run is rejected. Same-run reparenting remains ordinary graph work; promote first when cross-run movement is needed. Beta.2 does not add wisp-transfer machinery.
+
+Wire-review clarification: the user selected material-only roots for stored run/dedicated-host boundaries (promote a wisp first). The user also selected source recovery before adoption when old authoritative bytes are unavailable; attestation alone cannot verify continuing ownership. These choices preserve one-home temporary lifetimes and avoid treating an unverifiable copy as current state. Exact formats and selectors are specified by DES-BETA2-WIRE; no runtime or release evidence is implied.
 :::

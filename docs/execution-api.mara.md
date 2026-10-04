@@ -1,6 +1,6 @@
 ## Historical beta.1 execution IO
 
-This retired contract describes the currently implemented beta.1 slice. Planned replacement: [scoped execution](scoped-execution.mara.md), especially DES-SCOPED-CLAIMS and DES-BETA2-SURFACES. New exact wire formats are still draft.
+This retired contract describes the currently implemented beta.1 slice. Planned replacement: [scoped execution](scoped-execution.mara.md), especially DES-SCOPED-CLAIMS and DES-BETA2-SURFACES. New exact wire formats are frozen in [the accepted wire specification](beta2-wire.mara.md), not implementation evidence.
 
 :::mara design DES-EXECUTION-IO
 :mid: 01M3TWR24EYHGH9N2B5AMHC7NW

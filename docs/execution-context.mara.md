@@ -1,6 +1,6 @@
 ## Historical beta.1 context API
 
-Independent workspace records, session rebinding and receiver-retained handoffs below are retired for beta.2. See [scoped execution](scoped-execution.mara.md) for their replacements. Do not treat the new draft wire contract as implemented commands.
+Independent workspace records, session rebinding and receiver-retained handoffs below are retired for beta.2. See [scoped execution](scoped-execution.mara.md) for their replacements. The [accepted wire contract](beta2-wire.mara.md) specifies replacement commands; do not treat accepted knowledge as implemented behavior.
 
 :::mara design DES-CONTEXT-API
 :mid: 01M3TWRD8A0N57SE471KQ7MEXA

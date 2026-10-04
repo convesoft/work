@@ -1,9 +1,9 @@
 # Architecture and data contracts
 
-Current beta.2 architecture is defined in [scope ownership](scopes.mara.md) and [scoped execution](scoped-execution.mara.md). Retired designs below are beta.1 history; unchanged accepted item/graph/body principles remain reusable. Exact new wire formats are draft until DES-BETA2-WIRE is accepted.
+Current beta.2 architecture is defined in [scope ownership](scopes.mara.md) and [scoped execution](scoped-execution.mara.md). Retired designs below are beta.1 history; unchanged accepted item/graph/body principles remain reusable. DES-BETA2-WIRE now freezes the accepted [new wire formats and complete surface matrix](beta2-wire.mara.md); knowledge acceptance is not runtime implementation.
 
 
-Contracts here describe the intended product architecture. Exact command spelling, serialization fields, and Rust crate layout remain uncommitted unless explicitly specified. [File storage](storage.mara.md) defines the current shared entity layout and coordination boundaries.
+Contracts here describe the intended product architecture. Exact command spelling, serialization fields, and Rust crate layout remain uncommitted unless explicitly specified. [File storage](storage.mara.md) preserves the retired beta.1 shared layout; [the wire specification](beta2-wire.mara.md) defines the planned beta.2 placement and coordination boundaries.
 
 :::mara design DES-SHARED-ITEM-MODEL
 :mid: 01M3KARN9Y8H41N8FF61NVHZZ7

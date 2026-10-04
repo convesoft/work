@@ -6,14 +6,14 @@ Work is a local, agent-first issue tracker implemented in Rust. Durable item/gra
 
 `accepted` means the product decision is settled, not that code exists or tests passed. `draft` is an explicit specification gate. `retired` preserves historical knowledge and references without imposing it on the replacement. Mara items describe the product; `.work/items/` contains delivery tasks and acceptance/progress records.
 
-For beta.2, begin with [[ADR-SCOPE-OWNED-EXECUTION]], [scope ownership](scopes.mara.md), [scoped execution](scoped-execution.mara.md), and [acceptance definitions](beta2-verification.mara.md). [[DES-BETA2-WIRE]] is intentionally draft: freeze exact envelopes and the complete CLI/MCP operation matrix before behavior implementation. The current binary and [usage guide](using-work.md) still expose beta.1.
+For beta.2, begin with [[ADR-SCOPE-OWNED-EXECUTION]], [scope ownership](scopes.mara.md), [scoped execution](scoped-execution.mara.md), and [acceptance definitions](beta2-verification.mara.md). [[DES-BETA2-WIRE]] now freezes the accepted [wire envelopes and complete CLI/MCP operation/error matrix](beta2-wire.mara.md), with [closed schemas](schemas/beta2-wire-v2.schema.json). This is reviewed knowledge, not implemented beta.2 behavior or verified delivery integration. The current binary and [usage guide](using-work.md) still expose beta.1.
 
 ## Corpus map
 
 | Document | Purpose |
 | --- | --- |
 | [Scope ownership](scopes.mara.md) | Current beta.2 vocabulary, scope/host/run inheritance and observable obligations |
-| [Scoped execution](scoped-execution.mara.md) | Current beta.2 placement, session/claim/message lifecycles, promotion and disposal; draft wire gate |
+| [Scoped execution](scoped-execution.mara.md) | Current beta.2 placement, session/claim/message lifecycles, promotion and disposal; accepted wire specification |
 | [Beta.2 acceptance](beta2-verification.mara.md) | Real connected scenarios and repeatable verification definitions, not passing evidence |
 | [Product](product.mara.md) | Goals, participant roles, and shared vocabulary |
 | [Scenarios](scenarios.mara.md) | Reusable planning/graph flows and retired beta.1 context flows |
@@ -73,7 +73,7 @@ Named sessions are immutable run-owned actor/namespace/external-ID shortcuts. Un
 
 Handoffs are addressed opaque messages stored in the sending run, even when addressed to the parent or a sibling run. Incoming context is discovered by reads/acquisition/inbox calls, not notifications. Sender disposal has no acknowledgement, receiver-completion or archival obligation. A parent decides what to read, promote or retain.
 
-Promotion preserves an unclaimed item's identity/body/state/relationships while making it material. Completed runs may finalize with an optional summary without closing their roots; abandonment is distinct. Compact terminal identities/claim history remain while retained. Explicit recursive scope disposal validates its target set and operates bottom-up, refusing active claims and unintended material loss, not unread handoffs. [[DES-SCOPE-TRANSITIONS]] defines the accepted boundaries; narrow partial/retry formats remain part of the draft wire gate.
+Promotion preserves an unclaimed item's identity/body/state/relationships while making it material. Completed runs may finalize with an optional summary without closing their roots; abandonment is distinct. Compact terminal identities/claim history remain while retained. Explicit recursive scope disposal validates its target set and operates bottom-up, refusing active claims and unintended material loss, not unread handoffs. [[DES-SCOPE-TRANSITIONS]] defines the accepted boundaries; narrow partial/retry formats are frozen by [the accepted wire specification](beta2-wire.mara.md).
 
 ## Agreed relationship model
 
