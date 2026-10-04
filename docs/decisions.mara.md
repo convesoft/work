@@ -165,15 +165,16 @@ Wire-review clarification: the user selected material-only roots for stored run/
 
 :::mara decision ADR-RECOVERY-ARTIFACT-LIFECYCLE
 :mid: 01M443ZBYD2M12DMRJDEJV1HNB
-:title: Use temporary staging instead of indefinite successful-update backups
+:title: Use temporary staging across all Work-managed file publication
 :status: accepted
 :justifies: DES-DURABLE-OPERATIONS
+:justifies: DES-FILE-PUBLICATION-LIFECYCLE
 
-Decision for planned `0.1.0-beta.2`: adopt Mara's temporary-staging lifecycle rather than preserving a previous-version file after every successful ordinary item replacement. Keep recovery information for unresolved publication, detected conflicts and displaced repair sources; remove operation artifacts after verified ordinary success or explicit resolution. The detailed lifecycle is specified by [[DES-DURABLE-OPERATIONS]].
+Decision for planned `0.1.0-beta.2`: adopt Mara's temporary-staging lifecycle across **all Work-managed file publication**, rather than preserving a previous-version file after every successful replacement. Apply the same policy to project content, scope-owned execution, Git-local routing/coordination and operation-specific progress. Keep recovery information for unresolved publication, detected conflicts and displaced repair sources; remove only obsolete artifacts after verified ordinary success or explicit resolution. [[DES-FILE-PUBLICATION-LIFECYCLE]] is the common contract; [[DES-DURABLE-OPERATIONS]] retains item-specific publication/repair behavior.
 
-Rationale: retaining one copy per successful mutation makes local storage grow with the number of edits, even when nothing failed. Recovery artifacts should support a concrete unresolved operation, not provide an unlimited edit history. Retention by age or copy count does not prove that uncertain content is safe to discard.
+Rationale: retaining one copy per successful mutation makes storage grow with the number of writes, even when nothing failed. Fixing only the item writer leaves the shared publisher and non-item record updates accumulating `.storage-*` or equivalent copies. Artifacts support a concrete operation, not unlimited edit history. Retention by age or copy count does not establish safe deletion.
 
-Trade-off: preserve detected conflicts and actionable publication evidence, but do not guarantee preservation of later writes through stale file handles held by outside editors. Callers must avoid concurrent direct editing and Work mutations of the same source. Work's advisory locks do not coordinate those editors or external Git operations.
+Trade-off: preserve detected conflicts and actionable publication evidence, but do not guarantee preservation of later writes through stale handles held by outside editors. Callers must avoid concurrent direct editing and Work mutations of the same source. Work locks do not coordinate those editors or external Git operations.
 
-This revises beta.1's unconditional successful-replacement retention, not the descriptor-bound publication, permissions, sync, ownership or graph safeguards. It does not change run/session/claim/handoff lifetimes, authorize deletion of existing recovery files, or introduce Mara's general multi-file journal/rollback machinery into Work. This is accepted beta.2 knowledge, not implemented behavior or passing execution evidence.
+The scope is obsolete publication artifacts, not authoritative records: immutable claims, retained run/session/handoff/digest content, live locks and still-needed continuation evidence keep their own lifecycles. Preserve descriptor-bound access, permissions, sync, ownership, graph safeguards and bounded continuation. Do not add a generic journal/rollback service, new editing APIs, beta.1 migration or automatic deletion of existing artifacts. This is accepted future policy, not implemented behavior or passing execution evidence.
 :::
