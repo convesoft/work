@@ -97,7 +97,9 @@ claim autonomous review handling after the agent stops.
 - Merge only when separately authorized: squash individual issue PRs, rebase
   merge bounded-scope PRs. Do not substitute a merge commit or squash the scope.
   Record the final `main` revision without relabeling pre-merge test evidence;
-  run applicable final-main checks. Close included implementation items only
-  after their acceptance passes and their changes reach `main`; the manual scope
-  owner also requires its combined acceptance. Stop monitoring when the PR
-  closes or the user ends monitoring.
+  run applicable final-main checks. Close the PR owner after verified integration
+  into its declared target, with acceptance passing and required review complete.
+  Included issues may already be closed after verified local scope integration;
+  do not reopen them merely because scope delivery is pending. Reopen an issue
+  if review invalidates its acceptance. Stop monitoring when the PR closes or
+  the user ends monitoring.

@@ -23,9 +23,9 @@ This Rust project is a local, agent-first issue tracker for managing work state.
 
 - Mara owns durable product meaning. `.work/items/` owns delivery tasks, task-specific acceptance criteria, priority, dependencies, and progress. GitHub owns pull requests, reviews, CI results, and merge/publication evidence. Do not introduce Mara task or release flavours to mirror the backlog.
 - Read the selected Work item and its Mara references before implementation. If a task or review reveals a product decision, update the canonical knowledge instead of leaving that decision only in a task or PR.
-- Follow [the delivery conventions](docs/delivery.mara.md). Choose individual issue delivery or bounded local scope delivery; local integration is progress, not completion. Delivery scopes do not change Work's generic lifecycle or execution-scope product contracts.
+- Follow [the delivery conventions](docs/delivery.mara.md). Choose individual issue delivery or bounded local scope delivery; close after verified integration into the declared delivery target. Delivery scopes do not change Work's generic lifecycle or execution-scope product contracts.
 - During bootstrap, maintain item files manually according to `.work/README.md`. Keep canonical IDs, filenames, relationships, and unrelated body content intact. Do not invent claims or run records before the coordination layer exists.
-- For this repository's implementation tasks, mark done only after their acceptance criteria pass and the change is merged. Release preparation also requires the specified publication evidence. This delivery convention does not change Work's generic item lifecycle.
+- For this repository's implementation tasks, close after verified integration into the declared delivery target, with acceptance passing and required review complete. Release preparation also requires the specified publication evidence. This delivery convention does not change Work's generic item lifecycle.
 - Keep acceptance criteria and release checklists in ordinary Markdown. Work does not parse or rewrite those sections.
 - Keep ChatGPT conversation links out of repository files.
 
@@ -45,8 +45,10 @@ This Rust project is a local, agent-first issue tracker for managing work state.
   and verification evidence that actually exists. Use `N/A` when appropriate.
 - Squash merge individual issue PRs. Rebase merge bounded-scope PRs, preserving
   one logical Conventional Commit per locally squashed issue in linear history.
-  Do not use merge commits or squash an entire scope. Local integration does
-  not close implementation items; acceptance and integration into `main` do.
+  Do not use merge commits or squash an entire scope. Close issues after
+  verified integration into their declared target: `main` for individual PRs,
+  the scope branch for included issues. The scope owner retains the final
+  `main` integration and cloud-review gates.
   Keep actual tested SHAs in evidence; rebase merging does not transfer evidence
   to new commit identities.
 - When the user intends to publish or continue an item or scope PR, identify

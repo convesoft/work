@@ -28,7 +28,7 @@ Start the item branch from current `main` using `feature/w-<short-id>-<descripti
 2. Start a short-lived scope branch from current `main` using `feature/w-<short-id>-<description>` with the scope owner's ID. Start each included issue branch from the current scope tip using the same convention with that issue's ID. Do not introduce long-lived development or release branches.
 3. Implement, verify, and locally review each issue against its scope base before integration. Follow the repository's review rules; run the independent Pi review loop only when explicitly required. Squash integration is not review or CI.
 4. With a clean scope checkout, run `git merge --squash <issue-branch>`, inspect the staged result, and commit one logical Conventional Commit for that issue. Identify its canonical Work ID in the commit body or footer. This creates no merge commit and does not record merge ancestry. Verify the integrated result before starting dependent work; after integration, branch subsequent work from the new scope tip rather than reusing the old issue branch.
-5. Keep issue acceptance evidence in its item and record the integrated commit and remaining work in the scope owner. Local integration does not close an implementation item.
+5. Record the declared target, integrated commit, acceptance and review evidence in each issue. Close it after verified integration into the scope branch under the completion gates below. Record remaining scope delivery work in the scope owner.
 6. Run the final combined acceptance checks on the exact scope head. Open one scope PR against `main`, identifying the owner and all included items, relevant Mara IDs, actual verification evidence, and limitations. Every retained commit must be independently useful and follow the commit convention. Rebase merge the scope PR to preserve per-issue commits in linear `main` history; do not squash the entire scope or use a merge commit.
 
 If `main` advances, verify the updated integration result before merging. Updating or rewriting an existing branch requires explicit authorization; this workflow does not authorize incidental rebases or force-pushes. A changed PR head requires fresh applicable checks and review. GitHub must allow rebase merging for scope PRs; unavailable merge methods are a blocker, not permission to silently choose another method.
@@ -37,7 +37,16 @@ If `main` advances, verify the updated integration result before merging. Updati
 
 Work IDs remain stable across Git history rewriting. Local squashing and GitHub rebase merging change commit identities. Evidence records the actual tested revision and scope; do not relabel old evidence as testing a new SHA. Record the final `main` integration revision and run the applicable final-`main` checks. Release verification still targets one captured `main` revision.
 
-Keep implementation items open through local integration, PR review, and fixes. Close each only after its acceptance passes and its change reaches `main`. Close the manual scope owner only after its own combined acceptance and integration gates pass. Aggregate completion remains derived from children; a manual owner is not a derived aggregate.
+Close after verified integration into the declared delivery target: acceptance must pass, required review for that target must be complete, and the integrated result must be verified. Declare the target before implementation and record its branch and integrated revision in the item.
+
+| Item | Declared delivery target and closure gate |
+| --- | --- |
+| Individual issue | `main`; acceptance, required cloud review/CI, merge and integration verification |
+| Issue within a bounded scope | Scope branch; acceptance, required local review, squash integration and integration verification |
+| Scope owner | `main`; combined acceptance, required cloud review/CI, scope PR merge and integration verification |
+| Release owner | Its declared integration target plus all release/publication acceptance criteria |
+
+Closed scope issues do not wait for the enclosing scope PR. The scope owner tracks remaining combined checks, cloud review, CI and delivery to `main`. If later review invalidates an issue's acceptance, reopen that issue; new scope-level integration defects may have their own items. Aggregate completion remains derived from children; a manual owner is not a derived aggregate.
 
 Pushes, PR merges, branch/history rewrites, and release publication require their respective authorization. Adoption of this workflow does not itself authorize them.
 
