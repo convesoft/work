@@ -16,7 +16,7 @@ Scopes define ownership and hosting; runs define execution rounds and session na
 
 ## Ownership and discovery
 
-Derive ordinary scopes from item ancestry, using a virtual non-executable root for parentless items without serializing synthetic item parent edges. Store an immutable anchor only for explicit execution boundaries. Parent scopes reference child anchors; do not maintain a competing global scope registry. Scope containment is a tree, while ordinary dependencies/related/provenance retain their current graph semantics.
+Derive ordinary scopes from item ancestry, using a virtual non-executable root for parentless items without serializing synthetic item parent edges. Store an immutable anchor only for explicit run or checkout-hosting boundaries. Parent scopes reference child anchors; do not maintain a competing global scope registry. Scope containment is a tree, while ordinary dependencies/related/provenance retain their current graph semantics.
 
 Git supplies the primary checkout and linked-worktree inventory. The primary checkout hosts the virtual root on any branch. Each checkout's actual Git metadata directory holds its small machine-local hosting declaration; never assume its .git entry is a directory. Scan declarations into a disposable scope-to-host map under repository coordination. Several scopes may share a checkout. A missing host, duplicate declaration, missing source or invalid anchor is diagnostic, not permission to fall back to another copy. Human callers may choose among reported candidates; JSON/MCP expose the same candidates and require a subsequent explicit authority selection.
 
