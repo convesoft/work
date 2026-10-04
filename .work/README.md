@@ -64,8 +64,8 @@ The accepted `0.1.0-beta.2` redesign is recorded in [scope ownership](../docs/sc
 | [w-16eaaab0](items/16eaaab0283b4bb894c3e202681ffc3a.md) | Validated relocation after external merge, preserving ownership | Sessions/claims |
 | [w-fab94eea](items/fab94eea738c4bd593aa300c141dabfc.md) | Unclaimed wisp promotion with stable identity | Sessions/claims |
 | [w-0e159a0e](items/0e159a0eb11145d9942f7366262fb4c2.md) | Optional-summary success, distinct abandonment and bottom-up disposal | Handoffs, relocation, promotion |
-| [w-4334a9b9](items/4334a9b95506477d880e221673383514.md) | Real CLI/MCP/package acceptance and implemented usage/skill guidance | Lifecycle |
-| [w-5ad29afa](items/5ad29afa1c6d4fedb953b8cd694e34f4.md) | Project-wide publication artifact cleanup and exceptional recovery | Included scope work; not implemented this session; confirm prerequisites before assignment |
+| [w-5ad29afa](items/5ad29afa1c6d4fedb953b8cd694e34f4.md) | Project-wide publication artifact cleanup and exceptional recovery | Lifecycle (transitively all runtime writer lanes) |
+| [w-4334a9b9](items/4334a9b95506477d880e221673383514.md) | Real CLI/MCP/package acceptance and implemented usage/skill guidance | Lifecycle and publication cleanup |
 | [w-3932a6c6](items/3932a6c6ff404fb0b7cdf0ace756c2a2.md) | Manual local-scope owner and eventual release follow-through | Coordination now; release phase requires implementation completion |
 
 Selected delivery mode: **bounded local beta.2 scope**, owned by [w-3932a6c6](items/3932a6c6ff404fb0b7cdf0ace756c2a2.md#control-plane-handoff), on `feature/w-3932a6c6-beta2-scope`. The owner records included IDs, integration order, local acceptance and final remote/publication gates. It is manual; the version/implementation items remain derived aggregates.
