@@ -49,7 +49,9 @@ to record. Do not create or change a local backlog item.
 
 Report merge-ready only when review of the current head is complete, required
 CI passes, and no current-scope or critical finding remains unaddressed.
-Include accepted backlog and dismissed findings in that report. Stop when
+Include the main session's supported backlog/dismissal references and distinguish
+accepted after triage from a clean independent review; do not reclassify findings
+or override unresolved required clarifications. Stop when
 the PR closes or the main session ends the loop. Never merge on your own.
 """
 

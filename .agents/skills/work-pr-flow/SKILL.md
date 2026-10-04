@@ -26,9 +26,12 @@ own main-agent PR workflow.
    source edits, verification, commits, or finding classification.
 2. When the agent reports a PR URL, include it in the main session's status
    and final handoff. Codex CLI has no task-attachment control; the URL is the
-   durable link. Review each finding against `AGENTS.md` and the applicable
-   Mara contract. Make and verify accepted fixes in the main session, or
-   decide on a supported reply, dismissal, or backlog outcome. Give the agent
+   durable link. Use [triage-findings](../../../.pi/skills/triage-findings/SKILL.md)
+   against `AGENTS.md` and applicable contracts. Fix/verify required defects,
+   record authorized non-blocking backlog outcomes, and support dismissals.
+   Required product/authorization clarifications remain pending; preserve the
+   independent verdict and distinguish clean review from accepted after triage.
+   Give the agent
    the exact new commit SHA and intended disposition of each finding. The
    agent handles the push and explicitly directed GitHub replies/resolutions.
 3. Continue the same agent and PR for subsequent reviewed heads. After each

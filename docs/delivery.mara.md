@@ -33,6 +33,12 @@ Start the item branch from current `main` using `feature/w-<short-id>-<descripti
 
 If `main` advances, verify the updated integration result before merging. Updating or rewriting an existing branch requires explicit authorization; this workflow does not authorize incidental rebases or force-pushes. A changed PR head requires fresh applicable checks and review. GitHub must allow rebase merging for scope PRs; unavailable merge methods are a blocker, not permission to silently choose another method.
 
+### Finding disposition
+
+Use [finding triage](../.pi/skills/triage-findings/SKILL.md) for issue, cloud and combined-tree findings; run the [Pi review loop](../.pi/skills/pi-review-loop/SKILL.md) when required. The implementer or integration coordinator records supported fix-now, backlog, dismiss or ask-user dispositions without rewriting the independent review.
+
+No current-acceptance or critical defect is waived by deferral. Required fixes/clarifications and applicable verification must resolve before acceptance. Report a clean review only from completed no-finding/correct evidence; otherwise report accepted after triage with actual backlog references and disposition rationale. Preserve the reviewed/tested identities. This policy does not replace required approval, CI, integration checks or publication authorization.
+
 ### Evidence and completion
 
 Work IDs remain stable across Git history rewriting. Local squashing and GitHub rebase merging change commit identities. Evidence records the actual tested revision and scope; do not relabel old evidence as testing a new SHA. Record the final `main` integration revision and run the applicable final-`main` checks. Release verification still targets one captured `main` revision.

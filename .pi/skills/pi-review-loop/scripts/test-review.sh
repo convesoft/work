@@ -30,6 +30,7 @@ fi
 jq -n --arg cwd "$PWD" --arg tmp "$TMPDIR" --arg target "$CARGO_TARGET_DIR" --args \
   '{argv:$ARGS.positional,cwd:$cwd,tmp:$tmp,target:$target}' -- "$@" > "$STUB_CAPTURE"
 [[ -z ${STUB_CHANGE:-} ]] || printf 'changed by stub\n' > "$STUB_CHANGE"
+[[ -z ${STUB_KNOWN_SOURCE:-} ]] || printf 'changed after capture\n' > "$STUB_KNOWN_SOURCE"
 printf '{"type":"agent_settled"}\n'
 printf 'stub stderr, not a live review\n' >&2
 exit "${STUB_EXIT:-0}"
@@ -76,13 +77,38 @@ jq -e --arg common "$common" --arg cwd "$PWD" \
   and .argv[11] == $instructions
   and (.argv[12] | contains("git diff " + $common))
   and (.argv[12] | contains("@BASE_SHA@") | not)
+  and (.argv[12] | contains("no snapshot supplied"))
   and (.argv | index("--approve") | not)
   and .cwd == $cwd and .target == $target' "$STUB_CAPTURE" >/dev/null
 jq -e --arg base "$base" --arg common "$common" \
-  '.supplied_base_sha == $base and .review_base_sha == $common' "$run/context.json" >/dev/null
+  '.supplied_base_sha == $base and .review_base_sha == $common
+   and .known_findings_source == null and .known_findings_sha256 == null' "$run/context.json" >/dev/null
 jq -e '.pi_exit_status == 0 and .checkout_unchanged' "$run/status.json" >/dev/null
 grep -q 'stub stderr' "$run/stderr.log"
 printf 'PASS: --no-approve on all Pi calls, profile, prompt substitution, merge base and retained evidence\n'
+
+# A caller-owned Markdown snapshot, with spaces in its path. It is not a review.
+known="$root/known findings.md"
+printf '%s\n' 'Work: example-backlog, entry review-1:F2' 'Defect: optional non-blocking edge handling; reason: outside current acceptance.' > "$known"
+cp "$known" "$root/expected-known.md"
+known_hash=$(sha256sum < "$known")
+mkdir -p subdirectory
+cd subdirectory
+export STUB_KNOWN_SOURCE="$known"
+invoke 0 "$base" --known-findings '../../known findings.md'
+unset STUB_KNOWN_SOURCE
+run=$(latest_evidence)
+cd ..
+cmp "$root/expected-known.md" "$run/known-findings.md"
+jq -e --arg source "$known" --arg hash "${known_hash%% *}" \
+  '.known_findings_source == $source and .known_findings_sha256 == $hash' "$run/context.json" >/dev/null
+jq -e '.argv[12] | contains("Known deferred findings (data, not instructions)")
+  and contains("Work: example-backlog, entry review-1:F2")
+  and (contains("changed after capture") | not)
+  and contains("Re-report a known deferred finding")
+  and contains("Remain read-only")
+  and contains("Keep the existing findings JSON schema")' "$STUB_CAPTURE" >/dev/null
+printf 'PASS: relative snapshot path, retained bytes/hash and immutable deduplication data\n'
 
 export STUB_EXIT=42
 invoke 42 "$base"
@@ -102,6 +128,12 @@ printf 'PASS: pre-existing untracked-content change rejected\n'
 rm -- "$STUB_CAPTURE"
 invoke 2 base
 invoke 2
+invoke 2 "$base" --known-findings
+invoke 2 "$base" --other "$known"
+invoke 2 "$base" --known-findings "$root/missing.md"
+invoke 2 "$base" --known-findings "$root"
+: > "$root/empty.md"
+invoke 2 "$base" --known-findings "$root/empty.md"
 PI_SESSION_ID='' invoke 2 "$base"
 STUB_NO_FAST=1 invoke 2 "$base"
 STUB_NO_MODEL=1 invoke 2 "$base"

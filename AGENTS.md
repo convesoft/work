@@ -87,15 +87,24 @@ This Rust project is a local, agent-first issue tracker for managing work state.
 - Do not accept mocks, placeholders, or isolated tests as evidence that a real
   primary workflow works. Do not establish new product behavior solely in a
   review comment; update the canonical Mara documents when meaning changes.
-- When a user request or delegated worker task explicitly requires the
-  [local Pi review loop](.pi/skills/pi-review-loop/SKILL.md), the implementing
-  agent runs it after implementation and before handoff. This opts into fixing
-  every finding in the supplied-base diff and repeating review until a completed
-  review explicitly reports no findings. The ordinary current-change filtering
-  does not apply to this opt-in workflow. If a finding cannot be resolved,
-  report the blocker rather than claiming a clean review. Product decisions,
-  source safety, verification, and publication authorization still follow the
-  other repository rules.
+- Use [finding triage](.pi/skills/triage-findings/SKILL.md) for local, cloud and
+  combined-state findings. The implementer or integration coordinator owns
+  supported dispositions; the independent reviewer remains read-only. Record
+  accepted non-blocking deferrals in actual backlog tracking and dismissals
+  with evidence. A backlog label or working happy path never waives current
+  acceptance or critical safeguards.
+- When a user request or delegated task explicitly requires the
+  [local Pi review loop](.pi/skills/pi-review-loop/SKILL.md), run it after
+  implementation and before handoff. Triage each completed review, fix and
+  verify all required findings, then review fresh until no required fix or
+  clarification remains. Do not repeat solely to eliminate supported backlog
+  or dismissed findings. Follow any stricter explicit gate; unresolved product
+  choices, authorization, remedies or evidence remain blocked.
+- Claim a clean review only from a completed unchanged review with no findings
+  and a correct verdict. Otherwise report accepted after triage with actual
+  backlog references, dismissal reasons and the preserved raw verdict. Triage
+  does not authorize integration/publication or bypass required verification,
+  CI, cloud review or delivery-target closure gates.
 
 ## Bootstrap and releases
 
