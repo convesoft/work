@@ -27,4 +27,8 @@ Promote an unclaimed temporary item into scope-resolved material storage without
 
 ## Delivery
 
-Start from current main on feature/w-<short-id>-<description>; one bounded PR. Preserve unrelated state. State-changing tests use session-owned disposable fixtures. Report actual verification and limitations; keep open until acceptance passes and the change is merged. This item is not publication or real-resource deletion authority.
+Selected mode: bounded local beta.2 scope. Manual owner: `3932a6c6ff404fb0b7cdf0ace756c2a2`. Declared integration target: `feature/w-3932a6c6-beta2-scope`; this included item does not require its own PR.
+
+Start from the current clean scope tip on `feature/w-<short-id>-<description>`. Preserve unrelated state. Implement, verify and complete required local review before squash integration under docs/delivery.mara.md. Record the actual scope base, reviewed/tested revisions and integrated commit; verify the integrated result and close only after acceptance and local review pass. The owner retains the final combined, cloud-review/CI and remote-main gates. Do not treat old test SHAs as evidence for rewritten commits.
+
+State-changing checks use session-owned disposable fixtures. No push, history rewrite, publication or real-user-resource deletion is authorized by this item.

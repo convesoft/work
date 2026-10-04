@@ -81,7 +81,7 @@ Promotion preserves an unclaimed item's identity/body/state/relationships while 
 
 ## Provenance
 
-[[ADR-SCOPE-OWNED-EXECUTION]] supersedes [[ADR-FILE-STATE]]'s global execution placement and independent retention machinery. The original plain-file, local coordination, opaque-body and graph principles remain. Conflicting beta.1 requirements/designs/checks are retired with replacement links; they remain inspectable history, not a migration obligation. The beta.2 delivery plan is in [the backlog](../.work/README.md#second-beta-scope-owned-execution).
+[[ADR-SCOPE-OWNED-EXECUTION]] supersedes [[ADR-FILE-STATE]]'s global execution placement and independent retention machinery. The original plain-file, local coordination, opaque-body and graph principles remain. Conflicting beta.1 requirements/designs/checks are retired with replacement links; they remain inspectable history, not a migration obligation. The beta.2 delivery plan is in [the backlog](../.work/README.md#second-beta-scope-owned-execution). The selected bounded local delivery scope is owned by [w-3932a6c6](../.work/items/3932a6c6ff404fb0b7cdf0ace756c2a2.md#control-plane-handoff), with included issues targeting `feature/w-3932a6c6-beta2-scope`. This Git/delivery convention does not initialize Work execution scopes or waive the wire, review, integration or publication gates.
 
 ## Implementation evidence
 

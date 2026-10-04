@@ -65,15 +65,19 @@ The accepted `0.1.0-beta.2` redesign is recorded in [scope ownership](../docs/sc
 | [w-fab94eea](items/fab94eea738c4bd593aa300c141dabfc.md) | Unclaimed wisp promotion with stable identity | Sessions/claims |
 | [w-0e159a0e](items/0e159a0eb11145d9942f7366262fb4c2.md) | Optional-summary success, distinct abandonment and bottom-up disposal | Handoffs, relocation, promotion |
 | [w-4334a9b9](items/4334a9b95506477d880e221673383514.md) | Real CLI/MCP/package acceptance and implemented usage/skill guidance | Lifecycle |
-| [w-3932a6c6](items/3932a6c6ff404fb0b7cdf0ace756c2a2.md) | Separate intentional candidate verification and authorized publication | Implementation aggregate |
+| [w-3932a6c6](items/3932a6c6ff404fb0b7cdf0ace756c2a2.md) | Manual local-scope owner and eventual release follow-through | Coordination now; release phase requires implementation completion |
 
-Readiness is determined by the actual graph, not table order. Handoffs, relocation and promotion can proceed independently after ownership. Every item stays open until acceptance and merge; release additionally needs publication evidence. Do not create live scope/run/session fixtures in this repository merely to test the planned model.
+Selected delivery mode: **bounded local beta.2 scope**, owned by [w-3932a6c6](items/3932a6c6ff404fb0b7cdf0ace756c2a2.md#control-plane-handoff), on `feature/w-3932a6c6-beta2-scope`. The owner records included IDs, integration order, local acceptance and final remote/publication gates. It is manual; the version/implementation items remain derived aggregates.
+
+Local `main` was fast-forwarded to architecture seed `3e23fa4`; the scope branch starts there. No remote push occurred. The architecture item remains open for local review/verification; after its scope-target closure, the wire task becomes ready. Do not replay the seed or require an architecture-only PR. Child issue branches start from the current scope tip, undergo acceptance and required local review, then squash-integrate and are verified before closing. One eventual scope PR carries the seed and issue history; rebase merge only with separate authority. Do not push local `main` independently.
+
+Readiness is determined by the actual graph, not table order. Handoffs, relocation and promotion can proceed independently after ownership. The owner's former implementation dependency is now an explicit release-phase gate so coordination can start before implementation completes; all child dependencies remain unchanged. Release/candidate preparation and publication retain separate authority and evidence gates. Do not create live scope/run/session fixtures in this repository merely to test the planned model.
 
 ## Working with the backlog
 
 Use the Work CLI or MCP against the selected checkout to inspect items, graph diagnostics, and readiness. A practical CLI entry point is `work --worktree PATH item ready`; run `work item --help` for available operations. Keep item IDs and opaque bodies intact when editing metadata.
 
-For this repository, close an implementation item only after its acceptance criteria pass and its change is merged. Release items also require the publication evidence in their bodies. Run destructive or state-changing acceptance scenarios on disposable copies, never on this live backlog. Main remains the integration branch; implementation work starts in dedicated item branches.
+For this repository, close an included beta.2 issue only after acceptance and required local review pass and its integrated result is verified on the declared scope branch. Individual issue delivery instead targets `main`; follow [the declared-target gates](../docs/delivery.mara.md#evidence-and-completion). The scope owner retains combined acceptance, cloud review/CI, remote-main integration and its release/publication evidence. Run destructive/state-changing scenarios on disposable copies, never on this live backlog. Work's generic item lifecycle is unchanged.
 
 ## Storage direction
 
