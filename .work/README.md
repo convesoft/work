@@ -8,9 +8,10 @@ These Git-tracked Work items coordinate delivery for this repository. Mara owns 
 | --- | --- | --- |
 | Repository delivery | [w-ee7bf41f](items/ee7bf41fb2e64323b9283a1716411e41.md) | Root aggregate for version scopes |
 | `0.1.0-alpha.1` | [w-ce11f17d](items/ce11f17d361343b9bd1a9a6059aeb76d.md) | First usable CLI/MCP loop delivered and alpha published |
-| `0.1.0-beta.1` | [w-abf475b5](items/abf475b5d09948deb3928341404d4fcb.md) | Remaining accepted initial capabilities; implementation work is ready |
+| `0.1.0-beta.1` | [w-abf475b5](items/abf475b5d09948deb3928341404d4fcb.md) | Implementation complete and beta.1 published; release evidence recorded |
+| `0.1.0-beta.2` | [w-5b610f40](items/5b610f40e24341e58be7d8bd99ee4061.md) | Accepted scope-owned redesign; implementation and publication not yet delivered |
 
-The alpha was published as `0.1.0-alpha.1`; beta remains a planning target until its release item selects the actual version. Beta depends on the now-complete alpha scope. Aggregate items have `completion: children` and derive their status from their children; they are not claims or executor sessions.
+Alpha and beta.1 are published. The [beta.1 release item](items/e3640780b04f404bbb3baebfa3a50a38.md) is closed with publication evidence at final main revision `91a035d3773ed53e61f9757634299a2d7dfeff10`. Beta.2 is the separately selected next design/delivery target, with no dependency on beta.1 execution migration or publication. Aggregate items have `completion: children` and derive their status from their children; they are not claims or executor sessions.
 
 ### First alpha
 
@@ -45,7 +46,28 @@ The seven implementation items are done after their merged PRs. The alpha releas
 | [w-210453f0](items/210453f0dd104a978097120cb21bc733.md) | Complete CLI/MCP beta adoption verification |
 | [w-e3640780](items/e3640780b04f404bbb3baebfa3a50a38.md) | Prepare, verify, and publish the first beta |
 
-The beta implementation items are children of the implementation aggregate. The beta release item is its sibling and depends on its completion. Work relationships determine actual readiness; table order is for navigation only. The open engineering contracts in [Mara](../docs/open-questions.mara.md) must be resolved during the relevant implementation items. Deferred product ideas are not part of this beta scope.
+The beta.1 implementation aggregate and release item are complete. [Publication evidence](items/e3640780b04f404bbb3baebfa3a50a38.md) records the annotated tag, successful all-host build/publish/public-install workflow and public packages/release. The old [shared-store recovery follow-up](items/155dd1c73ef3412da9d2a44ec57dcfbc.md) is closed as cancelled/superseded by beta.2, not as an implemented fix. Historical task bodies remain intact. Work relationships determine actual readiness; table order is for navigation only.
+
+### Second beta: scope-owned execution
+
+The accepted `0.1.0-beta.2` redesign is recorded in [scope ownership](../docs/scopes.mara.md), [scoped execution](../docs/scoped-execution.mara.md), and [acceptance definitions](../docs/beta2-verification.mara.md). It is not implemented by the current binary. No beta.1 execution migration or compatibility layer is required; old delivery/history records remain intact.
+
+| Item | Purpose | Prerequisites |
+| --- | --- | --- |
+| [w-16e2d0f5](items/16e2d0f58f0b4386b6d042bf1c8380b8.md) | Implementation aggregate | Derived from children |
+| [w-3f7dc770](items/3f7dc77062a64fb285d95b172ea9808d.md) | Record accepted architecture, retirement and delivery contracts | Current documentation item |
+| [w-10f481ed](items/10f481edd6d44c458e8c091aa76a5e7c.md) | Freeze exact envelopes and the complete CLI/MCP matrix | Architecture item |
+| [w-7bbc0619](items/7bbc0619ab46461fa0d5c3b42edbeef1.md) | Scope anchors, primary-root discovery and Git-local authoritative hosting | Wire contract |
+| [w-45f7bb7d](items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) | Standing/inherited runs, derived membership and template destinations | Hosting |
+| [w-54de7594](items/54de759473154b008161327e9c961a81.md) | Immutable named shortcuts, retirement and exclusive local claims | Runs |
+| [w-2cc1d6ac](items/2cc1d6acf22e4a48bbf9839998674264.md) | Sender-local addressed handoffs and pull inboxes | Sessions/claims |
+| [w-16eaaab0](items/16eaaab0283b4bb894c3e202681ffc3a.md) | Validated relocation after external merge, preserving ownership | Sessions/claims |
+| [w-fab94eea](items/fab94eea738c4bd593aa300c141dabfc.md) | Unclaimed wisp promotion with stable identity | Sessions/claims |
+| [w-0e159a0e](items/0e159a0eb11145d9942f7366262fb4c2.md) | Optional-summary success, distinct abandonment and bottom-up disposal | Handoffs, relocation, promotion |
+| [w-4334a9b9](items/4334a9b95506477d880e221673383514.md) | Real CLI/MCP/package acceptance and implemented usage/skill guidance | Lifecycle |
+| [w-3932a6c6](items/3932a6c6ff404fb0b7cdf0ace756c2a2.md) | Separate intentional candidate verification and authorized publication | Implementation aggregate |
+
+Readiness is determined by the actual graph, not table order. Handoffs, relocation and promotion can proceed independently after ownership. Every item stays open until acceptance and merge; release additionally needs publication evidence. Do not create live scope/run/session fixtures in this repository merely to test the planned model.
 
 ## Working with the backlog
 
@@ -55,4 +77,4 @@ For this repository, close an implementation item only after its acceptance crit
 
 ## Storage direction
 
-The 2026-09-30 revision in [file storage](../docs/storage.mara.md) and `ADR-FILE-STATE` replaces the SQLite plan with separate authoritative Markdown/YAML entity files. The shared-storage item establishes filesystem and locking primitives; claims, runs, handoffs, sessions/workspaces and finalization retain their own bounded implementation items. The revised scopes are planning contracts, not completion evidence. No item is closed by this documentation revision.
+`ADR-SCOPE-OWNED-EXECUTION` replaces beta.1's global execution placement and independent lifetimes with [scope-owned, versionable execution](../docs/scoped-execution.mara.md), Git-local hosting declarations, derived context and parent-controlled disposal. Preserve reusable safe-file/graph principles, but remove duplicate workspace registries, run member lists, rebinding and receiver-retention machinery. Exact new envelope/API contracts remain draft until the wire item accepts them. All beta.2 implementation/release items remain open. The user separately approved closing the completed beta.1 release and cancelling the obsolete recovery follow-up.

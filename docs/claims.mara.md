@@ -1,11 +1,17 @@
+## Historical beta.1 claim API
+
+This retired API is not the planned beta.2 ownership contract. See [scoped execution](scoped-execution.mara.md) for immutable named shortcuts and scope-local claims; exact command/tool schemas remain draft.
+
 :::mara design DES-CLAIM-API
 :mid: 01M3TWR5NB3XQV4AK3DHK5BFJJ
 :title: Emit immutable claim acquisitions and explicit endings
-:status: accepted
+:status: retired
 :kind: interface
 :satisfies: REQ-CLAIM-EXCLUSION
 :satisfies: REQ-CLAIM-RECOVERY
 :satisfies: REQ-WORK-SELECTION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPED-CLAIMS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 ## File envelopes and current ownership
 

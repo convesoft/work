@@ -1,11 +1,17 @@
+## Historical beta.1 finalization API
+
+This digest-required/receiver-retention contract is retired for beta.2. [Scoped execution](scoped-execution.mara.md) defines optional-summary success, distinct abandonment, compact terminal history and parent-controlled bottom-up disposal without handoff retention gates.
+
 :::mara design DES-FINALIZATION-API
 :mid: 01M3TWRH58578K3JRDKZSTGQH4
 :title: Define root digest extensions and explicit wisp disposal
-:status: accepted
+:status: retired
 :kind: interface
 :satisfies: REQ-RUN-FINALIZATION
 :satisfies: REQ-OPAQUE-BODIES
 :satisfies: REQ-EPHEMERAL-FILES
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-TRANSITIONS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 ## Durable root extension
 

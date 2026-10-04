@@ -63,7 +63,7 @@ A reusable definition of work items and their relationships for a repeatable pro
 :title: Ephemeral work
 :status: accepted
 
-Operational work items stored as inspectable files until explicitly squashed or cleaned, outside version-controlled project history. Ephemeral means limited retention, not in-memory storage or loss on process exit. These items participate in the same work graph as durable items. Their source files, rather than a database-only representation, retain the work content.
+Operational work items whose persistence is owned by an execution run until explicit promotion or disposal. Ephemeral means limited scope-owned lifetime, not untracked, in-memory, or lost on process exit. Wisps use the same item graph and opaque-body model as material work. Beta.2 stores them in versionable scope-anchored run files; committing or merging those files does not promote them. [[REQ-VERSIONED-EXECUTION]] and [[REQ-WISP-PROMOTION]] define that distinction.
 :::
 
 :::mara term TERM-DURABLE-STATE

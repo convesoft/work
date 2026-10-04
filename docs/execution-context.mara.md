@@ -1,12 +1,18 @@
+## Historical beta.1 context API
+
+Independent workspace records, session rebinding and receiver-retained handoffs below are retired for beta.2. See [scoped execution](scoped-execution.mara.md) for their replacements. Do not treat the new draft wire contract as implemented commands.
+
 :::mara design DES-CONTEXT-API
 :mid: 01M3TWRD8A0N57SE471KQ7MEXA
 :title: Define workspace, session, handoff and cleanup interfaces
-:status: accepted
+:status: retired
 :kind: interface
 :satisfies: REQ-WORKTREE-VIEWS
 :satisfies: REQ-HANDOFF-CONTEXT
 :satisfies: REQ-WORKSPACE-CLEANUP
 :satisfies: REQ-EXTERNAL-EXECUTION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-TRANSITIONS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 ## Workspace and material location
 

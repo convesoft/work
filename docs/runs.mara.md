@@ -1,12 +1,18 @@
+## Historical beta.1 run API
+
+This retired explicit-membership API is replaced in planned beta.2 by [scoped execution](scoped-execution.mara.md): a standing root run, inherited context and derived membership. Current executable behavior remains beta.1 until implementation delivery.
+
 :::mara design DES-RUN-API
 :mid: 01M3TWR8ZHXMCB7SN05JFVJV06
 :title: Define run files, membership and mixed template expansion
-:status: accepted
+:status: retired
 :kind: interface
 :satisfies: REQ-SINGLE-RUN
 :satisfies: REQ-GRAPH-TEMPLATES
 :satisfies: REQ-EPHEMERAL-FILES
 :satisfies: REQ-RUN-ATOMICITY
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPED-RUNS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 ## Run and membership files
 

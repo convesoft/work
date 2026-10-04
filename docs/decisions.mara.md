@@ -106,13 +106,15 @@ Consequences: petgraph supplies graph mechanics, while Work owns semantic-edge n
 :::mara decision ADR-FILE-STATE
 :mid: 01M3RPEMJZNGNSY8GSDZRNM3JK
 :title: Store all Work state in separate plain files
-:status: accepted
+:status: retired
 :supersedes: ADR-HYBRID-STATE
 :supersedes: ADR-SQLITE-COMMON-DIR
 :justifies: DES-PERSISTENCE-BOUNDARY
 :justifies: DES-SHARED-FILES
 :justifies: DES-ENTITY-LIFECYCLES
 :justifies: DES-FILE-COORDINATION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[ADR-SCOPE-OWNED-EXECUTION]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Decision, revised 2026-09-30: store every authoritative entity in Markdown/YAML, organized by its operational or execution lifetime. Keep project intent and retained feature results in ordinary Git-tracked files; keep live claims, runs, sessions, workspace context, handoffs and recovery records in shared plain files. Use the existing Git common-directory discovery and a short OS file lock for concurrent mutations. Do not introduce SQLite, custom Git refs, a monolithic entity snapshot or a required socket service.
 
@@ -123,4 +125,38 @@ Trade-offs: Work now owns schema validation, source-conflict detection, lock dis
 This supersedes the SQLite direction recorded on 2026-09-28. The retired decisions and design retain their original IDs and MIDs as history. This acceptance revises the architecture and delivery scope; it does not establish that the paused SQLite implementation or the replacement file coordination has shipped.
 
 Foundation scope clarification on 2026-09-30: defer backup creation and restoration. Deliver safe entity-file primitives, shared locking, validation and diagnostics first, preserving the rule to report missing/damaged state and require explicit action before recreation. Entity-aware backup/restore can be specified after the relevant formats exist; it is not an acceptance gate for the initial storage foundation.
+:::
+
+:::mara decision ADR-SCOPE-OWNED-EXECUTION
+:mid: 01M439Z993Q5A39J69425G52QM
+:title: Replace global execution bookkeeping with stable scope ownership
+:status: accepted
+:supersedes: ADR-FILE-STATE
+:justifies: DES-SCOPE-RESOLUTION
+:justifies: DES-SCOPE-LAYOUT
+:justifies: DES-SCOPED-RUNS
+:justifies: DES-IMMUTABLE-SESSIONS
+:justifies: DES-SCOPED-CLAIMS
+:justifies: DES-SENDER-HANDOFFS
+:justifies: DES-SCOPE-TRANSITIONS
+:justifies: DES-BETA2-SURFACES
+:justifies: RISK-FILE-DB-CONSISTENCY
+
+Decision for planned 0.1.0-beta.2: use an implicit item-rooted scope tree beneath a virtual repository root hosted by Git's primary checkout. Store anchors only at explicit run/hosting boundaries. Scopes own stable identity and parent/child routing; Git supplies checkout facts; per-checkout Git-local declarations establish one authoritative host. Runs own execution rounds, temporary work, immutable named sessions, claims and sender-local addressed handoffs, with one storage home. Descendants inherit the nearest run until overriding it.
+
+Rationale: local placement does not prevent cross-scope access through a resolver. Independent global lifetimes, workspace registries, explicit membership and handoff retention obligations duplicated ownership facts. Versionable scope content should be able to commit/merge and continue in a parent checkout without resetting run/session/claim identity. Destination metadata is not a retention obligation. Parent orchestrators decide promotion, optional result retention and explicit disposal.
+
+Consequences: initialize a standing default root run; resolve readable session shortcuts and drain immutable sessions; derive context/membership; use pull discovery and optional finalization summaries; dispose explicit subtrees bottom-up without handoff archival gates. Keep repository-wide claim exclusion, explicit authoritative relocation and executor-quiescence safety, graph integrity, source diagnostics, partial-result reporting and CLI/MCP parity. Git/worktree actions and agent/process execution stay external. No beta.1 execution migration or dual-layout compatibility is required. Remove superseded commands; exact wire definitions are deliberately draft until frozen.
+
+This supersedes the shared placement/lifetime choices in ADR-FILE-STATE, not the enduring plain-file, opaque-body, graph and local-coordination principles. Historical items retain IDs/MIDs and bodies; accepted beta.2 knowledge is neither implemented behavior nor publication evidence.
+
+## Scope-review clarifications
+
+Confirmed product choices: ended child execution keeps its boundary until explicit new execution or resumption of inheritance; retained wisps remain historical in their original run, with inspection/promotion/disposal but no ordinary edits, reopening, new claims or new handoffs. Root rotation requires explicit abandonment of unfinished root wisps and does not require completion of the material repository backlog. Ending automatically retires idle named identities after their claims across all runs drain.
+
+Execution disposal preserves material hosting until separately validated relocation. Physical-copy inspection is read-only; Work writes through authoritative routing. Child-run templates declare parentage explicitly rather than having Work invent edges or a second membership rule. Item-addressed context follows stable item identity; run/session addresses remain immutable. Unqualified named claim-next selects within one resolved run namespace instead of letting a candidate choose which external identity a name means.
+
+Rationale: these choices avoid silent changes in execution namespace, ownership, durable source or lifecycle graph while retaining explicit recovery of useful temporary work. Product questions in this review are settled; exact file fields, command spellings, tool schemas and bounded continuation representations remain the separate DES-BETA2-WIRE engineering gate, not implementation or release evidence.
+
+The same explicit-placement rule applies after creation: current-wisp reparenting into a different effective run is rejected. Same-run reparenting remains ordinary graph work; promote first when cross-run movement is needed. Beta.2 does not add wisp-transfer machinery.
 :::

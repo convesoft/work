@@ -88,7 +88,7 @@ This Rust project is a local, agent-first issue tracker for managing work state.
   primary workflow works. Do not establish new product behavior solely in a
   review comment; update the canonical Mara documents when meaning changes.
 - When a user request or delegated worker task explicitly requires the
-  [local Codex review loop](.pi/skills/codex-review-loop/SKILL.md), the implementing
+  [local Pi review loop](.pi/skills/pi-review-loop/SKILL.md), the implementing
   agent runs it after implementation and before handoff. This opts into fixing
   every finding in the supplied-base diff and repeating review until a completed
   review explicitly reports no findings. The ordinary current-change filtering

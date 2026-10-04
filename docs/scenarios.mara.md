@@ -1,5 +1,8 @@
 # User and agent scenarios
 
+Current beta.2 execution flows are in [beta2 scenarios and verification](beta2-verification.mara.md). Retired handoff/workspace flows below preserve the former independent-lifetime model; unaffected planning and graph scenarios remain applicable.
+
+
 These flows describe observable outcomes. Draft scenarios explore behavior whose detailed policy is still open.
 
 :::mara scenario SCN-PLAN-WORK
@@ -79,9 +82,11 @@ Epic C uses `completion: children`. Its children are A, a manual delivery item w
 :::mara scenario SCN-HANDOFF
 :mid: 01M3KPWZ1QF6SAF7EVA4X8CD9H
 :title: Pass context across continuation and consolidation
-:status: accepted
+:status: retired
 :contributes_to: GOAL-GRAPH-PROCESS
 :involves: ACT-AGENT
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[SCN-SENDER-HANDOFF]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 An agent records context before releasing unfinished work; a later session claims the same item and receives that context. In a transition between activities, five completed fix items supply one handoff to a consolidation item that depends on all five. The handoff remains available after the fixes complete and until its receiving work completes. With multiple receiving items it remains until all finish. External tooling chooses and starts agents; Work exposes context and ownership without orchestrating execution.
 :::
@@ -89,10 +94,12 @@ An agent records context before releasing unfinished work; a later session claim
 :::mara scenario SCN-WORKSPACE-CLEANUP
 :mid: 01M3KTFNSZ0TKJPD8AKFP2PCZ3
 :title: Finish shared execution with explicit workspace cleanup
-:status: accepted
+:status: retired
 :contributes_to: GOAL-QUIET-HISTORY
 :involves: ACT-AGENT
 :involves: ACT-OPERATOR
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[SCN-SCOPE-DISPOSAL]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Implementation, reviews, and fixes use one workspace through different sessions and claims. Some sessions are reused by name; one-time workers remain unnamed. After all work requiring that workspace finishes and required results are retained, an external executor performs an explicit cleanup work item. It removes the actual worktree and reports success before Work removes the operational workspace record and associations. If another item or run still needs the shared workspace, cleanup waits. If removal fails, the record remains inspectable and cleanup can be retried.
 :::

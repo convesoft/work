@@ -1,0 +1,1 @@
+Review the code changes against the base branch '@BASE_SHA@'. The merge base commit for this comparison is @BASE_SHA@. Run `git diff @BASE_SHA@` to inspect the changes relative to @BASE_SHA@. Provide prioritized, actionable findings.

@@ -1,17 +1,22 @@
 # File storage and entity lifecycles
 
+The shared execution layout below is **retired beta.1 history**. Planned beta.2 uses [scope-owned execution](scoped-execution.mara.md): versionable run files in the authoritative checkout, per-checkout Git-local host declarations and minimal shared coordination. No beta.1 execution migration is required.
+
+
 This is the accepted replacement for the former SQLite plan. It defines architecture and lifecycle boundaries; exact entity envelopes and recovery transitions are completed in their owning implementation items. It does not report implemented behavior.
 
 :::mara design DES-SHARED-FILES
 :mid: 01M3RPE9A767RN9EMMN7KNM2AN
 :title: Share plain operational files across linked worktrees
-:status: accepted
+:status: retired
 :kind: deployment
 :supersedes: DES-SHARED-SQLITE
 :satisfies: REQ-SIDE-STATE
 :satisfies: REQ-CLAIM-EXCLUSION
 :satisfies: REQ-WORKTREE-VIEWS
 :satisfies: REQ-INDEX-REBUILD
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-RESOLUTION]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 All authoritative Work state is stored in ordinary Markdown or YAML files. Use the resolved Git common directory's `work/` folder for shared operational entities and temporary execution content. Discover that directory from the selected working checkout; do not assume its `.git` entry is a directory. Linked worktrees share these files; independent clones do not. No SQLite database, custom Git refs, required background daemon, or authoritative aggregate snapshot is part of this architecture.
 
@@ -25,11 +30,13 @@ Parse authoritative files to build disposable in-memory graph and lookup structu
 :::mara design DES-ENTITY-LIFECYCLES
 :mid: 01M3RPEDHBGVNF68ZD1BRMT1WD
 :title: Give each operational entity its own file and lifetime
-:status: accepted
+:status: retired
 :kind: data
 :satisfies: REQ-SIDE-STATE
 :satisfies: REQ-EPHEMERAL-FILES
 :satisfies: REQ-RUN-FINALIZATION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-LAYOUT]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 The layout below separates authoritative entities by responsibility and retention. `shared/` denotes `<resolved Git common directory>/work/`; it is not an additional literal directory. Placeholder IDs denote stable identities, not user-provided path fragments. Item IDs retain their existing format; the versioned envelopes, IDs and API boundaries are specified by [[DES-EXECUTION-IO]], [[DES-CLAIM-API]], [[DES-RUN-API]], [[DES-CONTEXT-API]] and [[DES-FINALIZATION-API]]. References join entities by identity; do not embed copies of all entities inside the run manifest or one repository-wide YAML document.
 
@@ -59,13 +66,15 @@ Entity files are inspectable with ordinary tools. Their live mutations go throug
 :::mara design DES-FILE-COORDINATION
 :mid: 01M3RPEGS1WVG1K0CMWY1YK035
 :title: Serialize file mutations and recover multi-file operations
-:status: accepted
+:status: retired
 :kind: behavior
 :satisfies: REQ-CLAIM-EXCLUSION
 :satisfies: REQ-CLAIM-RECOVERY
 :satisfies: REQ-RUN-ATOMICITY
 :satisfies: REQ-RUN-FINALIZATION
 :mitigates: RISK-FILE-DB-CONSISTENCY
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPED-CLAIMS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Use a short-lived OS advisory exclusive lock on the stable shared `coordination.lock` for cooperating CLI/MCP mutations. The kernel releases it when the owning descriptors close, including process exit. Never delete or replace the lock file as stale-lock recovery: two lock inodes would permit two writers. The lock covers state transitions, not the duration of external execution. A single external coordinator is the normal workflow, but independent processes must still receive correct exclusion.
 
@@ -83,9 +92,11 @@ Rebuilding graph/lookup state preserves all authoritative entity files. Detectab
 :::mara design DES-STORAGE-API
 :mid: 01M3RT6GY8BA2E5CVQG49R05ZN
 :title: Expose file storage inspection and explicit recovery
-:status: accepted
+:status: retired
 :kind: interface
 :satisfies: REQ-SIDE-STATE
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-LAYOUT]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 The file-storage foundation adds four operations shared by CLI and MCP. This is a contract, not implementation evidence. Existing [[DES-CLI-JSON]] and [[DES-MCP-STDIO]] envelopes and selected-checkout semantics apply.
 
@@ -125,11 +136,13 @@ The core API is Storage::new(Project), inspect(), initialize(), recreate(Recreat
 :::mara design DES-STORE-FOUNDATION
 :mid: 01M3RT72XPHRX6RTVPMJ0TQ4QY
 :title: Initialize and recover the shared file store safely
-:status: accepted
+:status: retired
 :kind: behavior
 :satisfies: REQ-SIDE-STATE
 :satisfies: REQ-WORKTREE-VIEWS
 :satisfies: REQ-INDEX-REBUILD
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-LAYOUT]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 This foundation implements [[DES-FILE-COORDINATION]] without claim/run operations, a database, persistent index, backup/restore, migration engine, or generic transaction engine. It exposes storage structure availability; [[REQ-CLAIM-EXCLUSION]] is enforced by the later claim implementation, including envelope validation and claim/session checks scoped to the current store generation.
 

@@ -1,6 +1,6 @@
 # Product requirements
 
-Each accepted obligation has a repeatable verification definition. Draft obligations express candidate behavior and must not silently become implementation requirements.
+Each accepted obligation has a repeatable verification definition. Draft obligations express candidate behavior and must not silently become implementation requirements. Current beta.2 scope/execution obligations live in [scopes](scopes.mara.md). Retired items below preserve beta.1 history; their explicit replacements govern the next increment.
 
 :::mara requirement REQ-LOCAL-STATE
 :mid: 01M3KAQ0RMASYMS5MFZT2V24PM
@@ -39,7 +39,7 @@ Work shall expose which work items are actionable from their own state and satis
 :kind: functional
 :derives_from: SCN-REPEATABLE-REVIEW
 
-Work shall support reusable templates that instantiate work items and relationships for a repeatable process. Each template may mix material (durable) items and temporary items (wisps); persistence belongs to each item, not to a separate planning/execution template category. Material items are created in the selected checkout's `.work/items/`; wisps are created inside a run. Material-only expansion is available during planning without a run. The instantiated activities and gates shall be inspectable and evaluated through the same work-item and dependency model used for manually created work.
+Work shall support reusable templates that instantiate work items and relationships for a repeatable process. Each template may mix material (durable) items and temporary items (wisps); persistence belongs to each item, not to a separate planning/execution template category. Material items are created in the scope-resolved checkout's `.work/items/`; wisps are created inside the effective run's one storage home. Beta.2 uses [[DES-SCOPED-RUNS]] and [[DES-SCOPE-LAYOUT]]; material-only planning remains available without execution initialization. Material-only expansion is available during planning without a run. The instantiated activities and gates shall be inspectable and evaluated through the same work-item and dependency model used for manually created work.
 
 Templates shall support caller-supplied parameters and a preview of the rendered items and relationships before publication. Preview shall not publish work or acquire claims. Initial template rendering may produce Markdown bodies; later Work operations shall treat those bodies as opaque content.
 :::
@@ -67,9 +67,11 @@ Durable project intent and retained outcomes shall be stored in inspectable YAML
 :::mara requirement REQ-SIDE-STATE
 :mid: 01M3KAQ0SZWK4DWJ2H7F3B57ET
 :title: Persist operational and maintenance state separately
-:status: accepted
+:status: retired
 :kind: constraint
 :derives_from: SCN-QUIET-EXECUTION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[REQ-VERSIONED-EXECUTION]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Work shall persist operational and maintenance state in inspectable Markdown/YAML files, separately from version-controlled project content. Every entity shall have its own authoritative file in a location appropriate to its lifecycle; a single file containing all claims, runs, sessions and workspaces shall not replace those entities. No SQLite or other database shall be required. Routine operational changes shall not dirty durable project files, and process exit shall not discard active ownership or execution context.
 :::
@@ -87,9 +89,11 @@ For the same item identity within one Git repository and its linked worktrees, s
 :::mara requirement REQ-WORKTREE-VIEWS
 :mid: 01M3KAQ0TDAY6227Q9RFQZMJK1
 :title: Resolve current material items from their associated worktrees
-:status: accepted
+:status: retired
 :kind: quality
 :derives_from: SCN-CONCURRENT-AGENTS
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[REQ-SCOPE-HOSTING]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 For an actively associated material item, normal inspection, readiness and item mutations shall resolve that item's worktree and use its actual `.work/items/<id>.md` file, including uncommitted changes. Body, metadata, relationships and recorded lifecycle state come from the same resolved file. Material changes are saved there when made, not buffered in a separate run-state overlay or flushed only at finalization. The run/workspace association identifies the location; it does not own a second copy of the item's state.
 
@@ -101,9 +105,11 @@ Claims remain repository-wide. Squash or discard removes temporary context witho
 :::mara requirement REQ-CLAIM-RECOVERY
 :mid: 01M3KAQ0TNDBXRJDVQE7R5XN7K
 :title: Make stale ownership recoverable
-:status: accepted
+:status: retired
 :kind: functional
 :derives_from: SCN-CONCURRENT-AGENTS
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[REQ-SCOPED-OWNERSHIP]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Each ownership acquisition shall emit a new claim with its own identity and owning agent/session identity. Retain prior claims as distinguishable historical claims; never repurpose an old claim for a new owner. Current ownership must be unambiguous under the shared lock, not selected merely by comparing caller timestamps.
 
@@ -125,9 +131,11 @@ Work shall rebuild disposable graph and lookup views from authoritative durable,
 :::mara requirement REQ-RUN-FINALIZATION
 :mid: 01M3KAQ0V4YF7739TV39PW1EQK
 :title: Preserve retained results before temporary cleanup
-:status: accepted
+:status: retired
 :kind: quality
 :derives_from: SCN-QUIET-EXECUTION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[REQ-SCOPE-DISPOSAL]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Squashing completed temporary work shall retain a caller-supplied digest as an extension to the existing durable root before removing temporary work. Preserve supplied summary text verbatim and preserve existing root content. The digest is not a new work item or child obligation. The root's completion is separate; retaining a digest or finalizing a run shall not close it.
 
@@ -183,9 +191,11 @@ Retired proposal: Work would interpret structured external observations and enfo
 :::mara requirement REQ-EPHEMERAL-FILES
 :mid: 01M3KATNBMTK05HMRGN2VF8TZD
 :title: Keep temporary work authoritative in files
-:status: accepted
+:status: retired
 :kind: constraint
 :derives_from: SCN-QUIET-EXECUTION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[REQ-VERSIONED-EXECUTION]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Wisp content and graph relationships, run metadata and workspace references shall be stored in inspectable filesystem documents until explicitly finalized. Each entity shall have its own file and defined retention; a process restart, derived-view rebuild or feature-worktree removal shall not discard the shared execution files.
 :::
@@ -253,9 +263,11 @@ Each work item shall have at most one parent. Work shall reject hierarchy cycles
 :::mara requirement REQ-HANDOFF-CONTEXT
 :mid: 01M3KPWZ26S5T2HS2Z3R14XB3W
 :title: Retain and deliver context to receiving work
-:status: accepted
+:status: retired
 :kind: functional
 :derives_from: SCN-HANDOFF
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[REQ-SENDER-HANDOFFS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Work shall support caller-authored handoff context from one or more source items to one or more receiving items, including continuation where the same item appears on both sides. Getting or claiming a receiving item shall expose its incoming handoffs. Completion of source items shall not delete context still needed by receivers. Automatic cleanup shall become eligible only after all receiving obligations are closed/resolved; release, reassignment, and failed completion shall retain it. Explicit cancellation resolves a receiver for retention purposes. Reopening after cleanup does not restore deleted handoffs; callers use retained durable results and new context. Handoff references shall not alter readiness or add lifecycle dependencies.
 :::
@@ -277,7 +289,7 @@ Work shall treat Markdown bodies as opaque caller-authored text. Acceptance crit
 :kind: functional
 :derives_from: SCN-NEXT-WORK
 
-Work shall support priority and scoped filtering when listing or selecting eligible work. Claim-next shall select and reserve one eligible item in a single atomic coordination operation, applying the requested scope and priority ordering with a stable tie break. Concurrent callers shall not acquire the same coordination identity. No eligible work shall have an explicit empty outcome. Version-1 item priority is an integer from 0 (urgent) to 4 (backlog), default 2; canonical ID lexicographic order breaks equal-priority ties. [[DES-CLAIM-API]] specifies the filter operation schema. Coordination identity is repository-wide per item across linked worktrees.
+Work shall support priority and scoped filtering when listing or selecting eligible work. Claim-next shall select and reserve one eligible item in a single atomic coordination operation, applying the requested scope and priority ordering with a stable tie break. Concurrent callers shall not acquire the same coordination identity. No eligible work shall have an explicit empty outcome. Version-1 item priority is an integer from 0 (urgent) to 4 (backlog), default 2; canonical ID lexicographic order breaks equal-priority ties. [[DES-SCOPED-CLAIMS]] defines beta.2's inherited execution and atomic ownership boundaries; exact filter/selector inputs belong to [[DES-BETA2-WIRE]]. [[DES-CLAIM-API]] retains the historical beta.1 filter schema. Coordination identity is repository-wide per item across linked worktrees.
 :::
 
 :::mara requirement REQ-GRAPH-INSPECTION
@@ -303,9 +315,11 @@ Items shall allow optional model and thinking fields in machine-readable metadat
 :::mara requirement REQ-WORKSPACE-CLEANUP
 :mid: 01M3KTFNTD8D5NW6V5NF5YQS0D
 :title: Track workspace removal through an explicit cleanup item
-:status: accepted
+:status: retired
 :kind: functional
 :derives_from: SCN-WORKSPACE-CLEANUP
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[REQ-SCOPE-DISPOSAL]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Workspace cleanup shall be represented by an ordinary explicit work item. Completing another item, releasing a claim, removing a named session, or finalizing a run shall not implicitly delete a worktree. Cleanup shall wait until no active execution or unfinished work still requires the target workspace and necessary commits, results, and handoff context have been retained. External tooling removes the actual worktree and reports success; Work then removes its operational workspace record and associations. Failed removal shall retain inspectable workspace context for retry. Shared users outside the originating run shall also be considered. Work shall not execute filesystem or Git worktree removal itself.
 :::
@@ -313,9 +327,11 @@ Workspace cleanup shall be represented by an ordinary explicit work item. Comple
 :::mara requirement REQ-SINGLE-RUN
 :mid: 01M3KVG3GE1YS3FYYM9Z5512MN
 :title: Keep one current run per root and allow later runs
-:status: accepted
+:status: retired
 :kind: functional
 :derives_from: SCN-CONCURRENT-AGENTS
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[REQ-SCOPED-RUNS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 A root item shall have at most one current run across linked worktrees and callers. While that run is retained and not finalized or disposed, another start shall identify it or return an explicit conflict, including when its work is already finished. Supporting template expansion and parallel work on distinct members belong to that same execution scope.
 

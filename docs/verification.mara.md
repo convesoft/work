@@ -1,5 +1,8 @@
 # Verification definitions
 
+Current beta.2 scope/execution acceptance definitions live in [beta2 verification](beta2-verification.mara.md). Retired checks below document beta.1 obligations, not requirements for the replacement. Neither accepted definitions nor this authoring change establish passing runtime evidence.
+
+
 These are repeatable acceptance definitions, not execution results. The implemented durable-item slice has automated checks in `tests/`, including copied-backlog adoption in `tests/bootstrap_adoption.rs`; consult actual test runs for passing evidence and limitations. Checks for later slices remain planned.
 
 :::mara verification VER-DURABLE-ROUNDTRIP
@@ -42,11 +45,13 @@ Supply template parameters and preview the resulting bodies, metadata, and graph
 :::mara verification VER-QUIET-RUNTIME
 :mid: 01M3KARN85TADDXC48385KJTEH
 :title: Inspect the durable and operational boundary
-:status: accepted
+:status: retired
 :method: demonstration
 :verifies: REQ-EPHEMERAL-WORK
 :verifies: REQ-SIDE-STATE
 :validates: SCN-QUIET-EXECUTION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-SCOPE-ROUTING]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Capture durable file contents and instantiate temporary execution as separate run and wisp files. Create claims, named sessions, reusable workspace records and handoffs in their documented locations, then restart every Work process. Inspect each entity directly with ordinary file tools and through CLI/MCP; expect matching semantic content and unchanged ownership. No SQLite file or single all-entity snapshot is required, and operational updates do not dirty versioned content. Retain a feature-level digest extension on the root through ordinary Git commit/squash history before explicit temporary cleanup. Confirm branch merge alone does not copy live operational files into main.
 :::
@@ -54,11 +59,13 @@ Capture durable file contents and instantiate temporary execution as separate ru
 :::mara verification VER-CLAIM-RACE
 :mid: 01M3KARN8D5NW801AXBVV5GEWZ
 :title: Race claims and reject stale owners
-:status: accepted
+:status: retired
 :method: test
 :verifies: REQ-CLAIM-EXCLUSION
 :verifies: REQ-CLAIM-RECOVERY
 :validates: SCN-CONCURRENT-AGENTS
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-IMMUTABLE-SESSIONS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Use independent processes in linked worktrees to claim the same item simultaneously. Assert exactly one owner and an explicit conflict for the loser, even when callers supply different run/worktree contexts. Readers must remain able to inspect progress. Claim distinct items and expect independent ownership. Explicitly release and reassign a claim, then submit completion and release requests with the former claim ID plus session identity and expect rejection. Recheck readiness between listing and claiming. Advance time without heartbeats and verify claims do not expire. Exercise explicit controller recovery of abandoned ownership. Exercise concurrent independent CLI and MCP processes with notifications disabled or missed. Kill a process while it holds the shared OS lock; a later process can acquire the lock but cannot claim an already-owned item. With executors stopped, corrupt a claim file in a disposable fixture and verify an explicit storage warning/refusal rather than treating it as unclaimed. Explicit repair or ownership recreation rejects former claim/session authorizations and never invents prior owners. Reacquire the same item from the same session and require a new claim ID; the old pair remains rejected. Inspect retained prior claims and verify that new ownership never overwrites their acquisition identity. Reversed or equal caller timestamps cannot select a different winner. No separate secret token or token store is required.
 :::
@@ -66,11 +73,13 @@ Use independent processes in linked worktrees to claim the same item simultaneou
 :::mara verification VER-WORKTREE-ISOLATION
 :mid: 01M3KARN8NJYGF8F14YQAFKD71
 :title: Query divergent durable views independently
-:status: accepted
+:status: retired
 :method: test
 :verifies: REQ-WORKTREE-VIEWS
 :verifies: REQ-INDEX-REBUILD
 :validates: SCN-REBUILD-INDEX
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-SCOPE-ROUTING]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Create linked worktrees whose same-ID durable item differs in content and completion, including uncommitted changes. Alternate queries and source reloads from each tree. Without an association, expect the selected checkout's file. Associate the item with a feature worktree and expect normal inspection/readiness from either checkout to read its body, metadata, relationships and state together from that feature file, exposing the source path. Mutate/close the material item and verify it is saved immediately in that file, with no separate run-state copy and no main-file change. Explicit branch-local inspection can still show main's older file. Restart and dispose of the run: the material file and needed source association survive. An unavailable associated worktree is reported instead of silently falling back to main. Finalizing a finished run must not close an open root. Shared claims exclude competing execution across both trees. Restart and reconstruct the in-memory graph with claims, runs, sessions, workspaces and handoffs present; compare authoritative file bytes and require unchanged ownership/context.
 
@@ -80,10 +89,12 @@ From a control checkout select each worktree by path and inspect its content wit
 :::mara verification VER-RUN-RECOVERY
 :mid: 01M3KARN8Y3FYNPDNEKTVK2J1A
 :title: Inspect partial expansion and preserve results before cleanup
-:status: accepted
+:status: retired
 :method: test
 :verifies: REQ-RUN-ATOMICITY
 :verifies: REQ-RUN-FINALIZATION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-PROMOTION-DISPOSAL]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Validate invalid template inputs without creating files. For a valid five-item expansion, inject failure after three creations. Inspect those files and the returned created-ID mapping and failure; no application record or transaction receipt exists. Remove the partial result as the caller and retry to create the intended graph. Repeat for a mixed material/wisp template, including restart after a killed creator; surviving files remain discoverable without a promise of automatic rollback or duplicate suppression. Ordinary malformed-file or unresolved-reference diagnostics still apply.
 
@@ -146,9 +157,11 @@ Exercise item selection, claiming, run creation, and supplied workspace or PR/CI
 :::mara verification VER-EPHEMERAL-FILES
 :mid: 01M3KATNCZAAZ9E3W5T7EAYES4
 :title: Recover temporary work content from files
-:status: accepted
+:status: retired
 :method: test
 :verifies: REQ-EPHEMERAL-FILES
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-SCOPE-ROUTING]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Create a run with multiple wisps and workspace references, including items created by repeated template expansion. Inspect the separate manifest and entity files directly; no application/provenance entity is required. Restart Work and rebuild its disposable view without any database or persistent index; expect all content, edges, workspace references and ownership records to remain. In a stopped-execution fixture corrupt one entity file and verify diagnostics identify its path and preserve the other entities. Temporary cleanup remains an explicit lifecycle operation, never a side effect of rebuilding a graph.
 :::
@@ -188,9 +201,11 @@ Reject a second parent, a parent cycle, and a pure dependency cycle. Reject a ch
 :::mara verification VER-HANDOFF-RETENTION
 :mid: 01M3KPXXA1FN9H5ZFKEPEJTJH9
 :title: Verify context survives until receiving work finishes
-:status: accepted
+:status: retired
 :method: test
 :verifies: REQ-HANDOFF-CONTEXT
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-SENDER-HANDOFFS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Create a handoff from five completed fix items to one consolidation item, and another with two receiving items. Getting and claiming a receiver must return the original opaque body and source/workspace references. Completing sources, releasing ownership, reassigning ownership, or failing completion must retain the handoff. Complete one of two receivers and expect retention; complete both and expect automatic cleanup eligibility. Exercise a same-item continuation. Verify handoff references never affect readiness, run cleanup preserves externally needed context, and no agent is launched. Cancel a remaining receiver by closing it with a reason and expect cleanup eligibility. Reopen a receiver after cleanup and verify Work returns retained durable context without fabricating the deleted handoff.
 :::
@@ -220,9 +235,11 @@ Once concrete priority and filter schemas are selected, construct eligible, depe
 :::mara verification VER-SQUASH-DIGEST
 :mid: 01M3KPXXBAZ20409CEYQGVGMRD
 :title: Verify squash and explicit wisp discard
-:status: accepted
+:status: retired
 :method: test
 :verifies: REQ-RUN-FINALIZATION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-PROMOTION-DISPOSAL]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Supply a finished run and caller-written summary while its manual root remains open. Finalization retains the summary verbatim as an extension to that existing root, preserving prior root content and completion state and creating no new digest item or child edge. Verify retention precedes wisp cleanup, including interruption and inspection/continuation. Reject squash of unfinished member work or work with active claims. Keep surviving item references and handoffs with unresolved receivers to verify cleanup identifies blockers and preserves needed context. Root completion remains a separate explicit operation. Exact repeat-call behavior follows the bounded finalization contract.
 
@@ -232,10 +249,12 @@ Exercise explicit discard through real CLI/MCP calls on both completed and aband
 :::mara verification VER-WORKSPACE-CLEANUP
 :mid: 01M3KTFNV9ACZ6MTYX9WVGGPD7
 :title: Verify reuse and explicit cleanup across workspace users
-:status: accepted
+:status: retired
 :method: test
 :verifies: REQ-WORKSPACE-CLEANUP
 :verifies: DES-WORKSPACE-ASSOCIATIONS
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-PROMOTION-DISPOSAL]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Associate sequential activities and different sessions with a shared workspace; verify completion and release preserve the workspace association. Exercise a run default, an item override, and the resolved workspace on a claim. Add another unfinished user outside the originating run and verify cleanup cannot proceed while that user needs the workspace. Verify required downstream context is retained before removal. Have external tooling report removal failure and expect inspectable context and a retryable cleanup item; report successful removal and expect operational workspace record cleanup. Instrument Work's operations and verify they do not perform actual worktree deletion. Race and interruption cases must follow the cleanup protocol once its detailed design is selected.
  Enter the closing state only after checking existing users; attempt a new assignment while closing and expect rejection. Run cleanup from a surviving control checkout and verify shared run files remain accessible after feature-worktree removal.
@@ -244,9 +263,11 @@ Associate sequential activities and different sessions with a shared workspace; 
 :::mara verification VER-SESSION-REUSE
 :mid: 01M3KTFNVQNWAXJ9B11M3VWP3D
 :title: Verify optional named-session reuse without transferring ownership
-:status: accepted
+:status: retired
 :method: test
 :verifies: DES-CLAIM-CONTEXT
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-IMMUTABLE-SESSIONS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Create a run-scoped implementer name pointing directly to an opaque provider/session reference. Complete its first item and verify the name remains available for a later item, which acquires a new claim. Use the same name in another run and verify scope isolation. Claim one-time fix items with external session references and no named-session registration. Rebind or remove a name and verify this neither transfers an existing claim nor lets the replacement session authorize operations using the former claim. Treat availability as a timestamped external observation, not proof that a session remains available. Verify no session is launched or resumed by Work.
  Successfully squash or explicitly clean finalized execution context and verify its named-session records are removed without terminating external sessions.
@@ -255,9 +276,11 @@ Create a run-scoped implementer name pointing directly to an opaque provider/ses
 :::mara verification VER-SINGLE-RUN
 :mid: 01M3KVG3J8NQWE6VA1WZV5VBA9
 :title: Reject competing runs for the same root
-:status: accepted
+:status: retired
 :method: test
 :verifies: REQ-SINGLE-RUN
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-SCOPED-RUNS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Attempt to initialize execution of the same root item from two linked worktrees concurrently. Expect one current run and an explicit existing-run result or conflict, not two executions. Verify read-only inspection from the other caller succeeds. Add supporting template work and independently claim different child items within that run. A finished but unfinalized run is still the current run. After squash/finalization and, separately, after explicit disposal, start later work on the same root and require a fresh run ID with no old wisps resurrected. Race two starts after disposal and again require one current run. Starting a fresh run must not change the root's recorded completion.
 :::
@@ -316,11 +339,13 @@ Copy the real .work/items backlog into a disposable initialized Git checkout. Lo
 :::mara verification VER-FILE-COORDINATION
 :mid: 01M3RPMWJSJ2SVH8XKQKTV5SGX
 :title: Verify separate entity storage and shared file coordination
-:status: accepted
+:status: retired
 :method: test
 :verifies: DES-SHARED-FILES
 :verifies: DES-ENTITY-LIFECYCLES
 :verifies: DES-FILE-COORDINATION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[VER-SCOPE-ROUTING]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Use disposable Git repositories and linked worktrees to verify the entity layout, one authoritative owner per field/reference, and independent retention rules. Run concurrent CLI/MCP mutations through the shared lock, including contention and process termination. Confirm lock-file presence is not interpreted as ownership and normal cleanup never unlinks/replaces the live lock inode. Test symlink/path substitution and source conflicts without following unsafe replacements or silently overwriting changed content.
 

@@ -1,5 +1,8 @@
 # Architecture and data contracts
 
+Current beta.2 architecture is defined in [scope ownership](scopes.mara.md) and [scoped execution](scoped-execution.mara.md). Retired designs below are beta.1 history; unchanged accepted item/graph/body principles remain reusable. Exact new wire formats are draft until DES-BETA2-WIRE is accepted.
+
+
 Contracts here describe the intended product architecture. Exact command spelling, serialization fields, and Rust crate layout remain uncommitted unless explicitly specified. [File storage](storage.mara.md) defines the current shared entity layout and coordination boundaries.
 
 :::mara design DES-SHARED-ITEM-MODEL
@@ -17,11 +20,13 @@ Work items are graph nodes with relationships expressing process constraints. A 
 :::mara design DES-PERSISTENCE-BOUNDARY
 :mid: 01M3KARNA567E2TXS0XP40EYQB
 :title: Separate project history from operational and execution files
-:status: accepted
+:status: retired
 :kind: data
 :satisfies: REQ-DURABLE-FILES
 :satisfies: REQ-SIDE-STATE
 :satisfies: REQ-EPHEMERAL-FILES
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-LAYOUT]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 All authoritative Work state lives in separate Markdown/YAML entity files:
 
@@ -43,7 +48,7 @@ Ordinary commits and squash merges retain feature-level history. Live operationa
 
 Use `.work/items/` for durable Markdown item documents with YAML frontmatter and `.work/templates/` for versioned YAML template definitions. Keep one document per durable item. Long descriptions, acceptance criteria, and retained outcomes live in Markdown; machine-readable metadata and relationships live in frontmatter.
 
-Use an immutable random UUIDv4 encoded as 32 lowercase hexadecimal characters as the canonical item identity and filename stem (`<id>.md`). Store full IDs in relationships. Human output can display `w-` followed by a short prefix, initially eight hexadecimal characters, extended as necessary to disambiguate. Resolve a shortened input only when unambiguous; never silently choose among matches. Detect full-ID collisions rather than overwriting existing work. Do not introduce sequential aliases or encode hierarchy in IDs. [[DES-ITEM-FORMAT]] defines the version-1 header fields, aggregate state omission, relationship serialization, unknown-field rejection, and byte-preserving body framing. These are Work files, not Mara documents. Ephemeral item files use the shared unversioned location in [[DES-EPHEMERAL-LAYOUT]].
+Use an immutable random UUIDv4 encoded as 32 lowercase hexadecimal characters as the canonical item identity and filename stem (`<id>.md`). Store full IDs in relationships. Human output can display `w-` followed by a short prefix, initially eight hexadecimal characters, extended as necessary to disambiguate. Resolve a shortened input only when unambiguous; never silently choose among matches. Detect full-ID collisions rather than overwriting existing work. Do not introduce sequential aliases or encode hierarchy in IDs. [[DES-ITEM-FORMAT]] defines the version-1 header fields, aggregate state omission, relationship serialization, unknown-field rejection, and byte-preserving body framing. These are Work files, not Mara documents. Beta.2 ephemeral item files use the scope-owned, versionable run location in [[DES-SCOPE-LAYOUT]]; [[DES-EPHEMERAL-LAYOUT]] is retained as retired history.
 
 Markdown body preservation follows [[REQ-OPAQUE-BODIES]]: acceptance criteria stay in the body; Work does not parse or update their sections. Optional `model` and `thinking` metadata follow [[REQ-EXECUTOR-HINTS]].
 :::
@@ -82,11 +87,13 @@ Readiness and blocking derive from lifecycle prerequisites; ownership derives fr
 :::mara design DES-TEMPLATE-RUNS
 :mid: 01M3KARNB5PY2J48QMVKYKMBSM
 :title: Group instantiated work by run
-:status: accepted
+:status: retired
 :kind: structure
 :satisfies: REQ-GRAPH-TEMPLATES
 :satisfies: REQ-RUN-ATOMICITY
 :satisfies: REQ-RUN-FINALIZATION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPED-RUNS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 A template creates predefined items and relationships. Each item is material (durable) or a wisp (temporary), and one template can mix both. There is no planning/execution category on the template. Material items go to the selected checkout's `.work/items/`; wisps go to a target run's `items/`. A material-only expansion needs no run. A template containing wisps needs a target run; [[DES-RUN-API]] defines version 2's per-item persistence selector, optional root and exact CLI/MCP selection.
 
@@ -117,10 +124,12 @@ Work tracks and coordinates work; external tools run agents, create worktrees, a
 :::mara design DES-EPHEMERAL-LAYOUT
 :mid: 01M3KAW78VAFH89JHJHREXRKP9
 :title: Share temporary work files across linked worktrees
-:status: accepted
+:status: retired
 :kind: data
 :satisfies: REQ-EPHEMERAL-FILES
 :satisfies: REQ-SIDE-STATE
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-LAYOUT]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Store each run under `<resolved Git common directory>/work/runs/<run-id>/`, with a `run.yaml` manifest, separate `items/` wisp files, and optional `sessions/` records. No `applications/` directory or template application entity is required. Linked worktrees share this location; independent clones do not.
 
@@ -162,10 +171,12 @@ Closing with a cancellation reason resolves the obligation just like other closu
 :::mara design DES-HANDOFF-RECORDS
 :mid: 01M3KPWZ42EZ05TAB0G8GNHCBJ
 :title: Store transition context in shared temporary files
-:status: accepted
+:status: retired
 :kind: data
 :satisfies: REQ-HANDOFF-CONTEXT
 :satisfies: REQ-OPAQUE-BODIES
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SENDER-HANDOFFS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Store handoffs as independent Markdown files under `<resolved Git common directory>/work/handoffs/`. Their frontmatter identifies `from_items` and `to_items`, with optional session and workspace references; their bodies are opaque caller-authored text. A record can cover several sources and receivers, and the same item can appear in both lists for continuation. These references deliver context and govern retention; they are not additional Work graph relations and do not affect readiness.
 
@@ -177,10 +188,12 @@ Persist outgoing context before releasing ownership. A failed completion keeps c
 :::mara design DES-CLAIM-CONTEXT
 :mid: 01M3KPWZ4FSE4HC0ZYVSQFTT4R
 :title: Associate claims with sessions and persistent workspace context
-:status: accepted
+:status: retired
 :kind: data
 :satisfies: REQ-SIDE-STATE
 :satisfies: REQ-WORK-SELECTION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-IMMUTABLE-SESSIONS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Store each acquisition as a new file `shared/claims/<claim-id>.yaml`, with claim/item identity, agent identity, required opaque session identity and namespace, store identity/generation, timestamps and optional workspace reference. Retain older claims and distinguish the one current acquisition for an item. Do not update an old claim into a new acquisition or infer the winner from timestamps. [[DES-CLAIM-API]] specifies an immutable acquisition plus one separate ending file per claim; it requires no generic event-log subsystem.
 
@@ -196,10 +209,12 @@ Workspace reuse, run defaults, item overrides, and explicit cleanup follow [[DES
 :::mara design DES-SQUASH-DIGEST
 :mid: 01M3KPWZ4WR4MM8DFR5YJ906PR
 :title: Retain a root digest or explicitly discard ephemeral work
-:status: accepted
+:status: retired
 :kind: behavior
 :satisfies: REQ-RUN-FINALIZATION
 :satisfies: REQ-OPAQUE-BODIES
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-TRANSITIONS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Squash retains a caller-written summary as an extension to the existing durable root in a designated surviving checkout. Preserve the supplied digest text verbatim and preserve the root's existing content. Do not create a separate digest task, child item or completion obligation. [[DES-FINALIZATION-API]] stores it as `.work/digests/<root-id>/<run-id>.md`: an extension document with no Work item ID, preserving the root body unchanged.
 
@@ -215,11 +230,13 @@ Explicit discard is the alternative when temporary detail need not be retained. 
 :::mara design DES-WORKSPACE-ASSOCIATIONS
 :mid: 01M3KTFNTVA1JKNHD2KWH10R7V
 :title: Reuse workspace records independently of sessions and claims
-:status: accepted
+:status: retired
 :kind: data
 :satisfies: REQ-WORKSPACE-CLEANUP
 :satisfies: REQ-SIDE-STATE
 :satisfies: REQ-EXTERNAL-EXECUTION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPE-RESOLUTION]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 Keep one YAML file per workspace under shared `workspaces/` as defined in [[DES-ENTITY-LIFECYCLES]], identifying an externally managed path/worktree with optional branch and commit context. A workspace can be reused by multiple activities and shared across sessions; it is not owned by a session or claim. Record a default workspace for a run and allow an item to override it. A claim records its resolved execution workspace. Associations survive individual completion and claim release. For material items they resolve the whole authoritative item file under [[REQ-WORKTREE-VIEWS]]; run finalization/disposal must preserve any association still needed to locate material progress. Update or remove that association explicitly when work moves or workspace cleanup establishes a surviving source. No material state is copied into workspace or run records.
 
@@ -254,10 +271,12 @@ Shared failures have stable categories: `invalid_argument` (field or relation co
 :::mara design DES-CLI-JSON
 :mid: 01M3P19AKC412WF8W8TPBX82A9
 :title: Expose durable item commands and JSON envelopes
-:status: accepted
+:status: retired
 :kind: interface
 :satisfies: REQ-CLI-JSON
 :satisfies: REQ-WORKTREE-VIEWS
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-BETA2-SURFACES]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 The durable CLI slice uses `work [--json] [--worktree PATH] COMMAND`. Options precede the command. An omitted worktree selects the caller's checkout; an explicit path selects that Git working checkout's durable files without changing the caller's branch. `discover [PATH]`, `--version`, and `--help` remain available. Help advertises only implemented commands; JSON help returns `{"help":"..."}`. This slice implements `item create --title TEXT [--body TEXT|-]`, `item list`, `item inspect ID [--raw]`, `item diagnose`, `item ready`, `item update ID OPTIONS`, `item close ID [--reason TEXT]`, `item reopen ID`, `item repair FULL_ID --source -`, and `relation add|remove KIND SOURCE TARGET`. KIND is `parent`, `depends_on`, `related`, or `discovered_from`. Create and update accept `--completion manual|children`, `--priority 0..4`, `--parent ID`, `--clear-parent`, repeatable `--label TEXT` (replacement set), `--clear-labels`, `--model TEXT`, `--clear-model`, `--thinking TEXT`, and `--clear-thinking`; update also accepts `--title`. Relationships other than parent use the relation commands. Body/source `-` reads stdin bytes. Inspect accepts full canonical IDs or unambiguous lowercase hexadecimal prefixes with optional `w-`; all mutations resolve IDs before invoking shared operations. Raw inspection and repair require a full ID to identify malformed source safely. No command in this slice claims, instantiates templates, or manages runs; those surfaces require their separate coordination contracts.
 
@@ -269,9 +288,11 @@ Stable error codes for this slice are `usage`, `invalid_argument`, `not_found`, 
 :::mara design DES-MCP-STDIO
 :mid: 01M3P4Z9P9XAPF9KC4FR0DQN9E
 :title: Expose durable operations through MCP stdio
-:status: accepted
+:status: retired
 :kind: interface
 :satisfies: REQ-CLI-MCP-PARITY
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-BETA2-SURFACES]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 `work mcp` serves newline-delimited JSON-RPC 2.0 over stdio, negotiating MCP protocol version `2025-06-18`. It advertises tools and no resource or prompt capabilities. Tool calls return the CLI JSON result payload as `structuredContent` and JSON text content. Domain, source, and selection failures return `isError: true` with `{"error":{"code","message",...}}` in structured content; unknown protocol methods and tool names use JSON-RPC errors. stdout contains only protocol messages.
 

@@ -1,10 +1,12 @@
 # Using Work: durable items and beta execution
 
+This guide describes the **implemented beta.1 surface**, not planned beta.2 commands. The accepted [beta.2 scope model](scopes.mara.md), [execution contracts](scoped-execution.mara.md) and [acceptance definitions](beta2-verification.mara.md) are next-version knowledge. Superseded operations remain usable in the current executable until their replacement delivery items are implemented; do not infer new commands from design examples.
+
 Work reads version-1 files directly from `.work/items/<full-id>.md` in the selected Git checkout. Existing authored files need no import or ID migration. Their Markdown bodies are opaque: metadata edits, relation changes, close, and reopen preserve the body bytes. Work may normalize the YAML header and retain hidden recovery copies when replacing a file. Keep `.work/items/` under Git and review intended item changes before committing them.
 
 The commands below are examples for this repository's backlog. Consumers can model their own items and dependencies, or use independent items without a workflow. The [Work skill](../skills/work/SKILL.md) gives agents the same basic operation guidance.
 
-Build the current checkout with `cargo build --locked`; run `target/debug/work` in the commands below (or substitute `cargo run --locked --`). The published `0.1.0-alpha.1` supports only the durable loop. This checkout prepares the unpublished `0.1.0-beta.1` candidate with the execution operations below. Candidate metadata is not publication evidence; use the locally built or packaged candidate for these examples. Inspect help or MCP `tools/list` to distinguish capabilities; do not substitute an older installed alpha or its MCP schemas. Run `work --help` for the command list, then `work item --help` or `work item COMMAND --help` for detail. `--json` returns the same help inside a structured result.
+Build the current checkout with `cargo build --locked`; run `target/debug/work` in the commands below (or substitute `cargo run --locked --`). The earlier `0.1.0-alpha.1` supports only the durable loop. The published `0.1.0-beta.1` prerelease includes the execution operations below; use a local build or install that exact version. [Publication evidence](../.work/items/e3640780b04f404bbb3baebfa3a50a38.md) is recorded separately from a binary's version string. Inspect help or MCP `tools/list` to distinguish capabilities; do not substitute an older installed alpha or its MCP schemas. Run `work --help` for the command list, then `work item --help` or `work item COMMAND --help` for detail. `--json` returns the same help inside a structured result.
 
 ## Inspect and advance the backlog
 
@@ -120,7 +122,7 @@ For a supported interrupted operation, use the reported ID:
 target/debug/work --json storage recover OPERATION_ID
 ```
 
-Resuming recreation requires the same current stopped-executor/loss affirmations. Recovery never resets an unrelated newer generation. Unsupported metadata versions require a compatible tool. Backup/restore and the deferred foundation-recovery follow-up remain outside this slice. Handoffs are supported as independent receiver-scoped files. See [the storage contract](storage.mara.md) for the file formats and recovery rules.
+Resuming recreation requires the same current stopped-executor/loss affirmations. Recovery never resets an unrelated newer generation. Unsupported metadata versions require a compatible tool. Backup/restore remains outside this slice. The known foundation-recovery limitation is recorded in the [follow-up](../.work/items/155dd1c73ef3412da9d2a44ec57dcfbc.md), now cancelled as superseded by beta.2 rather than fixed in beta.1. Handoffs are supported as independent receiver-scoped files. See [the storage contract](storage.mara.md) for the file formats and recovery rules.
 
 On Linux, creation under a restrictive umask can require access to `/proc/self/fd` to set permissions through a held directory descriptor. If unavailable, the operation reports an error; it does not use an unsafe pathname fallback. On macOS, a umask that prevents opening a newly created directory causes a permission error; use a umask that leaves owner access (for example, `077`). Work preserves the interrupted state for explicit recovery.
 

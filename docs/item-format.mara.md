@@ -8,7 +8,7 @@
 :satisfies: REQ-BOOTSTRAP-COMPATIBILITY
 :satisfies: REQ-RELATION-STRUCTURE
 
-Version 1 is the durable Work item format used by the bootstrap backlog and the first implementation. Files live directly under `.work/items/<id>.md`; the filename stem equals the full canonical UUIDv4 identity. Temporary items will use the same item envelope in the shared run location, with run manifests specified separately. Storage location determines durability; no `ephemeral` flag is serialized in item frontmatter.
+Version 1 is the durable Work item format used by the bootstrap backlog and the first implementation. Files live directly under `.work/items/<id>.md`; the filename stem equals the full canonical UUIDv4 identity. Beta.2 temporary items use the same item envelope at `.work/scopes/<scope-id>/runs/<run-id>/items/<id>.md` under [[DES-SCOPE-LAYOUT]], with run manifests specified separately. Storage location determines durability; no `ephemeral` flag is serialized in item frontmatter.
 
 Each file is UTF-8 without a byte-order mark. Its first line is exactly `---`; its first subsequent standalone `---` line ends the YAML header. LF and CRLF delimiters are accepted. Everything after the closing delimiter's line ending is the opaque body, including leading blank lines and the final-newline choice. Writers preserve those body bytes during metadata changes and never parse headings, acceptance criteria, checkboxes, or links.
 

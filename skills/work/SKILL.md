@@ -7,7 +7,7 @@ description: Use Work to inspect and manage durable work items, relationships, c
 
 Work stores durable items as Git-tracked `.work/items/<full-id>.md` files. A consumer chooses its own items, bodies, and graph; Work does not require a particular workflow or interpret Markdown headings as structured acceptance fields. It tracks state and graph eligibility but does not execute work.
 
-This skill describes the item, storage, claim/run, template, workspace/session, handoff and finalization capabilities in the unpublished `0.1.0-beta.1` candidate checkout. The published alpha has only the durable loop. Candidate metadata does not establish publication or verification. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
+This skill describes the item, storage, claim/run, template, workspace/session, handoff and finalization capabilities in the published `0.1.0-beta.1` prerelease. The earlier alpha has only the durable loop. Planned beta.2 scope-owned execution is not implemented by this surface; a version string alone does not establish verification. Check the selected `work` executable's `--version` and command `--help`, or MCP `tools/list`, before relying on a command or tool. Use a matching CLI and MCP version if both are available. A skill installation alone does not install the executable.
 
 ## Select the view
 
@@ -51,7 +51,7 @@ Item reads expose storage and storage_warning without losing available durable d
 
 ## Beta execution context
 
-The candidate binary also advertises claim acquire/next/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach/squash/discard, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
+The beta.1 binary also advertises claim acquire/next/inspect/list/release/recover/reassign, run start/inspect/list/attach/detach/squash/discard, and template expand. Claims use a required external `{namespace,id}` session and immutable claim ID; owner mutations carry the matching claim/session pair. Work does not execute that session. Runs hold membership and wisps, not copies of material state. Inspect actual command help and MCP schemas for request details.
 
 Workspace register/inspect/list/bind/unbind match workspace_register/workspace_inspect/workspace_list/workspace_bind/workspace_unbind. Register an existing checkout in the same Git repository; registering its canonical path again reuses its ID. Branch/commit fields are supplied observations, not live Git state. Material binding selects the whole item file; explicit rebind establishes a surviving source after external merge/relocation. Unbind removes only that reference and refuses active claims/current-run context. Workspace users are derived from bindings, current runs, claims and closing cleanup controller references; unresolved users do not prove safe cleanup.
 
@@ -77,4 +77,4 @@ Inspect `partial`, `publication` and remaining IDs after an error. Pending clean
 
 `cargo test --locked --test beta_adoption -j 2` runs the connected public workflow on disposable linked fixtures through both surfaces. `scripts/smoke-packaged.sh` reuses that harness against installed native/dispatcher packages. Tests need Git and Node.js >=18. They inspect real resulting files, compare success/domain errors, and cover claims under contention, explicit recovery, retention and external cleanup. CLI syntax `usage` and MCP schema `invalid_argument` are both rejected input; domain failures retain matching codes. A passing local invocation is not other-host or publication evidence.
 
-Backup/restore, automatic expiry/orphan repair, the deferred storage-recovery follow-up, agent execution, physical Git worktree management, pull requests and CI actions remain outside the implemented slice. Do not advertise or simulate those as Work operations.
+Backup/restore, automatic expiry/orphan repair, agent execution, physical Git worktree management, pull requests and CI actions remain outside the implemented slice. The known beta.1 storage-recovery limitation is documented in `.work/items/155dd1c73ef3412da9d2a44ec57dcfbc.md`; that follow-up was cancelled as superseded by beta.2, not implemented as a beta.1 fix. Do not advertise or simulate those as Work operations.

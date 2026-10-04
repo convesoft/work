@@ -1,11 +1,17 @@
+## Historical beta.1 execution IO
+
+This retired contract describes the currently implemented beta.1 slice. Planned replacement: [scoped execution](scoped-execution.mara.md), especially DES-SCOPED-CLAIMS and DES-BETA2-SURFACES. New exact wire formats are still draft.
+
 :::mara design DES-EXECUTION-IO
 :mid: 01M3TWR24EYHGH9N2B5AMHC7NW
 :title: Share execution file IO, resolved views and transport rules
-:status: accepted
+:status: retired
 :kind: interface
 :satisfies: REQ-WORKTREE-VIEWS
 :satisfies: REQ-CLI-MCP-PARITY
 :satisfies: REQ-CLAIM-EXCLUSION
+
+Retired as a beta.2 contract; retained as historical beta.1 knowledge, not an obligation for the replacement implementation. See [[DES-SCOPED-CLAIMS]]. The executable may still implement this historical behavior until the beta.2 delivery items are merged.
 
 ## Scope and common values
 
