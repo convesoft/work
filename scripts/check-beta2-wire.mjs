@@ -7,7 +7,7 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const tools = [
-  'discover', 'execution_inspect', 'execution_init',
+  'discover', 'status', 'init',
   'scope_list', 'scope_inspect', 'scope_host', 'scope_relocate', 'scope_adopt',
   'scope_select_authority', 'scope_dispose',
   'run_start', 'run_inherit', 'run_rotate', 'run_inspect', 'run_list',
@@ -31,9 +31,10 @@ const removed = [
   'workspace_register', 'workspace_bind', 'workspace_unbind', 'run_attach', 'run_detach',
   'session_set', 'session_remove', 'handoff_receivers', 'handoff_prune',
   'run_squash', 'run_discard', 'storage_recreate', 'storage_recover',
+  'execution_init', 'execution_inspect',
 ];
 const continuation = new Set([
-  'execution_init', 'run_start', 'run_finalize', 'run_abandon', 'run_rotate',
+  'init', 'run_start', 'run_finalize', 'run_abandon', 'run_rotate',
   'run_dispose', 'scope_dispose', 'item_promote', 'item_update',
   'relation_add', 'relation_remove', 'scope_host', 'scope_relocate',
   'scope_adopt', 'scope_select_authority',
@@ -131,17 +132,40 @@ export function checkCatalog(catalog, document) {
   for (const name of ['TemplateValidateInput', 'TemplatePreviewInput', 'TemplateExpandInput']) {
     assert.deepEqual(definitions[name].properties.name, { $ref: '#/$defs/TemplateIdentifier' });
   }
+  assert.equal(catalog.operations.init.cli, 'init [--continue ID]');
+  assert.equal(catalog.operations.status.cli, 'status [--view VIEW]');
+  assert.deepEqual(properties('IgnoreChange'), ['after', 'before']);
+  assert.deepEqual(definitions.IgnoreChange.required, ['before', 'after']);
+  const start = definitions.StartProgress.oneOf[0];
+  assert.deepEqual(start.properties.ignore_change, { $ref: '#/$defs/IgnoreChange' });
+  assert.deepEqual(start.allOf[0].then.required, ['ignore_change']);
+  assert.deepEqual(start.allOf[0].else.not, { required: ['ignore_change'] });
+  assert.ok(!definitions.StartProgress.oneOf[1].properties.ignore_change);
+  assert.ok(definitions.DeclarationChange.required.includes('before_scope_ids'));
+  assert.deepEqual(definitions.DeclarationChange.properties.before_scope_ids.items, { $ref: '#/$defs/ID' });
+  for (const field of ['operation', 'parent_before', 'parent_after']) {
+    assert.ok(definitions.TreePlan.required.includes(field), `unfrozen tree operation: ${field}`);
+  }
+  assert.ok(definitions.StartProgress.oneOf[1].required.includes('tree_references'));
+  assert.deepEqual(definitions.StartProgress.oneOf[1].properties.tree_references.items, {
+    $ref: '#/$defs/ScopeTreeReferenceChange',
+  });
+  assert.ok(definitions.HostTransferProgress.required.includes('tree_references'));
+  assert.deepEqual(definitions.HostTransferProgress.properties.tree_references.items, {
+    $ref: '#/$defs/HostTreeReferenceChange',
+  });
   // The ended barrier is retained even after the terminal manifest is disposed.
   assert.ok(definitions.ExecutionBoundary.oneOf.some((variant) => variant.properties.mode.const === 'ended'));
   return { operations: tools.length, envelopes: envelopes.length, definitions: Object.keys(definitions).length };
 }
 
 export async function checkFiles() {
-  const [catalogText, document, scoped, status] = await Promise.all([
+  const [catalogText, document, scoped, status, onboarding] = await Promise.all([
     readFile(path.join(root, 'docs/schemas/beta2-wire-v2.schema.json'), 'utf8'),
     readFile(path.join(root, 'docs/beta2-wire.mara.md'), 'utf8'),
     readFile(path.join(root, 'docs/scoped-execution.mara.md'), 'utf8'),
     readFile(path.join(root, 'docs/engineering-status.mara.md'), 'utf8'),
+    readFile(path.join(root, 'docs/onboarding.mara.md'), 'utf8'),
   ]);
   const result = checkCatalog(JSON.parse(catalogText), document);
   const wire = scoped.match(/:::mara design DES-BETA2-WIRE\n([\s\S]*?)\n:::/)?.[1];
@@ -151,6 +175,9 @@ export async function checkFiles() {
   assert.ok(wire.includes('beta2-wire.mara.md'), 'canonical wire body must link full specification');
   assert.ok(status.includes('beta2-wire.mara.md'), 'status must link full specification');
   assert.ok(document.includes('not runtime') || document.includes('not planned runtime'));
+  assert.ok(onboarding.includes(':::mara design DES-REPOSITORY-ONBOARDING'));
+  assert.ok(onboarding.includes('work init [--continue ID]'));
+  assert.ok(onboarding.includes('/.work/**/.stage-*'));
   return result;
 }
 

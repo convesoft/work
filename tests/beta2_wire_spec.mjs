@@ -11,7 +11,7 @@ const document = await readFile(documentPath, 'utf8');
 const clone = () => structuredClone(catalog);
 
 test('complete specification/catalog and canonical identity links agree', async () => {
-  assert.deepEqual(await checkFiles(), { operations: 53, envelopes: 15, definitions: 165 });
+  assert.deepEqual(await checkFiles(), { operations: 53, envelopes: 15, definitions: 168 });
 });
 
 test('template identifiers preserve unbounded lowercase vocabulary independently of session names', () => {
@@ -62,6 +62,45 @@ test('no obsolete alias or generic continuation consumer can enter the catalog',
   const broad = clone();
   broad.$defs.ClaimRecoverInput.properties.continue_id = { $ref: '#/$defs/ID' };
   assert.throws(() => checkCatalog(broad, document), /continuation/);
+});
+
+test('onboarding has only top-level init/status and root-only configuration fingerprints', () => {
+  assert.equal(catalog.operations.init.cli, 'init [--continue ID]');
+  assert.equal(catalog.operations.status.cli, 'status [--view VIEW]');
+  assert.ok(!catalog.operations.execution_init);
+  assert.ok(!catalog.operations.execution_inspect);
+  const missing = clone();
+  missing.$defs.StartProgress.oneOf[0].allOf[0].then.required = [];
+  assert.throws(() => checkCatalog(missing, document));
+  const broad = clone();
+  broad.$defs.StartProgress.oneOf[0].allOf[0].else.not = {};
+  assert.throws(() => checkCatalog(broad, document));
+});
+
+test('hosting continuation preserves original declaration membership', () => {
+  const missing = clone();
+  missing.$defs.DeclarationChange.required = missing.$defs.DeclarationChange.required.filter(
+    (field) => field !== 'before_scope_ids',
+  );
+  assert.throws(() => checkCatalog(missing, document));
+  const references = clone();
+  references.$defs.HostTransferProgress.required = references.$defs.HostTransferProgress.required.filter(
+    (field) => field !== 'tree_references',
+  );
+  assert.throws(() => checkCatalog(references, document));
+});
+
+test('tree continuation freezes exact operation, material edge and every reference', () => {
+  for (const field of ['operation', 'parent_before', 'parent_after']) {
+    const missing = clone();
+    missing.$defs.TreePlan.required = missing.$defs.TreePlan.required.filter((key) => key !== field);
+    assert.throws(() => checkCatalog(missing, document));
+  }
+  const missing = clone();
+  missing.$defs.StartProgress.oneOf[1].required = missing.$defs.StartProgress.oneOf[1].required.filter(
+    (field) => field !== 'tree_references',
+  );
+  assert.throws(() => checkCatalog(missing, document));
 });
 
 test('disposal must preserve the explicit ended namespace barrier', () => {

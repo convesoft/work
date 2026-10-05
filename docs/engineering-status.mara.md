@@ -10,7 +10,8 @@ The product decisions are settled in [[ADR-SCOPE-OWNED-EXECUTION]], [scope owner
 | --- | --- |
 | Implicit item scopes; explicit boundary anchors; virtual primary-checkout root | [[REQ-SCOPE-TREE]], [[DES-SCOPE-RESOLUTION]] |
 | Per-checkout Git-local authority, candidate diagnostics and explicit validated relocation | [[REQ-SCOPE-HOSTING]], [[DES-SCOPE-TRANSITIONS]] |
-| Versionable local run files, no automatic ignore rule or global execution entity store | [[REQ-VERSIONED-EXECUTION]], [[DES-SCOPE-LAYOUT]] |
+| Versionable local run/progress files, housekeeping-only ignores and no global execution entity store | [[REQ-VERSIONED-EXECUTION]], [[DES-SCOPE-LAYOUT]], [[DES-REPOSITORY-ONBOARDING]] |
+| Explicit repository init/default root run and read-only status; material planning remains independent | [[REQ-REPOSITORY-ONBOARDING]], [[DES-REPOSITORY-ONBOARDING]], [[VER-REPOSITORY-ONBOARDING]] |
 | Standing default root run, one home per run, nearest-run inheritance, derived membership | [[REQ-SCOPED-RUNS]], [[DES-SCOPED-RUNS]] |
 | Immutable actor/namespace/ID shortcuts, active → retiring → retired, no name reuse/fallback | [[REQ-IMMUTABLE-SESSIONS]], [[DES-IMMUTABLE-SESSIONS]] |
 | Exclusive claims, atomic name-based current ownership, optional acquisition-specific fencing | [[REQ-SCOPED-OWNERSHIP]], [[DES-SCOPED-CLAIMS]] |
@@ -39,7 +40,7 @@ These choices and their rationale are recorded in [[ADR-SCOPE-OWNED-EXECUTION]] 
 
 ## Specification gate before behavior implementation
 
-[[DES-BETA2-WIRE]] is **accepted specification knowledge**: [normative fields, grammar, authority and bounded retries](beta2-wire.mara.md) plus [closed envelope/input/result and operation/error schemas](schemas/beta2-wire-v2.schema.json). Its complete matrix covers 15 new envelope families and 53 CLI/MCP operations, with preserved template identifiers, typed failure/result shapes and bounded continuation. Specification checks and independent local review passed before acceptance. The [w-10f481ed](../.work/items/10f481edd6d44c458e8c091aa76a5e7c.md) delivery item remains open pending control-plane acceptance and verified scope integration; runtime behavior and package evidence are separate gates. No beta.2 runtime is advertised as implemented.
+[[DES-BETA2-WIRE]] is **accepted specification knowledge**: [normative fields, grammar, authority and bounded retries](beta2-wire.mara.md) plus [closed envelope/input/result and operation/error schemas](schemas/beta2-wire-v2.schema.json). Its complete matrix covers 15 new envelope families and 53 CLI/MCP operations, with preserved template identifiers, typed failure/result shapes and bounded continuation. Specification checks and independent local review passed before acceptance. The original [w-10f481ed](../.work/items/10f481edd6d44c458e8c091aa76a5e7c.md) delivery item is integrated/closed; the [onboarding/hosting amendment](../.work/items/c0f0be8cb04340eb9e272d97b30095fb.md) needs its own fresh review and scope integration. Historical checks apply only to their recorded revisions; runtime behavior and package evidence are separate gates. No beta.2 runtime is advertised as implemented.
 
 If freezing those formats reveals a new behavioral choice, clarify it and update canonical knowledge before implementation. Do not silently accept illustrative file fields or command spellings. No root run/scope fixture is created in this live repository by documentation authoring.
 

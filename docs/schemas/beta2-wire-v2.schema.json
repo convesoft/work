@@ -862,11 +862,54 @@
       ],
       "additionalProperties": false
     },
+    "IgnoreChange": {
+      "type": "object",
+      "properties": {
+        "before": {
+          "$ref": "#/$defs/Snapshot"
+        },
+        "after": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "before",
+        "after"
+      ],
+      "additionalProperties": false
+    },
     "TreePlan": {
       "type": "object",
       "properties": {
         "item_id": {
           "$ref": "#/$defs/ID"
+        },
+        "operation": {
+          "enum": [
+            "item_update",
+            "relation_add",
+            "relation_remove"
+          ]
+        },
+        "parent_before": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ID"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "old_parent_scope_id": {
           "$ref": "#/$defs/ScopeID"
@@ -882,12 +925,14 @@
         },
         "step": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 3
+          "minimum": 0
         }
       },
       "required": [
         "item_id",
+        "operation",
+        "parent_before",
+        "parent_after",
         "old_parent_scope_id",
         "new_parent_scope_id",
         "item_before",
@@ -932,6 +977,9 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 3
+            },
+            "ignore_change": {
+              "$ref": "#/$defs/IgnoreChange"
             }
           },
           "required": [
@@ -968,13 +1016,21 @@
                       ]
                     }
                   ]
-                }
+                },
+                "required": [
+                  "ignore_change"
+                ]
               },
               "else": {
                 "required": [
                   "parent_scope_id",
                   "child_before"
-                ]
+                ],
+                "not": {
+                  "required": [
+                    "ignore_change"
+                  ]
+                }
               }
             }
           ]
@@ -1003,10 +1059,16 @@
             "tree_change": {
               "$ref": "#/$defs/TreePlan"
             },
+            "tree_references": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ScopeTreeReferenceChange"
+              },
+              "uniqueItems": true
+            },
             "step": {
               "type": "integer",
-              "minimum": 0,
-              "maximum": 3
+              "minimum": 0
             }
           },
           "required": [
@@ -1016,6 +1078,7 @@
             "scope_id",
             "anchor_before",
             "tree_change",
+            "tree_references",
             "step"
           ],
           "additionalProperties": false
@@ -1388,6 +1451,11 @@
         "before": {
           "$ref": "#/$defs/Snapshot"
         },
+        "before_scope_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/ID"},
+          "uniqueItems": true
+        },
         "after": {
           "$ref": "#/$defs/HostDeclaration"
         }
@@ -1395,6 +1463,7 @@
       "required": [
         "checkout",
         "before",
+        "before_scope_ids",
         "after"
       ],
       "additionalProperties": false
@@ -1462,6 +1531,56 @@
         }
       ]
     },
+    "ScopeTreeReferenceChange": {
+      "type": "object",
+      "properties": {
+        "parent_scope_id": {
+          "$ref": "#/$defs/ScopeID"
+        },
+        "child_scope_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "before": {
+          "$ref": "#/$defs/Snapshot"
+        },
+        "after": {
+          "$ref": "#/$defs/ChildReference"
+        }
+      },
+      "required": [
+        "parent_scope_id",
+        "child_scope_id",
+        "before"
+      ],
+      "additionalProperties": false
+    },
+    "HostTreeReferenceChange": {
+      "type": "object",
+      "properties": {
+        "checkout": {
+          "$ref": "#/$defs/Path"
+        },
+        "parent_scope_id": {
+          "$ref": "#/$defs/ScopeID"
+        },
+        "child_scope_id": {
+          "$ref": "#/$defs/ID"
+        },
+        "before": {
+          "$ref": "#/$defs/Snapshot"
+        },
+        "after": {
+          "$ref": "#/$defs/ChildReference"
+        }
+      },
+      "required": [
+        "checkout",
+        "parent_scope_id",
+        "child_scope_id",
+        "before"
+      ],
+      "additionalProperties": false
+    },
     "HostTransferProgress": {
       "type": "object",
       "properties": {
@@ -1514,6 +1633,13 @@
           },
           "uniqueItems": true
         },
+        "tree_references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HostTreeReferenceChange"
+          },
+          "uniqueItems": true
+        },
         "executors_quiescent": {
           "type": "boolean"
         },
@@ -1533,6 +1659,7 @@
         "inventory",
         "declarations",
         "new_boundaries",
+        "tree_references",
         "executors_quiescent",
         "step"
       ],
@@ -8388,8 +8515,8 @@
         "reference_blocked"
       ]
     },
-    "execution_inspect": {
-      "cli": "execution inspect [--view VIEW]",
+    "status": {
+      "cli": "status [--view VIEW]",
       "input": {
         "$ref": "#/$defs/ExecutionInspectInput"
       },
@@ -8418,8 +8545,8 @@
         "io"
       ]
     },
-    "execution_init": {
-      "cli": "execution init [--continue ID]",
+    "init": {
+      "cli": "init [--continue ID]",
       "input": {
         "$ref": "#/$defs/ExecutionInitInput"
       },

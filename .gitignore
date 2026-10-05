@@ -6,9 +6,11 @@
 /.mara/mutation.lock
 /.mara/transaction/
 
-# Work operation lock and recoverable staged files.
+# Work housekeeping: local lock and publication artifacts, never live records/progress.
 /.work/operations.lock
-/.work/items/.operation-*
+/.work/**/.operation-*
+/.work/**/.storage-*
+/.work/**/.stage-*
 
 # Local secrets and editor/OS scratch files.
 .env
