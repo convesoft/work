@@ -161,6 +161,11 @@ Rationale: these choices avoid silent changes in execution namespace, ownership,
 The same explicit-placement rule applies after creation: current-wisp reparenting into a different effective run is rejected. Same-run reparenting remains ordinary graph work; promote first when cross-run movement is needed. Beta.2 does not add wisp-transfer machinery.
 
 Wire-review clarification: the user selected material-only roots for stored run/dedicated-host boundaries (promote a wisp first). The user also selected source recovery before adoption when old authoritative bytes are unavailable; attestation alone cannot verify continuing ownership. These choices preserve one-home temporary lifetimes and avoid treating an unverifiable copy as current state. Exact formats and selectors are specified by DES-BETA2-WIRE; no runtime or release evidence is implied.
+
+
+## Supported Git layouts
+
+The user explicitly narrowed beta.2 to ordinary repositories with a primary .git directory and their linked worktrees, including detached primary checkouts. git init --separate-git-dir is unsupported. A fresh separate Git directory need not retain a primary working-checkout backpointer; resolving it from a linked checkout would require an additional locator or discovery policy. This uncommon layout is deferred for unscheduled investigation, not a current hosting acceptance requirement. Reject it without writes instead of guessing, configuring Git, or adding a persistent registry.
 :::
 
 :::mara decision ADR-RECOVERY-ARTIFACT-LIFECYCLE

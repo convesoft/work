@@ -177,6 +177,7 @@ fn authorization(claim: &Value) -> Value {
     json!({"claim_id":claim["claim"]["id"],"session":{"namespace":"opaque","id":"session / Ω"}})
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn cli_mcp_restart_deliver_verbatim_many_sources_receivers_and_same_item_context() {
     let f = Fixture::new();
     let a = f.item();
@@ -231,6 +232,7 @@ fn cli_mcp_restart_deliver_verbatim_many_sources_receivers_and_same_item_context
     assert!(f.path(second["id"].as_str().unwrap()).is_file());
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn receiver_replacement_preserves_body_and_retention_until_all_cancelled() {
     let f = Fixture::new();
     let a = f.item();
@@ -269,6 +271,7 @@ fn receiver_replacement_preserves_body_and_retention_until_all_cancelled() {
     );
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn claimed_sources_authorize_all_sources_but_receivers_need_no_pair_and_release_reassign_retain() {
     let f = Fixture::new();
     let a = f.item();
@@ -307,6 +310,7 @@ fn claimed_sources_authorize_all_sources_but_receivers_need_no_pair_and_release_
     );
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn close_with_context_cli_and_mcp_save_then_complete_and_do_not_deduplicate() {
     for via_mcp in [false, true] {
         let f = Fixture::new();
@@ -361,6 +365,7 @@ fn close_with_context_cli_and_mcp_save_then_complete_and_do_not_deduplicate() {
     }
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn missing_or_invalid_receivers_retain_with_diagnostics_without_stale_checkout_fallback() {
     let f = Fixture::new();
     let a = f.item();
@@ -402,6 +407,7 @@ fn missing_or_invalid_receivers_retain_with_diagnostics_without_stale_checkout_f
     );
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn concurrent_receiver_changes_and_pruning_serializes_exact_sets_across_linked_processes() {
     let f = Fixture::new();
     let a = f.item();
@@ -441,6 +447,7 @@ fn concurrent_receiver_changes_and_pruning_serializes_exact_sets_across_linked_p
     assert!(f.path(id).exists());
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn cross_run_wisps_deliver_and_retain_after_source_run_finishes() {
     let f = Fixture::new();
     let a = f.item();
@@ -487,6 +494,7 @@ fn cross_run_wisps_deliver_and_retain_after_source_run_finishes() {
     assert_eq!(h["to_items"], json!([receiver]));
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn derived_aggregate_receivers_resolve_without_changing_graph_edges() {
     let f = Fixture::new();
     let source = f.item();
@@ -526,6 +534,7 @@ fn derived_aggregate_receivers_resolve_without_changing_graph_edges() {
     );
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn retarget_to_done_receiver_and_prune_race_never_deletes_an_unresolved_receiver_set() {
     let f = Fixture::new();
     let source = f.item();
@@ -571,6 +580,7 @@ fn retarget_to_done_receiver_and_prune_race_never_deletes_an_unresolved_receiver
     }
 }
 #[test]
+#[ignore = "PENDING 2cc1d6ac: handoff and attached completion consumers are downstream; not hosting acceptance"]
 fn stdin_exact_body_malformed_envelopes_and_storage_recreation_are_visible() {
     let f = Fixture::new();
     let a = f.item();

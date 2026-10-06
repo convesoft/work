@@ -152,6 +152,7 @@ fn template(f: &Fixture, name: &str, source: &str) {
     fs::write(f.root.join(format!(".work/templates/{name}.yaml")), source).unwrap();
 }
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn rootless_planning_and_readonly_mixed_preview_through_cli_mcp() {
     let f = Fixture::new();
     template(
@@ -191,6 +192,7 @@ fn rootless_planning_and_readonly_mixed_preview_through_cli_mcp() {
     );
 }
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn mixed_expansion_claimed_wisp_completion_and_derived_finish_survive_restart() {
     let f = Fixture::new();
     let root = f.item();
@@ -281,6 +283,7 @@ fn mixed_expansion_claimed_wisp_completion_and_derived_finish_survive_restart() 
 }
 
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn terminal_fixture_keeps_material_binding_and_uncommitted_worktree_state() {
     let f = Fixture::new();
     let root = f.item();
@@ -367,6 +370,7 @@ fn operational_files(f: &Fixture) -> std::collections::BTreeMap<PathBuf, Vec<u8>
 }
 
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn frozen_existing_wisp_expansion_refuses_before_any_setup_through_cli_and_mcp() {
     for phase in ["squashing", "discarding"] {
         let f = Fixture::new();
@@ -412,6 +416,7 @@ fn frozen_existing_wisp_expansion_refuses_before_any_setup_through_cli_and_mcp()
 }
 
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn frozen_run_root_material_and_wisps_match_ready_vs_acquire_in_cli_and_mcp() {
     for phase in ["squashing", "discarding"] {
         let f = Fixture::new();
@@ -537,6 +542,7 @@ fn lookup_failures(ambiguous: &str) -> Vec<(String, &'static str, i32)> {
     failures
 }
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn run_start_lookup_errors_and_reference_forms_match_cli_and_mcp_without_invalid_writes() {
     let f = lookup_fixture();
     let before = operational_files(&f);
@@ -572,6 +578,7 @@ fn run_start_lookup_errors_and_reference_forms_match_cli_and_mcp_without_invalid
     }
 }
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn membership_validates_all_references_before_setup_with_cli_mcp_lookup_parity() {
     let f = lookup_fixture();
     let result = ok(cli(&f.root, &["run", "start", LOOKUP_ROOT]));
@@ -629,6 +636,7 @@ fn membership_validates_all_references_before_setup_with_cli_mcp_lookup_parity()
 }
 
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn frozen_target_expansion_is_lifecycle_conflict_while_preview_stays_read_only() {
     for phase in ["squashing", "discarding"] {
         let f = Fixture::new();
@@ -724,6 +732,7 @@ fn frozen_target_expansion_is_lifecycle_conflict_while_preview_stays_read_only()
 }
 
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn fresh_template_only_clone_previews_without_writes_and_expands_materials_in_cli_and_mcp() {
     for transport in ["cli", "mcp"] {
         let origin = Fixture::new();
@@ -841,6 +850,7 @@ fn fresh_template_only_clone_previews_without_writes_and_expands_materials_in_cl
 }
 
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn wisp_update_returns_actual_previous_inode_and_noop_has_no_recovery_in_cli_and_mcp() {
     for transport in ["cli", "mcp"] {
         let f = Fixture::new();
@@ -899,6 +909,7 @@ fn wisp_update_returns_actual_previous_inode_and_noop_has_no_recovery_in_cli_and
 }
 
 #[test]
+#[ignore = "PENDING 45f7bb7d: beta.1 run/template transport; downstream beta.2 run workflow; not hosting acceptance"]
 fn expansion_refuses_missing_bound_source_without_recreating_its_catalog() {
     let f = Fixture::new();
     f.item();

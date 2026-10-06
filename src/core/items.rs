@@ -196,7 +196,11 @@ impl ItemStore {
         for entry in Dir::read_from(items_fd).map_err(io::Error::from)? {
             let entry = entry.map_err(io::Error::from)?;
             let name = entry.file_name().to_bytes();
-            if name != b"." && name != b".." && !name.starts_with(b".operation-") {
+            if name != b"."
+                && name != b".."
+                && !name.starts_with(b".operation-")
+                && !name.starts_with(b".stage-")
+            {
                 names.push(OsString::from_vec(name.to_vec()));
             }
         }

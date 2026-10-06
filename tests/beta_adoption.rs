@@ -2,6 +2,7 @@
 use std::process::Command;
 
 #[test]
+#[ignore = "PENDING 4334a9b9: full beta.1 connected workflow; migrate all consumers to beta.2; not hosting acceptance"]
 fn complete_beta_workflow_and_public_surface_parity() {
     let output = Command::new("node")
         .arg(concat!(

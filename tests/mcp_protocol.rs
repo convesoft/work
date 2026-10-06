@@ -1,3 +1,6 @@
+#[path = "pending/mcp_protocol.rs"]
+mod pending_consumers;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -170,54 +173,26 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 51);
-    let selection = [
-        "root",
-        "run_id",
-        "labels_all",
-        "priority_max",
-        "persistence",
-    ];
-    let next = tools.iter().find(|t| t["name"] == "claim_next").unwrap();
-    for name in ["item_list", "item_ready"] {
-        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
-        for field in selection {
-            assert_eq!(
-                tool["inputSchema"]["properties"][field],
-                next["inputSchema"]["properties"][field]
-            );
-        }
-    }
-    for name in [
+    let delivered = [
+        "discover",
+        "scope_list",
+        "scope_inspect",
+        "scope_host",
         "item_create",
+        "item_list",
+        "item_inspect",
+        "item_inspect_raw",
+        "item_diagnose",
         "item_ready",
+        "item_update",
         "relation_add",
-        "item_close",
-        "item_repair",
-        "template_list",
-        "template_validate",
-        "template_preview",
-    ] {
-        assert!(tools.iter().any(|tool| tool["name"] == name));
-    }
-    assert!(
-        tools
-            .iter()
-            .find(|tool| tool["name"] == "item_ready")
-            .unwrap()["description"]
-            .as_str()
-            .unwrap()
-            .contains("does not claim")
-    );
-    assert!(
-        tools
-            .iter()
-            .find(|tool| tool["name"] == "relation_add")
-            .unwrap()["description"]
-            .as_str()
-            .unwrap()
-            .contains("informational")
-    );
+        "relation_remove",
+    ];
+    let mut advertised: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    advertised.sort_unstable();
+    let mut expected = delivered.to_vec();
+    expected.sort_unstable();
+    assert_eq!(advertised, expected);
     assert_eq!(
         client.ok("item_ready", json!({"worktree":f.0}))["items"],
         json!([])
@@ -261,20 +236,11 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         client.ok("item_inspect", json!({"id":b,"worktree":f.0}))["item"]["body"],
         ""
     );
-    client.ok(
-        "item_close",
-        json!({"id":a,"reason":"finished","worktree":f.0}),
-    );
+    // Completion consumers are preserved in pending_consumers, not silently accepted here.
     assert_eq!(
         client.ok("item_ready", json!({"worktree":f.0}))["items"][0]["id"],
-        b
+        a
     );
-    client.ok("item_close", json!({"id":b,"worktree":f.0}));
-    assert_eq!(
-        client.ok("item_ready", json!({"worktree":f.0}))["items"],
-        json!([])
-    );
-    client.ok("item_reopen", json!({"id":a,"worktree":f.0}));
     client.ok(
         "relation_remove",
         json!({"kind":"depends_on","source":b,"target":a,"worktree":f.0}),
@@ -301,11 +267,6 @@ fn protocol_schema_rejects_null_wrong_types_and_source_errors() {
     ] {
         client.error("item_create", args, "invalid_argument");
     }
-    client.error(
-        "item_repair",
-        json!({"id":"11111111111141118111111111111111","raw_hex":"aéb"}),
-        "invalid_argument",
-    );
     assert_eq!(client.request("ping", json!({}))["result"], json!({}));
     assert_eq!(
         fs::read_dir(f.0.join(".work/items")).unwrap().count(),
@@ -346,12 +307,13 @@ fn protocol_schema_rejects_null_wrong_types_and_source_errors() {
     let fixed = format!(
         "---\nformat_version: 1\nid: \"{malformed}\"\ntitle: Fixed\nstate: open\n---\nBody\n"
     );
-    let raw_hex: String = fixed
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    client.ok("item_repair", json!({"id":malformed,"raw_hex":raw_hex}));
+    // Replace fixture bytes externally to verify a persistent server reloads sources.
+    // This is not evidence of the deferred public repair consumer.
+    fs::write(
+        f.0.join(".work/items").join(format!("{malformed}.md")),
+        fixed,
+    )
+    .unwrap();
     assert_eq!(
         client.ok("item_ready", json!({}))["items"][0]["id"],
         malformed
@@ -427,14 +389,11 @@ fn equivalent_cli_and_mcp_mutations_publish_identical_sources() {
             fs::read(mcp_fixture.0.join(".work/items").join(format!("{id}.md"))).unwrap()
         );
     }
-    cli_fixture.cli(&["item", "close", a, "--reason", "finished"]);
-    client.ok("item_close", json!({"id":a,"reason":"finished"}));
+    // Compare the unchanged dependency/readiness model without invoking completion consumers.
     assert_eq!(
         cli_fixture.cli(&["item", "ready"])["result"]["items"][0]["id"],
         client.ok("item_ready", json!({}))["items"][0]["id"]
     );
-    cli_fixture.cli(&["item", "reopen", a]);
-    client.ok("item_reopen", json!({"id":a}));
     cli_fixture.cli(&["relation", "remove", "depends_on", b, a]);
     client.ok(
         "relation_remove",
@@ -518,7 +477,11 @@ fn explicit_worktree_selects_other_durable_view() {
     let mut client = Client::new(&control.0);
     assert_eq!(client.ok("item_list", json!({}))["items"], json!([]));
     assert_eq!(
-        client.ok("item_list", json!({"worktree":selected}))["items"][0]["id"],
+        client.ok("item_list", json!({"worktree":selected}))["items"],
+        json!([])
+    );
+    assert_eq!(
+        client.ok("item_list", json!({"worktree":selected,"view":"physical"}))["items"][0]["id"],
         id
     );
     assert_eq!(
@@ -529,10 +492,13 @@ fn explicit_worktree_selects_other_durable_view() {
     client.error(
         "item_list",
         json!({"worktree":"/definitely/not/a/repository"}),
-        "io",
+        "unsupported_project",
     );
     assert_eq!(
-        client.ok("item_inspect", json!({"worktree":selected,"id":id}))["item"]["body"],
+        client.ok(
+            "item_inspect",
+            json!({"worktree":selected,"id":id,"view":"physical"})
+        )["item"]["body"],
         "Body\n"
     );
     drop(client);
@@ -543,6 +509,7 @@ fn explicit_worktree_selects_other_durable_view() {
 }
 
 #[test]
+#[ignore = "PENDING 6bf6198a: beta.1 storage/template transport outside hosting profile; not hosting acceptance"]
 fn template_preview_matches_cli_and_publishes_nothing() {
     let fixture = Fixture::new();
     let root = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
@@ -623,6 +590,7 @@ edges:
 }
 
 #[test]
+#[ignore = "PENDING 6bf6198a: beta.1 storage/template transport outside hosting profile; not hosting acceptance"]
 fn storage_mcp_lifecycle_and_warning_payloads_match_cli() {
     let f = Fixture::new();
     let mut client = Client::new(&f.0);
@@ -676,6 +644,7 @@ fn storage_mcp_lifecycle_and_warning_payloads_match_cli() {
 }
 
 #[test]
+#[ignore = "PENDING 6bf6198a: beta.1 storage/template transport outside hosting profile; not hosting acceptance"]
 fn storage_mcp_validates_requests_before_selecting_a_checkout() {
     let f = Fixture::new();
     let mut client = Client::new(&f.0);
@@ -705,6 +674,7 @@ fn storage_mcp_validates_requests_before_selecting_a_checkout() {
 }
 
 #[test]
+#[ignore = "PENDING 6bf6198a: beta.1 storage/template transport outside hosting profile; not hosting acceptance"]
 fn template_preview_reports_physical_fallback_warnings_through_cli_and_mcp() {
     use work::core::{coordination::CoordinationGuard, project::discover};
     for case in ["fresh", "healthy", "missing_lock", "corrupt", "busy"] {

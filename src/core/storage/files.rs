@@ -552,12 +552,33 @@ pub(crate) struct Locked {
     pub root: Directory,
     lock: File,
     identity: Identity,
+    lock_name: String,
 }
 impl Locked {
     pub fn open(common: Directory, exclusive: bool, create: bool) -> Result<Self, StorageError> {
-        let root = common.child("work")?;
-        let path = root.path.join("coordination.lock");
-        let existing = root.exists("coordination.lock")?;
+        Self::open_at(common, "work", exclusive, create)
+    }
+    pub(crate) fn open_at(
+        common: Directory,
+        name: &str,
+        exclusive: bool,
+        create: bool,
+    ) -> Result<Self, StorageError> {
+        Self::open_named(common, name, "coordination.lock", exclusive, create)
+    }
+    pub(crate) fn clone_lock(&self) -> std::io::Result<File> {
+        self.lock.try_clone()
+    }
+    pub(crate) fn open_named(
+        common: Directory,
+        name: &str,
+        lock_name: &str,
+        exclusive: bool,
+        create: bool,
+    ) -> Result<Self, StorageError> {
+        let root = common.child(name)?;
+        let path = root.path.join(lock_name);
+        let existing = root.exists(lock_name)?;
         if !existing && !create {
             return Err(StorageError::new(
                 StorageErrorCode::StorageMissing,
@@ -568,7 +589,7 @@ impl Locked {
         let fd = if !existing {
             let fd = fs::openat(
                 &root.file,
-                "coordination.lock",
+                lock_name,
                 OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::from_bits_truncate(0o600),
             )
@@ -578,10 +599,10 @@ impl Locked {
             root.sync()?;
             fd
         } else {
-            let source = root.read("coordination.lock")?;
+            let source = root.read(lock_name)?;
             let fd = fs::openat(
                 &root.file,
-                "coordination.lock",
+                lock_name,
                 OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
                 Mode::empty(),
             )
@@ -625,6 +646,7 @@ impl Locked {
             common,
             root,
             lock,
+            lock_name: lock_name.into(),
         };
         result.verify()?;
         Ok(result)
@@ -632,13 +654,9 @@ impl Locked {
     pub fn verify(&self) -> Result<(), StorageError> {
         self.common.verify()?;
         self.root.verify()?;
-        let path = self.root.path.join("coordination.lock");
-        let stat = fs::statat(
-            &self.root.file,
-            "coordination.lock",
-            AtFlags::SYMLINK_NOFOLLOW,
-        )
-        .map_err(|_| conflict(&path, "lock pathname disappeared"))?;
+        let path = self.root.path.join(&self.lock_name);
+        let stat = fs::statat(&self.root.file, &self.lock_name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| conflict(&path, "lock pathname disappeared"))?;
         let held = self
             .lock
             .metadata()

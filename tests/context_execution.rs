@@ -165,6 +165,7 @@ fn release(f: &Fixture, claim: &Value, external: &str) {
     assert!(v["error"].is_null(), "{v}");
 }
 #[test]
+#[ignore = "PENDING 54de7594: beta.1 session/workspace transport; downstream immutable sessions; not hosting acceptance"]
 fn named_rebind_remove_keeps_captured_ownership_and_workspace_across_restart() {
     let f = Fixture::new();
     let root = f.item();
@@ -292,6 +293,7 @@ fn named_rebind_remove_keeps_captured_ownership_and_workspace_across_restart() {
     );
 }
 #[test]
+#[ignore = "PENDING 54de7594: beta.1 session/workspace transport; downstream immutable sessions; not hosting acceptance"]
 fn workspace_reuse_rebind_unbind_and_cleanup_user_evidence() {
     let f = Fixture::new();
     let root = f.item();
@@ -431,6 +433,7 @@ fn workspace_reuse_rebind_unbind_and_cleanup_user_evidence() {
     );
 }
 #[test]
+#[ignore = "PENDING 54de7594: beta.1 session/workspace transport; downstream immutable sessions; not hosting acceptance"]
 fn session_scope_strict_inputs_and_corruption_never_become_empty_context() {
     let f = Fixture::new();
     let root = f.item();
@@ -555,6 +558,7 @@ fn session_scope_strict_inputs_and_corruption_never_become_empty_context() {
     );
 }
 #[test]
+#[ignore = "PENDING 54de7594: beta.1 session/workspace transport; downstream immutable sessions; not hosting acceptance"]
 fn concurrent_set_same_name_has_one_record_and_one_create() {
     let f = Fixture::new();
     let root = f.item();
@@ -607,6 +611,7 @@ fn concurrent_set_same_name_has_one_record_and_one_create() {
     );
 }
 #[test]
+#[ignore = "PENDING 54de7594: beta.1 session/workspace transport; downstream immutable sessions; not hosting acceptance"]
 fn wisp_uses_run_default_without_material_binding_and_names_survive_completion() {
     let f = Fixture::new();
     let root = f.item();
@@ -699,6 +704,7 @@ fn wisp_uses_run_default_without_material_binding_and_names_survive_completion()
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: beta.1 session/workspace transport; downstream immutable sessions; not hosting acceptance"]
 fn closing_and_missing_workspaces_remain_inspectable_but_refuse_assignments() {
     let f = Fixture::new();
     let item = f.item();
@@ -773,6 +779,7 @@ fn closing_and_missing_workspaces_remain_inspectable_but_refuse_assignments() {
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: beta.1 session/workspace transport; downstream immutable sessions; not hosting acceptance"]
 fn multiple_missing_current_run_sources_can_be_rebound_one_at_a_time() {
     let f = Fixture::new();
     let root = f.item();

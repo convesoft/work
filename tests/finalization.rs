@@ -151,6 +151,7 @@ impl Drop for Fixture {
     }
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn squash_keeps_root_exact_routes_output_and_repeats_across_transports() {
     let f = Fixture::new();
     f.finish();
@@ -210,6 +211,7 @@ fn squash_keeps_root_exact_routes_output_and_repeats_across_transports() {
     );
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn material_members_historical_claims_and_existing_digests_survive_later_discard() {
     let f = Fixture::new();
     f.finish();
@@ -357,6 +359,7 @@ fn material_members_historical_claims_and_existing_digests_survive_later_discard
     }
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn pending_squash_freezes_material_member_edits_but_not_the_root() {
     let f = Fixture::new();
     f.finish();
@@ -414,6 +417,7 @@ fn pending_squash_freezes_material_member_edits_but_not_the_root() {
 }
 
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn squashing_blocks_outside_completion_changes_creation_templates_repair_and_rebinding() {
     let f = Fixture::new();
     f.finish();
@@ -547,6 +551,7 @@ fn squashing_blocks_outside_completion_changes_creation_templates_repair_and_reb
 }
 
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn symmetric_related_links_block_cleanup_regardless_of_which_endpoint_authored_them() {
     for target_owns_relation in [false, true] {
         let f = Fixture::new();
@@ -580,6 +585,7 @@ fn symmetric_related_links_block_cleanup_regardless_of_which_endpoint_authored_t
     }
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn other_run_cleanup_cannot_remove_children_of_a_squashing_member() {
     let f = Fixture::new();
     f.finish();
@@ -665,6 +671,7 @@ fn other_run_cleanup_cannot_remove_children_of_a_squashing_member() {
     ok(cli(&f.root, &["run", "discard", &run_b, "--all"]));
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn unbinding_cannot_expose_unfinished_outside_children_during_squash() {
     let f = Fixture::new();
     f.finish();
@@ -751,6 +758,7 @@ fn unbinding_cannot_expose_unfinished_outside_children_during_squash() {
 }
 
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn empty_and_unfinished_runs_are_not_squashable_but_disposable() {
     let f = Fixture::new();
     assert_eq!(
@@ -773,6 +781,7 @@ fn empty_and_unfinished_runs_are_not_squashable_but_disposable() {
     ok(cli(&f.root, &["run", "discard", &run, "--all"]));
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn selected_then_full_discard_abandons_work_preserves_material_and_context() {
     let f = Fixture::new();
     let session = f.session();
@@ -826,6 +835,7 @@ fn selected_then_full_discard_abandons_work_preserves_material_and_context() {
     );
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn claims_outside_item_references_and_cross_run_handoffs_block() {
     let f = Fixture::new();
     let claim = ok(cli(
@@ -888,6 +898,7 @@ fn claims_outside_item_references_and_cross_run_handoffs_block() {
     );
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn internal_edges_and_abandoned_internal_handoffs_do_not_block() {
     let f = Fixture::new();
     ok(cli(
@@ -921,6 +932,7 @@ fn internal_edges_and_abandoned_internal_handoffs_do_not_block() {
     );
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn mixed_handoff_receivers_allow_cleanup_after_internal_edges_become_dangling() {
     let f = Fixture::new();
     let mut ids = f.wisps.clone();
@@ -950,6 +962,7 @@ fn mixed_handoff_receivers_allow_cleanup_after_internal_edges_become_dangling() 
 }
 
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn truncated_digest_returns_structured_errors_instead_of_panicking() {
     let f = Fixture::new();
     f.finish();
@@ -1050,10 +1063,12 @@ fn linked_output(cross_fs: bool) {
     }
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn linked_surviving_output() {
     linked_output(false);
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn cross_filesystem_output_when_available() {
     use std::os::unix::fs::MetadataExt;
     if !Path::new("/dev/shm").is_dir()
@@ -1066,6 +1081,7 @@ fn cross_filesystem_output_when_available() {
     linked_output(true);
 }
 #[test]
+#[ignore = "PENDING 0e159a0e: beta.1 squash/discard transport; migrate finalization safeguards; not hosting acceptance"]
 fn strict_adapter_inputs_and_summary_stdin() {
     let f = Fixture::new();
     for args in [

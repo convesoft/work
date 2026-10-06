@@ -20,7 +20,7 @@ Handoffs and digests use the item format's exact `---` frontmatter framing, LF/C
 
 ## 2. Storage, authority and lifetime
 
-Let `C` be the authoritative hosting checkout, `G` the actual Git common directory, and `D` a checkout's actual Git metadata directory resolved through Git. Never assume `.git` is a directory. Git's worktree inventory identifies the primary checkout (even detached or on any branch). A bare/non-Git directory is `unsupported_project`. Ordinary working repositories, linked .git-file checkouts, detached primary checkouts and git init --separate-git-dir are supported; administrative inventory paths must resolve to their actual working checkouts before routing. Separate clones and remote coordination are outside scope.
+Let `C` be the authoritative hosting checkout, `G` the actual Git common directory, and `D` a checkout's actual Git metadata directory resolved through Git. Never assume `.git` is a directory. Git's worktree inventory identifies the primary checkout (even detached or on any branch). A bare/non-Git directory is `unsupported_project`. Ordinary working repositories with a primary .git directory, their linked .git-file checkouts and detached primary checkouts are supported. git init --separate-git-dir is explicitly unsupported and returns unsupported_project without writes; do not substitute its administrative path, add a locator or install configuration. Separate clones and remote coordination are outside scope.
 
 | Record | Exact location | Authority and lifetime |
 | --- | --- | --- |

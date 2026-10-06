@@ -60,17 +60,126 @@ pub fn discover(selected: Option<&Path>) -> Result<Project, DiscoveryError> {
     if root.is_empty() || common.is_empty() {
         return Err(DiscoveryError::UnsupportedProject(path));
     }
-    Ok(Project {
+    let project = Project {
         worktree_root: PathBuf::from(OsString::from_vec(root))
             .canonicalize()
             .map_err(DiscoveryError::Io)?,
         git_common_dir: PathBuf::from(OsString::from_vec(common))
             .canonicalize()
             .map_err(DiscoveryError::Io)?,
-    })
+    };
+    let primary = inventory(&project)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| DiscoveryError::UnsupportedProject(path.clone()))?;
+    // A primary Git directory is an actual .git directory beneath the working
+    // checkout. Separate-Git-dir repositories are deliberately unsupported:
+    // their inventory may name the administration directory, not a checkout.
+    if primary.join(".git") != project.git_common_dir
+        || std::fs::symlink_metadata(&project.git_common_dir).is_err()
+        || std::fs::symlink_metadata(primary.join(".git"))
+            .is_ok_and(|m| !m.is_dir() || m.file_type().is_symlink())
+    {
+        return Err(DiscoveryError::UnsupportedProject(path));
+    }
+    Ok(project)
 }
 
-fn git_query(path: &Path, args: &[&str]) -> Result<Vec<u8>, DiscoveryError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkout {
+    pub root: PathBuf,
+    pub git_dir: Option<PathBuf>,
+    pub available: bool,
+}
+impl Project {
+    pub fn git_dir(&self) -> Result<PathBuf, DiscoveryError> {
+        let raw = git_query(
+            &self.worktree_root,
+            &["--path-format=absolute", "--git-dir"],
+        )?;
+        PathBuf::from(OsString::from_vec(raw))
+            .canonicalize()
+            .map_err(DiscoveryError::Io)
+    }
+    pub fn checkouts(&self) -> Result<Vec<Checkout>, DiscoveryError> {
+        let roots = inventory(self)?;
+        let mut checkouts = Vec::new();
+        for root in roots {
+            let active = discover(Some(&root))
+                .ok()
+                .filter(|p| p.worktree_root == root && p.git_common_dir == self.git_common_dir)
+                .and_then(|p| p.git_dir().ok());
+            let available = active.is_some();
+            let git_dir = active.or_else(|| self.retained_git_dir(&root));
+            checkouts.push(Checkout {
+                root,
+                git_dir,
+                available,
+            });
+        }
+        Ok(checkouts)
+    }
+    fn retained_git_dir(&self, root: &Path) -> Option<PathBuf> {
+        if self.git_common_dir.parent() == Some(root) {
+            return Some(self.git_common_dir.clone());
+        }
+        for entry in std::fs::read_dir(self.git_common_dir.join("worktrees")).ok()? {
+            let Ok(entry) = entry else { continue };
+            let metadata = entry.path();
+            let Ok(mut raw) = std::fs::read(metadata.join("gitdir")) else {
+                continue;
+            };
+            if raw.pop() != Some(b'\n') {
+                continue;
+            }
+            let pointer = PathBuf::from(OsString::from_vec(raw));
+            let pointer = if pointer.is_absolute() {
+                pointer
+            } else {
+                metadata.join(pointer)
+            };
+            let mut normalized = PathBuf::new();
+            for component in pointer.components() {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        normalized.pop();
+                    }
+                    c => normalized.push(c.as_os_str()),
+                }
+            }
+            if normalized.parent() == Some(root) {
+                return Some(metadata);
+            }
+        }
+        None
+    }
+}
+fn inventory(project: &Project) -> Result<Vec<PathBuf>, DiscoveryError> {
+    let output = git_command(&project.worktree_root)
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .output()
+        .map_err(DiscoveryError::GitUnavailable)?;
+    if !output.status.success() {
+        return Err(DiscoveryError::UnsupportedProject(
+            project.worktree_root.clone(),
+        ));
+    }
+    let roots: Vec<_> = output
+        .stdout
+        .split(|b| *b == 0)
+        .filter_map(|part| part.strip_prefix(b"worktree "))
+        .map(|path| PathBuf::from(OsString::from_vec(path.to_vec())))
+        .collect();
+    if roots.is_empty() {
+        return Err(DiscoveryError::UnsupportedProject(
+            project.worktree_root.clone(),
+        ));
+    }
+    Ok(roots)
+}
+
+fn git_command(path: &Path) -> Command {
     // These repository-local overrides are listed by `git rev-parse
     // --local-env-vars`. They belong to the caller's Git context, not to the
     // explicitly selected checkout. The ceiling is a separate discovery limit.
@@ -96,9 +205,11 @@ fn git_query(path: &Path, args: &[&str]) -> Result<Vec<u8>, DiscoveryError> {
     for name in REPOSITORY_ENV {
         command.env_remove(name);
     }
-    let output = command
-        .arg("-C")
-        .arg(path)
+    command.arg("-C").arg(path);
+    command
+}
+fn git_query(path: &Path, args: &[&str]) -> Result<Vec<u8>, DiscoveryError> {
+    let output = git_command(path)
         .arg("rev-parse")
         .args(args)
         .output()

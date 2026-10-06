@@ -27,6 +27,7 @@ pub enum OperationError {
     InvalidSource(Vec<Diagnostic>),
     InvalidCandidate(Vec<Diagnostic>),
     Conflict(String),
+    Storage(Box<super::storage::StorageError>),
     Io(io::Error),
     Published {
         id: String,
@@ -50,6 +51,7 @@ impl OperationError {
             Self::InvalidSource(_) => "invalid_source",
             Self::InvalidCandidate(_) => "invalid_candidate",
             Self::Conflict(_) => "conflict",
+            Self::Storage(e) => e.code.code(),
             Self::Io(_) => "io",
             Self::Published { cause, .. } => cause.code(),
         }
@@ -84,6 +86,7 @@ impl fmt::Display for OperationError {
                 write!(f, "{}: {} diagnostic(s)", self.code(), diagnostics.len())
             }
             Self::Io(error) => write!(f, "io: {error}"),
+            Self::Storage(error) => error.fmt(f),
             Self::Published {
                 id,
                 path,
@@ -162,6 +165,7 @@ struct OperationLock {
     file: File,
     root_dir: OwnedFd,
     work_dir: OwnedFd,
+    safe_guard: Option<super::storage::files::Locked>,
 }
 
 impl DurableOperations {
@@ -784,6 +788,11 @@ impl DurableOperations {
         Ok(())
     }
     fn ensure_selected_work(&self, lock: &OperationLock) -> Result<(), OperationError> {
+        if let Some(guard) = &lock.safe_guard {
+            guard
+                .verify()
+                .map_err(|e| OperationError::Storage(Box::new(e)))?;
+        }
         let root = fs::symlink_metadata(&self.root)
             .map_err(|_| OperationError::Conflict("checkout root changed on disk".into()))?;
         let held_root = rustix::fs::fstat(&lock.root_dir).map_err(io::Error::from)?;
@@ -891,7 +900,7 @@ impl DurableOperations {
     fn item_path(&self, id: &str) -> PathBuf {
         self.root.join(".work/items").join(format!("{id}.md"))
     }
-    fn raw_source<'a>(
+    pub(crate) fn raw_source<'a>(
         &self,
         store: &'a ItemStore,
         id: &str,
@@ -1071,6 +1080,7 @@ impl DurableOperations {
             file,
             root_dir,
             work_dir,
+            safe_guard: None,
         })
     }
     #[cfg(test)]
@@ -1584,6 +1594,47 @@ pub(crate) fn new_id() -> Result<String, OperationError> {
 
 /// Coordinator-owned checkout lock and publication primitives. The caller has
 /// already validated the complete resolved graph under the common lock.
+pub(crate) struct CheckoutGuard {
+    ops: DurableOperations,
+    lock: OperationLock,
+}
+impl CheckoutGuard {
+    pub(crate) fn open(root: &Path) -> Result<Self, OperationError> {
+        let ops = DurableOperations::new(root);
+        let common = super::storage::files::Directory::open(root)
+            .map_err(|e| OperationError::Storage(Box::new(e)))?;
+        let guard = super::storage::files::Locked::open_named(
+            common,
+            ".work",
+            "operations.lock",
+            true,
+            true,
+        )
+        .map_err(|e| OperationError::Storage(Box::new(e)))?;
+        let lock = OperationLock {
+            file: guard.clone_lock()?,
+            root_dir: guard.common.file.try_clone()?.into(),
+            work_dir: guard.root.file.try_clone()?.into(),
+            safe_guard: Some(guard),
+        };
+        ops.ensure_selected_work(&lock)?;
+        Ok(Self { ops, lock })
+    }
+    pub(crate) fn verify(&self) -> Result<(), OperationError> {
+        self.ops.ensure_selected_work(&self.lock)
+    }
+    pub(crate) fn into_writer(self) -> Result<CheckoutWriter, OperationError> {
+        let items = self.ops.items_dir(&self.lock)?;
+        let snapshot = self.ops.load_from_dir(&items)?;
+        Ok(CheckoutWriter {
+            ops: self.ops,
+            lock: self.lock,
+            items,
+            snapshot,
+        })
+    }
+}
+
 pub(crate) struct CheckoutWriter {
     ops: DurableOperations,
     lock: OperationLock,
@@ -1631,8 +1682,24 @@ impl CheckoutWriter {
         body: &[u8],
         expected: Option<&ItemFile>,
     ) -> Result<Option<PathBuf>, OperationError> {
-        let path = self.ops.item_path(&header.id);
-        let raw = serialize(header, body);
+        self.publish_raw(&header.id, &serialize(header, body), expected)
+    }
+    pub(crate) fn publish_raw(
+        &mut self,
+        id: &str,
+        raw: &[u8],
+        expected: Option<&ItemFile>,
+    ) -> Result<Option<PathBuf>, OperationError> {
+        self.publish_raw_guarded(id, raw, expected, || Ok(()))
+    }
+    pub(crate) fn publish_raw_guarded(
+        &mut self,
+        id: &str,
+        raw: &[u8],
+        expected: Option<&ItemFile>,
+        before_publish: impl FnOnce() -> Result<(), OperationError>,
+    ) -> Result<Option<PathBuf>, OperationError> {
+        let path = self.ops.item_path(id);
         self.ops
             .check_snapshot(&self.lock, &self.items, &self.snapshot)?;
         if let Some(old) = expected {
@@ -1648,11 +1715,11 @@ impl CheckoutWriter {
                 ));
             }
         } else if self.snapshot.files.iter().any(|f| f.path == path) {
-            return Err(OperationError::AlreadyExists(header.id.clone()));
+            return Err(OperationError::AlreadyExists(id.to_owned()));
         }
         let staged =
             self.ops
-                .stage_with_mode(&self.items, &raw, expected.map(source_mode).transpose()?)?;
+                .stage_with_mode(&self.items, raw, expected.map(source_mode).transpose()?)?;
         let prepare = (|| {
             #[cfg(test)]
             super::storage::files::inject("checkout_after_stage", &path)
@@ -1663,6 +1730,7 @@ impl CheckoutWriter {
             #[cfg(test)]
             super::storage::files::inject("checkout_before_rename", &path)
                 .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
+            before_publish()?;
             rename_in_dir(
                 &self.items,
                 &staged,
@@ -1690,7 +1758,7 @@ impl CheckoutWriter {
                     &self.snapshot,
                     old,
                     &staged,
-                    (&raw, &staged_identity),
+                    (raw, &staged_identity),
                     || {},
                 )
                 .map_err(|failure| {
@@ -1698,7 +1766,7 @@ impl CheckoutWriter {
                         failure.cause
                     } else {
                         OperationError::Published {
-                            id: header.id.clone(),
+                            id: id.to_owned(),
                             path: path.clone(),
                             previous_source_path: Some(staged.clone()),
                             cause: Box::new(failure.cause),
@@ -1716,7 +1784,7 @@ impl CheckoutWriter {
             Ok(expected.map(|_| staged.clone()))
         })()
         .map_err(|cause| OperationError::Published {
-            id: header.id.clone(),
+            id: id.to_owned(),
             path,
             previous_source_path: expected.map(|_| staged),
             cause: Box::new(cause),

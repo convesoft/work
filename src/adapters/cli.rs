@@ -1,1152 +1,496 @@
-use work::core::execution::ExecutionOperations;
-// CLI presentation over shared operations.
-
-use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::fmt::Write as _;
-use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
-
+//! Delivered beta.2 subset. No beta.1 operational compatibility dispatch.
 use serde_json::{Value, json};
-use work::core::graph::{Blocker, ItemGraph};
-use work::core::items::{Completion, Diagnostic, ItemStore, LookupError, ManualState};
-use work::core::operations::{
-    Inspection, MetadataChange, OperationError, RawInspection, RelationKind,
-};
-use work::core::project::{DiscoveryError, Project, discover};
-use work::core::templates::{
-    PreviewRequest, TemplateCatalog, TemplateDefinition, TemplateError, TemplatePreview,
+use std::ffi::OsString;
+use std::io::{self, Read};
+use std::path::PathBuf;
+use work::core::coordination::{ExecutionError as Error, ExecutionResult as Result, decode_path};
+use work::core::project::discover;
+use work::core::{
+    scope_items, scope_wire as wire,
+    scopes::{self, ScopeOperations},
 };
 
-pub(super) struct CliError {
-    code: &'static str,
-    message: String,
-    diagnostics: Vec<Diagnostic>,
-    published_item: Option<Box<Value>>,
-    previous_source_path: Option<PathBuf>,
-    storage_details: Option<Box<Value>>,
+pub(super) const OPERATIONS: &[&str] = &[
+    "discover",
+    "scope_list",
+    "scope_inspect",
+    "scope_host",
+    "item_create",
+    "item_list",
+    "item_inspect",
+    "item_inspect_raw",
+    "item_diagnose",
+    "item_ready",
+    "item_update",
+    "relation_add",
+    "relation_remove",
+];
+pub(super) fn expanded(schema: &Value) -> Value {
+    if let Some(reference) = schema["$ref"].as_str() {
+        return expanded(wire::catalog().pointer(&reference[1..]).unwrap());
+    }
+    match schema {
+        Value::Object(m) => {
+            Value::Object(m.iter().map(|(k, v)| (k.clone(), expanded(v))).collect())
+        }
+        Value::Array(a) => Value::Array(a.iter().map(expanded).collect()),
+        _ => schema.clone(),
+    }
 }
-
-impl CliError {
-    pub(super) fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            diagnostics: vec![],
-            published_item: None,
-            previous_source_path: None,
-            storage_details: None,
-        }
+pub(super) fn schema(name: &str) -> Value {
+    expanded(
+        wire::catalog()
+            .pointer(
+                &wire::catalog()["operations"][name]["input"]["$ref"]
+                    .as_str()
+                    .unwrap()[1..],
+            )
+            .unwrap(),
+    )
+}
+pub(super) fn output_schema(name: &str) -> Value {
+    expanded(&wire::catalog()["operations"][name]["output"])
+}
+pub(super) fn error(e: Error) -> Value {
+    let code = if wire::catalog()["$defs"]["Error"]["properties"]["code"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == e.code)
+    {
+        e.code
+    } else {
+        "io"
+    };
+    let mut out = json!({"code":code,"message":e.message});
+    if let Some(p) = e.path {
+        out["path"] = json!(scopes::path(&p));
     }
-    pub(super) fn with_details(code: &'static str, message: String, details: Value) -> Self {
-        let mut error = Self::new(code, message);
-        error.storage_details = Some(Box::new(details));
-        error
-    }
-    pub(super) fn storage_failure(mut self) -> Self {
-        if self.storage_details.is_none() {
-            self.storage_details = Some(Box::new(json!({"publication":"not_published"})));
-        }
-        self
-    }
-    fn exit(&self) -> i32 {
-        match self.code {
-            "usage" | "invalid_argument" => 2,
-            "not_found" | "ambiguous_id" => 3,
-            "invalid_source" | "invalid_candidate" | "invalid_format" | "unsupported_format"
-            | "storage_missing" | "storage_corrupt" | "recovery_required" | "identity_mismatch" => {
-                4
+    if let Some(fields) = e.details.as_object() {
+        for (k, v) in fields {
+            if !v.is_null() {
+                out[k] = v.clone();
             }
-            "conflict" | "already_exists" | "storage_busy" | "unsafe_path" | "claim_conflict"
-            | "stale_claim" | "not_ready" | "run_conflict" | "run_not_current"
-            | "workspace_busy" | "reference_blocked" | "source_unavailable" => 5,
-            _ => 1,
         }
     }
-    pub(super) fn value(&self) -> Value {
-        let mut v = json!({"code":self.code,"message":self.message});
-        if let Some(details) = self.storage_details.as_deref().and_then(Value::as_object) {
-            v.as_object_mut().unwrap().extend(details.clone());
+    if let Some(p) = out.get_mut("partial").and_then(Value::as_object_mut) {
+        for (k, v) in scopes::partial().as_object().unwrap() {
+            p.entry(k.clone()).or_insert_with(|| v.clone());
         }
-        if !self.diagnostics.is_empty() {
-            v["diagnostics"] = json!(self.diagnostics.iter().map(diagnostic).collect::<Vec<_>>());
+    }
+    if let Some(diagnostics) = out.get_mut("diagnostics").and_then(Value::as_array_mut) {
+        for d in diagnostics {
+            if let Some(fields) = d.as_object_mut() {
+                for key in ["path", "line", "item_id", "run_id", "scope_id"] {
+                    fields.entry(key.to_owned()).or_insert(Value::Null);
+                }
+                fields
+                    .entry("code".to_owned())
+                    .or_insert_with(|| json!(code));
+            }
         }
-        if let Some(p) = self.published_item.as_deref() {
-            v["published_item"] = p.clone();
+    }
+    normalize_paths(&mut out, None);
+    out
+}
+fn normalize_paths(value: &mut Value, key: Option<&str>) {
+    match value {
+        Value::String(s)
+            if key.is_some_and(|k| {
+                matches!(k, "path" | "checkout" | "destination" | "source_worktree")
+                    || k.ends_with("_path")
+                    || k.ends_with("_paths")
+            }) =>
+        {
+            if let Ok(p) = decode_path(s) {
+                *s = scopes::path(&p);
+            }
         }
-        if let Some(p) = &self.previous_source_path {
-            v["previous_source_path"] = json!(encode_path(p));
+        Value::Array(a) => {
+            for v in a {
+                normalize_paths(v, key);
+            }
         }
-        v
+        Value::Object(m) => {
+            for (k, v) in m {
+                normalize_paths(v, Some(k));
+            }
+        }
+        _ => {}
     }
 }
-
-impl From<OperationError> for CliError {
-    fn from(error: OperationError) -> Self {
-        let diagnostics = match &error {
-            OperationError::InvalidSource(d) | OperationError::InvalidCandidate(d) => d.clone(),
-            OperationError::Published { cause, .. } => match cause.as_ref() {
-                OperationError::InvalidSource(d) | OperationError::InvalidCandidate(d) => d.clone(),
-                _ => vec![],
-            },
-            _ => vec![],
-        };
-        Self {
-            code: error.code(),
-            message: error.to_string(),
-            diagnostics,
-            published_item: error
-                .published_item()
-                .map(|(id, path)| Box::new(json!({"id":id,"path":encode_path(path)}))),
-            previous_source_path: error.previous_source_path().map(Path::to_path_buf),
-            storage_details: None,
+pub(super) fn call(name: &str, input: &Value) -> Result<Value> {
+    let operation = &wire::catalog()["operations"][name];
+    if operation.is_null() || !OPERATIONS.contains(&name) {
+        return Err(Error::new("invalid_argument", "operation not delivered"));
+    }
+    let definition = operation["input"]["$ref"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("#/$defs/")
+        .unwrap();
+    wire::validate(definition, input)?;
+    let mutation = matches!(
+        name,
+        "scope_host" | "item_create" | "item_update" | "relation_add" | "relation_remove"
+    );
+    if mutation && input["view"] == "physical" {
+        return Err(Error::new(
+            "invalid_argument",
+            "physical-copy mode is read-only",
+        ));
+    }
+    let selected = input["worktree"].as_str().map(decode_path).transpose()?;
+    let discovery_path = if name == "discover" && selected.is_none() {
+        input["path"].as_str().map(decode_path).transpose()?
+    } else {
+        selected.clone()
+    };
+    let p = discover(discovery_path.as_deref())
+        .map_err(|e| Error::new("unsupported_project", e.to_string()))?;
+    let out = match name {
+        "discover" => {
+            if let Some(s) = input["path"].as_str() {
+                let other = discover(Some(&decode_path(s)?))
+                    .map_err(|e| Error::new("unsupported_project", e.to_string()))?;
+                if selected.is_some() && other != p {
+                    return Err(Error::new(
+                        "invalid_argument",
+                        "path/worktree selectors disagree",
+                    ));
+                }
+                return discovered(&other);
+            }
+            discovered(&p)?
         }
+        "scope_list" => ScopeOperations::new(p.clone(), input["view"] == "physical").read(None)?,
+        "scope_inspect" => ScopeOperations::new(p.clone(), input["view"] == "physical")
+            .read(input["scope"].as_str())?,
+        "scope_host" => ScopeOperations::new(p.clone(), false).host("host", input)?,
+        _ => scope_items::call(&p, name, input)?,
+    };
+    let result = operation["output"]["$ref"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("#/$defs/")
+        .unwrap();
+    wire::validate(result, &out).map_err(|e| {
+        Error::new(
+            "io",
+            format!("cannot deliver a wire-correct result: {}", e.message),
+        )
+    })?;
+    Ok(out)
+}
+fn discovered(p: &work::core::project::Project) -> Result<Value> {
+    Ok(
+        json!({"worktree_root":scopes::path(&p.worktree_root),"git_common_dir":scopes::path(&p.git_common_dir),"git_dir":scopes::path(&p.git_dir().map_err(|e|Error::new("io",e.to_string()))?),"primary_checkout":scopes::path(&p.checkouts().map_err(|e|Error::new("io",e.to_string()))?[0].root)}),
+    )
+}
+fn absolute(s: &std::ffi::OsStr) -> Result<PathBuf> {
+    let p = PathBuf::from(s);
+    if p.is_absolute() {
+        Ok(p)
+    } else {
+        Ok(std::env::current_dir()
+            .map_err(|e| Error::new("io", e.to_string()))?
+            .join(p))
     }
 }
-impl From<DiscoveryError> for CliError {
-    fn from(error: DiscoveryError) -> Self {
-        let code = if matches!(error, DiscoveryError::UnsupportedProject(_)) {
-            "unsupported_project"
+fn text(s: &std::ffi::OsStr) -> Result<String> {
+    s.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| Error::new("invalid_argument", "text must be UTF-8"))
+}
+fn help() -> String {
+    format!(
+        "Usage: work [--json] [--worktree PATH] COMMAND\nDelivered: discover; scope list|inspect|host; item create|list|inspect|diagnose|ready|update; relation add|remove; mcp.\nReads default to authoritative primary/scope routing. --view physical is read-only.\nHosting requires an externally prepared identical destination and --expected-inventory HASH from scope inspect.\nOnly the listed operation subset is implemented here. The complete beta.2 catalog, lifecycle and package gates are not claimed.\nitem COMMAND: material operations; create assigns a generated full ID. Ready reserves nothing and excludes claimed items.\nrelation add: parent is child to parent; depends_on is dependent to prerequisite; related and discovered_from are informational.\nmcp: MCP tools over stdio.\nF (selection): --scope S, --root ITEM, --run ID, repeated --label TEXT, --priority-max 0..4, --persistence material|wisp.\nM (metadata): --completion manual|children, --priority 0..4, --parent ITEM, repeated --label TEXT, --model TEXT, --thinking TEXT.\nC (clear): --clear-parent, --clear-labels, --clear-model, --clear-thinking.\nO (owner): --session SELECTOR [--claim ID], or --session-namespace TEXT --session-id TEXT --claim ID.\nZ (authorization): repeated --authorize JSON; cannot be combined with O.\n{}",
+        OPERATIONS
+            .iter()
+            .filter(|n| **n != "discover")
+            .map(|n| wire::catalog()["operations"][*n]["cli"].as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+fn request(args: &[OsString]) -> Result<(String, Value)> {
+    let mut a = json!({});
+    let mut at = 0;
+    let mut saw_json = false;
+    while let Some(flag) = args.get(at) {
+        if flag == "--json" {
+            if saw_json {
+                return Err(Error::new("invalid_argument", "duplicate --json"));
+            }
+            saw_json = true;
+            at += 1;
+        } else if flag == "--worktree" {
+            if a.get("worktree").is_some() {
+                return Err(Error::new("invalid_argument", "duplicate worktree"));
+            }
+            let p = args
+                .get(at + 1)
+                .ok_or_else(|| Error::new("usage", "missing worktree path"))?;
+            a["worktree"] = json!(scopes::path(&absolute(p)?));
+            at += 2;
         } else {
-            "io"
-        };
-        Self::new(code, error.to_string())
-    }
-}
-impl From<TemplateError> for CliError {
-    fn from(error: TemplateError) -> Self {
-        Self {
-            code: error.code(),
-            message: error.to_string(),
-            diagnostics: error.diagnostics().to_vec(),
-            published_item: None,
-            previous_source_path: None,
-            storage_details: None,
+            break;
         }
     }
+    let command = args
+        .get(at)
+        .ok_or_else(|| Error::new("usage", "missing command"))?;
+    if command == "--help" || command == "help" || command == "--version" {
+        if at + 1 != args.len() || a.get("worktree").is_some() {
+            return Err(Error::new(
+                "usage",
+                "meta command takes no selectors/arguments",
+            ));
+        }
+        return Ok((
+            "meta".into(),
+            if command == "--version" {
+                json!({"version":env!("CARGO_PKG_VERSION")})
+            } else {
+                json!({"help":help()})
+            },
+        ));
+    }
+    if command == "discover" {
+        if let Some(p) = args.get(at + 1) {
+            if p == "--help" && at + 2 == args.len() {
+                return Ok((
+                    "meta".into(),
+                    json!({"help":"work discover [PATH]: Git working checkout, metadata directory, common directory and primary checkout; read-only"}),
+                ));
+            }
+            a["path"] = json!(scopes::path(&absolute(p)?));
+        }
+        if at + 2 < args.len() {
+            return Err(Error::new("usage", "discover takes at most one path"));
+        }
+        return Ok(("discover".into(), a));
+    }
+    let noun = text(command)?;
+    let verb = text(
+        args.get(at + 1)
+            .ok_or_else(|| Error::new("usage", "missing subcommand"))?,
+    )?;
+    at += 2;
+    if verb == "--help" || args.get(at).is_some_and(|s| s == "--help") {
+        return Ok(("meta".into(), json!({"help":help()})));
+    }
+    let mut name = format!("{noun}_{}", verb.replace('-', "_"));
+    if !OPERATIONS.contains(&name.as_str()) {
+        return Err(Error::new("usage", "unknown or undelivered command"));
+    }
+    let positional: &[&str] = match name.as_str() {
+        "scope_inspect" | "scope_host" => &["scope"],
+        "item_inspect" | "item_update" => &["id"],
+        "relation_add" | "relation_remove" => &["kind", "source", "target"],
+        _ => &[],
+    };
+    for field in positional {
+        a[*field] = json!(text(
+            args.get(at)
+                .ok_or_else(|| Error::new("usage", format!("missing {field}")))?
+        )?);
+        at += 1;
+    }
+    let mut singular = a
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    while at < args.len() {
+        let flag = text(&args[at])?;
+        at += 1;
+        if flag == "--raw" && name == "item_inspect" {
+            name = "item_inspect_raw".into();
+            if !singular.insert(flag) {
+                return Err(Error::new("usage", "duplicate raw"));
+            }
+            continue;
+        }
+        if matches!(flag.as_str(), "--session-namespace" | "--session-id") {
+            if !singular.insert(flag.clone()) {
+                return Err(Error::new("invalid_argument", "duplicate identity field"));
+            }
+            let value = text(
+                args.get(at)
+                    .ok_or_else(|| Error::new("usage", "missing identity value"))?,
+            )?;
+            at += 1;
+            if a.get("identity").is_none() {
+                a["identity"] = json!({});
+            }
+            a["identity"][if flag == "--session-namespace" {
+                "namespace"
+            } else {
+                "id"
+            }] = json!(value);
+            continue;
+        }
+        if flag == "--identity" {
+            return Err(Error::new(
+                "usage",
+                "use --session-namespace and --session-id",
+            ));
+        }
+        let (field, list) = match flag.as_str() {
+            "--label" => (
+                if matches!(name.as_str(), "item_list" | "item_ready") {
+                    "labels_all"
+                } else {
+                    "labels"
+                },
+                true,
+            ),
+            "--authorize" => ("authorization", true),
+            "--all" => ("include_terminal", false),
+            "--claim" => ("claim_id", false),
+            "--continue" => ("continue_id", false),
+            "--run" => ("run_id", false),
+            "--clear-labels" => ("labels", false),
+            _ => {
+                let key = flag
+                    .strip_prefix("--")
+                    .ok_or_else(|| Error::new("usage", "unexpected positional argument"))?;
+                let key = key.replace('-', "_");
+                let properties = schema(&name);
+                let Some((field, _)) = properties["properties"]
+                    .as_object()
+                    .unwrap()
+                    .get_key_value(&key)
+                else {
+                    return Err(Error::new("usage", format!("unknown {flag}")));
+                };
+                (Box::leak(field.clone().into_boxed_str()) as &str, false)
+            }
+        };
+        if !list && !singular.insert(field.to_owned()) {
+            return Err(Error::new("invalid_argument", format!("duplicate {field}")));
+        }
+        if flag == "--clear-labels" {
+            if a.get("labels").is_some() {
+                return Err(Error::new("invalid_argument", "clear-labels conflicts"));
+            }
+            a["labels"] = json!([]);
+            continue;
+        }
+        let s = schema(&name);
+        let spec = &s["properties"][field];
+        if spec.is_null() {
+            return Err(Error::new("usage", format!("unknown {flag}")));
+        }
+        let value = if spec["type"] == "boolean" || spec["const"].is_boolean() {
+            json!(true)
+        } else {
+            let raw = args
+                .get(at)
+                .ok_or_else(|| Error::new("usage", format!("missing value for {flag}")))?;
+            at += 1;
+            if field == "destination" {
+                json!(scopes::path(&absolute(raw)?))
+            } else if list && field == "authorization" {
+                serde_json::from_str(&text(raw)?)
+                    .map_err(|_| Error::new("invalid_argument", "invalid authorization JSON"))?
+            } else if spec["type"] == "integer" {
+                json!(
+                    text(raw)?
+                        .parse::<u64>()
+                        .map_err(|_| Error::new("invalid_argument", "expected integer"))?
+                )
+            } else if field == "identity" {
+                serde_json::from_str(&text(raw)?)
+                    .map_err(|_| Error::new("invalid_argument", "invalid identity JSON"))?
+            } else {
+                json!(text(raw)?)
+            }
+        };
+        if list {
+            if singular.contains(field) {
+                return Err(Error::new("invalid_argument", "set/clear conflict"));
+            }
+            if a.get(field).is_none() {
+                a[field] = json!([]);
+            }
+            a[field].as_array_mut().unwrap().push(value);
+        } else {
+            a[field] = value;
+        }
+    }
+    let definition = wire::catalog()["operations"][&name]["input"]["$ref"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("#/$defs/")
+        .unwrap();
+    wire::validate(definition, &a)?;
+    if let Some(destination) = a["destination"].as_str() {
+        let canonical = std::fs::canonicalize(decode_path(destination)?).map_err(|e| {
+            Error::new(
+                "invalid_argument",
+                format!("destination path unavailable: {e}"),
+            )
+        })?;
+        a["destination"] = json!(scopes::path(&canonical));
+    }
+    if a["body"] == "-" {
+        let mut body = String::new();
+        io::stdin()
+            .read_to_string(&mut body)
+            .map_err(|e| Error::new("invalid_argument", e.to_string()))?;
+        a["body"] = json!(body);
+    }
+    Ok((name, a))
 }
-
 pub fn run(args: impl Iterator<Item = OsString>) -> i32 {
     let args: Vec<_> = args.collect();
-    let json_mode = leading_json_mode(&args);
-    match dispatch(&args) {
+    let mut prefix = args.iter();
+    let mut json_mode = false;
+    while let Some(option) = prefix.next() {
+        match option.to_str() {
+            Some("--worktree") => {
+                prefix.next();
+            }
+            Some("--json") => json_mode = true,
+            Some("--version" | "--help" | "-V" | "-h") => {}
+            _ => break,
+        }
+    }
+
+    let result = request(&args).and_then(|(name, a)| {
+        if name == "meta" {
+            Ok(a)
+        } else {
+            call(&name, &a)
+        }
+    });
+    match result {
         Ok(value) => {
             if json_mode {
                 println!("{}", json!({"ok":true,"result":value}));
+            } else if let Some(h) = value["help"].as_str() {
+                println!("{h}");
+            } else if let Some(v) = value["version"].as_str() {
+                println!("work {v}");
             } else {
-                print_human(&value);
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
             }
             0
         }
-        Err(error) => {
+        Err(e) => {
+            let code = e.code;
+            let v = error(e);
             if json_mode {
-                println!("{}", json!({"ok":false,"error":error.value()}));
+                println!("{}", json!({"ok":false,"error":v}));
             } else {
-                eprintln!("work: {}: {}", error.code, error.message);
+                eprintln!("work: {code}: {}", v["message"].as_str().unwrap());
             }
-            error.exit()
+            wire::catalog()["error_exit_codes"][code]
+                .as_i64()
+                .unwrap_or(1) as i32
         }
     }
-}
-
-fn leading_json_mode(args: &[OsString]) -> bool {
-    let mut at = 0;
-    let mut json = false;
-    while let Some(arg) = args.get(at) {
-        if arg == "--json" {
-            json = true;
-            at += 1;
-        } else if arg == "--worktree" {
-            at += 2;
-        } else {
-            break;
-        }
-    }
-    json
-}
-
-fn dispatch(args: &[OsString]) -> Result<Value, CliError> {
-    let mut at = 0;
-    let mut selected: Option<&Path> = None;
-    let mut duplicate_selector = false;
-    while let Some(arg) = args.get(at) {
-        if arg == "--json" {
-            at += 1;
-        } else if arg == "--worktree" {
-            duplicate_selector |= selected.is_some();
-            selected = Some(Path::new(
-                args.get(at + 1)
-                    .ok_or_else(|| usage("missing --worktree path"))?,
-            ));
-            at += 2;
-        } else {
-            break;
-        }
-    }
-    let command = args.get(at).ok_or_else(|| usage("missing command"))?;
-    if duplicate_selector {
-        let error = CliError::new("invalid_argument", "duplicate --worktree selector");
-        return Err(
-            if command == "storage"
-                && args
-                    .get(at + 1)
-                    .is_some_and(|verb| verb == "init" || verb == "recreate" || verb == "recover")
-            {
-                error.storage_failure()
-            } else {
-                error
-            },
-        );
-    }
-    if command == "--help" || command == "help" {
-        if at + 1 != args.len() || selected.is_some() {
-            return Err(usage("work --help takes no arguments"));
-        }
-        return Ok(json!({"help": HELP}));
-    }
-    if command == "--version" {
-        if at + 1 != args.len() || selected.is_some() {
-            return Err(usage("work --version takes no arguments"));
-        }
-        return Ok(json!({"version":env!("CARGO_PKG_VERSION")}));
-    }
-    if command == "discover" {
-        if at + 2 == args.len() && args[at + 1] == "--help" {
-            return Ok(json!({"help":DISCOVER_HELP}));
-        }
-        if at + 2 < args.len() {
-            return Err(usage("work discover [PATH]"));
-        }
-        let project = discover(args.get(at + 1).map(Path::new).or(selected))?;
-        return Ok(
-            json!({"worktree_root":encode_path(&project.worktree_root),"git_common_dir":encode_path(&project.git_common_dir)}),
-        );
-    }
-    let storage_mutation = command == "storage"
-        && args
-            .get(at + 1)
-            .is_some_and(|verb| verb == "init" || verb == "recreate" || verb == "recover");
-    let words: Vec<String> = args[at..]
-        .iter()
-        .map(|a| {
-            a.to_str()
-                .map(str::to_owned)
-                .ok_or_else(|| CliError::new("invalid_argument", "command arguments must be UTF-8"))
-        })
-        .collect::<Result<_, _>>()
-        .map_err(|error| {
-            if storage_mutation {
-                error.storage_failure()
-            } else {
-                error
-            }
-        })?;
-    if let Some(help) = command_help(&words) {
-        return Ok(json!({"help":help}));
-    }
-    if words.first().is_some_and(|noun| noun == "storage") {
-        let result = (|| {
-            let request = super::storage::from_cli(&words[1..])?;
-            super::storage::execute(&discover(selected)?, request)
-        })();
-        return if words
-            .get(1)
-            .is_some_and(|verb| matches!(verb.as_str(), "init" | "recreate" | "recover"))
-        {
-            result.map_err(CliError::storage_failure)
-        } else {
-            result
-        };
-    }
-    if words.first().is_some_and(|w| w == "handoff") {
-        if words.get(1).is_some_and(|w| w == "--help")
-            || words.get(2).is_some_and(|w| w == "--help")
-        {
-            return Ok(json!({"help":super::handoffs::HELP}));
-        }
-        let (verb, fields) = super::handoffs::from_cli(&words[1..])?;
-        return super::handoffs::execute(&discover(selected)?, &verb, &fields);
-    }
-    if words
-        .first()
-        .is_some_and(|w| matches!(w.as_str(), "workspace" | "session"))
-    {
-        if words.iter().skip(1).any(|w| w == "--help") {
-            return Ok(json!({"help":super::context::HELP}));
-        }
-        let (name, fields) = super::context::from_cli(&words[0], &words[1..])?;
-        return super::context::execute(&discover(selected)?, &name, &fields);
-    }
-    if words.first().is_some_and(|w| w == "claim") {
-        if words.get(1).is_some_and(|w| w == "--help") {
-            return Ok(json!({"help":super::claims::HELP}));
-        }
-        let (verb, fields) = super::claims::from_cli(&words[1..])?;
-        return super::claims::execute(&discover(selected)?, &verb, &fields);
-    }
-    if words.first().is_some_and(|s| s == "run")
-        || (words.first().is_some_and(|s| s == "template")
-            && words
-                .get(1)
-                .is_some_and(|s| matches!(s.as_str(), "preview" | "expand")))
-    {
-        if words.get(1).is_some_and(|s| s == "--help") {
-            return Ok(json!({"help":super::runs::HELP}));
-        }
-        let (name, fields) = super::runs::from_cli(&words[0], &words[1..])?;
-        return super::runs::execute(&discover(selected)?, &name, &fields);
-    }
-    let mut words = words;
-    let mut authorizations = Vec::new();
-    let mut checkout_view = false;
-    let mut i = 2;
-    while i < words.len() {
-        if words[i] == "--authorize" {
-            let value = words
-                .get(i + 1)
-                .ok_or_else(|| usage("--authorize requires JSON"))?;
-            authorizations.push(
-                serde_json::from_str(value).map_err(|_| usage("invalid authorization JSON"))?,
-            );
-            words.drain(i..i + 2);
-        } else if words[i] == "--view" {
-            if words[0] != "item"
-                || !matches!(words[1].as_str(), "list" | "ready" | "inspect" | "diagnose")
-            {
-                return Err(usage("--view is read-only"));
-            }
-            match words.get(i + 1).map(String::as_str) {
-                Some("checkout") => checkout_view = true,
-                Some("resolved") => {}
-                _ => return Err(usage("--view resolved|checkout")),
-            };
-            words.drain(i..i + 2);
-        } else if matches!(
-            words[i].as_str(),
-            "--title"
-                | "--body"
-                | "--completion"
-                | "--priority"
-                | "--parent"
-                | "--label"
-                | "--model"
-                | "--thinking"
-                | "--reason"
-                | "--handoff"
-                | "--source"
-                | "--root"
-                | "--run"
-                | "--priority-max"
-                | "--persistence"
-                | "--param"
-                | "--existing"
-        ) {
-            // Existing option values are opaque text, even when they resemble
-            // a newly added authorization/view option. The command parser
-            // remains responsible for missing or invalid values.
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    super::claims::authorization(Some(&Value::Array(authorizations.clone())))?;
-    validate_command_shape(&words)?;
-    let project = discover(selected)?;
-    let mut ops = ExecutionOperations::new(project.clone());
-    ops.authorization =
-        super::claims::authorization(Some(&serde_json::Value::Array(authorizations)))?;
-    ops.checkout_view = checkout_view;
-    let result = match words.as_slice() {
-        [noun, verb, tail @ ..] if noun == "item" => item_command(&project, &ops, verb, tail),
-        [noun, verb, tail @ ..] if noun == "relation" => {
-            relation_command(&project, &ops, verb, tail)
-        }
-        [noun, verb, tail @ ..] if noun == "template" => template_command(&project, verb, tail),
-        _ => Err(usage(
-            "expected item, relation, template, or storage command",
-        )),
-    }?;
-    if words[0] == "item" && matches!(words[1].as_str(), "list" | "ready" | "diagnose" | "inspect")
-    {
-        Ok(super::storage::attach_read(
-            &project,
-            result,
-            ops.take_read_storage(),
-        ))
-    } else {
-        Ok(result)
-    }
-}
-
-fn command_help(words: &[String]) -> Option<&'static str> {
-    let words: Vec<_> = words.iter().map(String::as_str).collect();
-    match words.as_slice() {
-        ["discover", "--help"] => Some(DISCOVER_HELP),
-        ["storage", "--help"] => Some(super::storage::HELP),
-        [
-            "storage",
-            "inspect" | "init" | "recreate" | "recover",
-            "--help",
-        ] => Some(super::storage::HELP),
-        ["mcp", "--help"] => Some(
-            "Usage: work mcp\nServe durable item operations as MCP tools over stdio. Tools accept an optional worktree path; otherwise they use the server's checkout.",
-        ),
-        ["item", "--help"] => Some(
-            "Usage: work [--json] [--worktree PATH] item COMMAND\nCommands: create, list, inspect, diagnose, ready, update, close, reopen, repair. Run work item COMMAND --help for details.",
-        ),
-        [
-            "claim",
-            "next" | "acquire" | "inspect" | "list" | "release" | "recover" | "reassign",
-            "--help",
-        ] => Some(super::claims::HELP),
-        ["item", "create", "--help"] => Some(
-            "Usage: work item create --title TEXT [--body TEXT|-] [METADATA OPTIONS]\nCreate a durable item with a generated full ID; completion is manual by default. Body text is opaque; --body - reads stdin. Metadata: --completion manual|children, --priority 0..4, --parent ID, --label TEXT (repeatable), --model TEXT, --thinking TEXT.",
-        ),
-        ["item", "list", "--help"] => Some(
-            "Usage: work item list [--view resolved|checkout] [--root ITEM] [--run RUN_ID] [--label TEXT]... [--priority-max 0..4] [--persistence material|wisp]\nList matching items in canonical ID order, with state, relations, ownership and blockers. Filters combine with AND; labels are exact. --run requires the resolved view and a current run. Listing never reserves.",
-        ),
-        ["item", "inspect", "--help"] => Some(
-            "Usage: work item inspect ID [--view resolved|checkout] [--raw]\nInspect an item by full ID or unique lowercase prefix, optionally prefixed with w-. --raw reads the physical selected checkout and requires a full ID and exposes original source bytes and diagnostics.",
-        ),
-        ["item", "diagnose", "--help"] => Some(
-            "Usage: work item diagnose\nReport source and graph diagnostics for the selected checkout. Invalid graphs can still be inspected, but refuse readiness and structured mutations.",
-        ),
-        ["item", "ready", "--help"] => Some(
-            "Usage: work item ready [--view resolved|checkout] [--root ITEM] [--run RUN_ID] [--label TEXT]... [--priority-max 0..4] [--persistence material|wisp]\nList matching executable items by priority then full ID. Filters combine with AND without removing graph prerequisites. Resolved readiness excludes claimed items; list/inspect shows ownership. --run requires the resolved view and a current run.",
-        ),
-        ["item", "update", "--help"] => Some(
-            "Usage: work item update ID OPTIONS\nEdit supplied header fields only; preserve the existing body. Options: --title TEXT, --completion manual|children, --priority 0..4, --parent ID, --clear-parent, --label TEXT (repeatable), --clear-labels, --model TEXT, --clear-model, --thinking TEXT, --clear-thinking.",
-        ),
-        ["item", "close", "--help"] => Some(
-            "Usage: work item close ID [--reason TEXT] [--handoff JSON]...\nRecord a manual item as done with an optional opaque reason. Closing resolves its obligation; it does not close other manual items.",
-        ),
-        ["item", "reopen", "--help"] => Some(
-            "Usage: work item reopen ID\nRecord a manual item as open and remove its close reason. Graph state is recomputed without reopening other manual items.",
-        ),
-        ["item", "repair", "--help"] => Some(
-            "Usage: work item repair FULL_ID --source -\nReplace a diagnosed invalid source with complete version-1 item bytes from stdin. Inspect and diagnose first; repair rejects a healthy item.",
-        ),
-        ["relation", "--help"] => Some(
-            "Usage: work relation add|remove KIND SOURCE TARGET\nKinds: parent (child to parent), depends_on (dependent to prerequisite), related (symmetric context), discovered_from (provenance). Run work relation add --help or remove --help for details.",
-        ),
-        ["relation", "add", "--help"] => Some(
-            "Usage: work relation add KIND SOURCE TARGET\nAdd one full-ID edge. For parent, the edge points from child to parent; for depends_on, from dependent to prerequisite. related and discovered_from are informational and do not change readiness.",
-        ),
-        ["relation", "remove", "--help"] => Some(
-            "Usage: work relation remove KIND SOURCE TARGET\nRemove an existing edge. SOURCE is the child for parent and the dependent for depends_on. related may be removed from either endpoint.",
-        ),
-        ["template", "--help"] => Some(
-            "Usage: work template list|validate|preview|expand\nDiscover and preview version-1/version-2 YAML templates without writes. Expansion publishes material items and explicit-run wisps; it never starts a run implicitly.",
-        ),
-        ["template", "list", "--help"] => Some(
-            "Usage: work template list\nList valid and invalid templates under .work/templates/.",
-        ),
-        ["template", "validate", "--help"] => Some(
-            "Usage: work template validate NAME\nValidate one version-1/version-2 YAML template definition.",
-        ),
-        ["template", "expand", "--help"] => Some(
-            "Usage: work template expand NAME [--run RUN_ID] [--root ITEM] [--param NAME=TEXT]... [--existing NAME=ID]... [--authorize JSON]...\nPublish validated material/wisp files; failures can leave partial results.",
-        ),
-        ["template", "preview", "--help"] => Some(
-            "Usage: work template preview NAME [--root FULL_ID] [--run RUN_ID] [--param NAME=TEXT]... [--existing NAME=FULL_ID]...\nRender the exact symbolic graph for a selected checkout without creating items, runs, IDs, or claims.",
-        ),
-        _ => None,
-    }
-}
-
-fn validate_command_shape(words: &[String]) -> Result<(), CliError> {
-    match words {
-        [noun, verb, tail @ ..] if noun == "item" => match verb.as_str() {
-            "list" | "ready" => super::selection::from_cli(tail).map(|_| ()),
-            "diagnose" if tail.is_empty() => Ok(()),
-            "inspect" if tail.len() == 1 || (tail.len() == 2 && tail[1] == "--raw") => Ok(()),
-            "create" => validate_metadata_syntax(tail, true),
-            "update" if tail.len() >= 2 => validate_metadata_syntax(&tail[1..], false),
-            "close" if !tail.is_empty() => parse_close(&tail[1..]).map(|_| ()),
-            "reopen" if tail.len() == 1 => Ok(()),
-            "repair" if tail.len() == 3 && tail[1] == "--source" && tail[2] == "-" => Ok(()),
-            _ => Err(usage("unknown item command or arguments")),
-        },
-        [noun, verb, tail @ ..] if noun == "relation" => {
-            if (verb == "add" || verb == "remove") && tail.len() == 3 {
-                Ok(())
-            } else {
-                Err(usage("relation add|remove KIND SOURCE TARGET"))
-            }
-        }
-        [noun, verb, tail @ ..] if noun == "template" => match (verb.as_str(), tail) {
-            ("list", []) | ("validate", [_]) => Ok(()),
-            ("preview", [_, rest @ ..]) if rest.len().is_multiple_of(2) => Ok(()),
-            _ => Err(usage(
-                "template list|validate NAME|preview NAME [--root FULL_ID] [--run RUN_ID] [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
-            )),
-        },
-        _ => Err(usage("expected item, relation, or template command")),
-    }
-}
-
-fn validate_metadata_syntax(args: &[String], create: bool) -> Result<(), CliError> {
-    let mut at = 0;
-    let mut has_title = false;
-    while at < args.len() {
-        let flag = args[at].as_str();
-        let clear = matches!(
-            flag,
-            "--clear-parent" | "--clear-labels" | "--clear-model" | "--clear-thinking"
-        );
-        let known = matches!(
-            flag,
-            "--title"
-                | "--completion"
-                | "--priority"
-                | "--parent"
-                | "--label"
-                | "--model"
-                | "--thinking"
-        ) || (create && flag == "--body")
-            || clear;
-        if !known {
-            return Err(usage(format!("unknown option {flag}")));
-        }
-        if !clear && args.get(at + 1).is_none() {
-            return Err(usage(format!("missing value for {flag}")));
-        }
-        if flag == "--title" {
-            has_title = true;
-        }
-        at += if clear { 1 } else { 2 };
-    }
-    if create && !has_title {
-        return Err(usage("item create requires --title"));
-    }
-    Ok(())
-}
-
-fn parse_close(
-    args: &[String],
-) -> Result<(Option<String>, Vec<work::core::handoffs::HandoffInput>), CliError> {
-    let mut reason = None;
-    let mut handoffs = Vec::new();
-    let mut chunks = args.chunks_exact(2);
-    for pair in &mut chunks {
-        match pair[0].as_str() {
-            "--reason" if reason.is_none() => reason = Some(pair[1].clone()),
-            "--handoff" => handoffs.push(work::core::handoffs::HandoffInput::from_json(
-                &serde_json::from_str::<Value>(&pair[1])
-                    .map_err(|_| usage("invalid handoff JSON"))?,
-            )?),
-            _ => return Err(usage("item close ID [--reason TEXT] [--handoff JSON]...")),
-        }
-    }
-    if !chunks.remainder().is_empty() {
-        return Err(usage("missing close option value"));
-    }
-    Ok((reason, handoffs))
-}
-fn item_command(
-    project: &Project,
-    ops: &ExecutionOperations,
-    verb: &str,
-    args: &[String],
-) -> Result<Value, CliError> {
-    match verb {
-        "list" => Ok(
-            json!({"items":items_view(ops,&ops.list_filtered(&super::selection::from_cli(args)?)?)?}),
-        ),
-        "ready" => Ok(
-            json!({"items":items_view(ops,&ops.ready_filtered(&super::selection::from_cli(args)?)?)?}),
-        ),
-        "diagnose" if args.is_empty() => {
-            let store = ops.view()?;
-            let graph = ItemGraph::from_store(&store);
-            Ok(
-                json!({"diagnostics":graph.diagnostics().iter().map(diagnostic).collect::<Vec<_>>()}),
-            )
-        }
-        "inspect" if args.len() == 1 => {
-            let candidate = args[0].strip_prefix("w-").unwrap_or(&args[0]);
-            let id = match resolve_view(ops, &args[0]) {
-                Ok(id) => id,
-                Err(error) if error.code == "not_found" && candidate.len() == 32 => {
-                    if let Ok(raw) = ops.inspect_raw(candidate) {
-                        return Err(invalid_source(raw.file.diagnostics));
-                    }
-                    return Err(error);
-                }
-                Err(error) => return Err(error),
-            };
-            Ok(json!({"item":one_item_view(ops,&ops.inspect(&id)?)?}))
-        }
-        "inspect" if args.len() == 2 && args[1] == "--raw" => {
-            let raw = ops.inspect_raw(&args[0])?;
-            Ok(json!({"source":source_value(&args[0],&raw)}))
-        }
-        "create" => {
-            let input = parse_metadata(project, args, true, true)?;
-            let title = input
-                .title
-                .ok_or_else(|| usage("item create requires --title"))?;
-            let item = ops.create(title, input.body.unwrap_or_default(), input.change)?;
-            Ok(json!({"item":mutation_item_value(project,&item)?}))
-        }
-        "update" if args.len() >= 2 => {
-            let id = resolve(project, &args[0])?;
-            let input = parse_metadata(project, &args[1..], true, false)?;
-            let mut change = input.change;
-            change.title = input.title;
-            Ok(json!({"item":mutation_item_value(project,&ops.update(&id,change)?)?}))
-        }
-        "close" if !args.is_empty() => {
-            let id = resolve(project, &args[0])?;
-            let (reason, handoffs) = parse_close(&args[1..])?;
-            Ok(
-                json!({"item":snapshot_item_value(&ops.close_with_handoffs(&id,reason,&handoffs)?)?}),
-            )
-        }
-        "reopen" if args.len() == 1 => {
-            let id = resolve(project, &args[0])?;
-            Ok(json!({"item":mutation_item_value(project,&ops.reopen(&id)?)?}))
-        }
-        "repair" if args.len() == 3 && args[1] == "--source" && args[2] == "-" => {
-            ops.inspect_raw(&args[0])?;
-            let mut source = Vec::new();
-            io::stdin().read_to_end(&mut source).map_err(io_error)?;
-            let raw = ops.repair(&args[0], source)?;
-            Ok(json!({"source":source_value(&args[0],&raw)}))
-        }
-        _ => Err(usage("unknown item command or arguments")),
-    }
-}
-
-fn template_definition_value(definition: &TemplateDefinition) -> Value {
-    json!({
-        "name":definition.name,
-        "parameters":definition.parameters,
-        "existing":definition.existing,
-        "defaults":{"model":definition.defaults.model,"thinking":definition.defaults.thinking},
-        "items":definition.items.iter().map(|item| json!({
-            "key":item.key,"title":item.title,"body":item.body,"persistence":item.persistence.as_str(),
-            "completion":match item.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
-            "priority":item.priority,"labels":item.labels,"model":item.model,"thinking":item.thinking,
-        })).collect::<Vec<_>>(),
-        "edges":definition.edges.iter().map(|edge| json!({
-            "from":edge.from,"kind":edge.kind.as_str(),"to":edge.to,
-        })).collect::<Vec<_>>(),
-    })
-}
-
-pub(super) fn template_preview_value(preview: &TemplatePreview) -> Value {
-    json!({
-        "name":preview.name,"root":preview.root,
-        "parameters":preview.parameters,"existing":preview.existing,
-        "items":preview.items.iter().map(|item| (item.key.clone(), json!({
-            "key":item.key,"title":item.title,"body":item.body,"persistence":item.persistence.as_str(),
-            "completion":match item.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
-            "state":item.state.map(|state|match state {ManualState::Open=>"open",ManualState::Done=>"done"}),
-            "priority":item.priority,"labels":item.labels,
-            "model":item.model,"model_source":item.model_source.as_ref().map(|source|source.as_str()),
-            "thinking":item.thinking,"thinking_source":item.thinking_source.as_ref().map(|source|source.as_str()),
-        }))).collect::<BTreeMap<_,_>>(),
-        "edges":preview.edges.iter().map(|edge| json!({
-            "from":{"reference":edge.from.reference,"existing_id":edge.from.existing_id},
-            "kind":edge.kind.as_str(),
-            "to":{"reference":edge.to.reference,"existing_id":edge.to.existing_id},
-        })).collect::<Vec<_>>(),
-    })
-}
-
-pub(super) fn template_command(
-    project: &Project,
-    verb: &str,
-    args: &[String],
-) -> Result<Value, CliError> {
-    let catalog = TemplateCatalog::load_from_root(&project.worktree_root).map_err(io_error)?;
-    match (verb, args) {
-        ("list", []) => Ok(json!({"templates":catalog.files.iter().map(|file|json!({
-            "name":file.name,"path":encode_path(&file.path),"valid":file.definition.is_some(),
-            "diagnostics":file.diagnostics.iter().map(diagnostic).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>()})),
-        ("validate", [name]) => {
-            let definition = catalog.validate(name)?;
-            Ok(json!({"template":template_definition_value(definition)}))
-        }
-        ("preview", [name, tail @ ..]) => {
-            let mut root = None;
-            let mut parameters = BTreeMap::new();
-            let mut existing = BTreeMap::new();
-            let mut chunks = tail.chunks_exact(2);
-            for pair in &mut chunks {
-                match pair[0].as_str() {
-                    "--root" if root.is_none() => root = Some(pair[1].clone()),
-                    "--param" | "--existing" => {
-                        let (key, value) = pair[1].split_once('=').ok_or_else(|| {
-                            CliError::new(
-                                "invalid_argument",
-                                format!("{} expects NAME=VALUE", pair[0]),
-                            )
-                        })?;
-                        let target = if pair[0] == "--param" {
-                            &mut parameters
-                        } else {
-                            &mut existing
-                        };
-                        if target.insert(key.to_owned(), value.to_owned()).is_some() {
-                            return Err(CliError::new(
-                                "invalid_argument",
-                                format!("duplicate {} binding {key}", pair[0]),
-                            ));
-                        }
-                    }
-                    _ => {
-                        return Err(usage(
-                            "template preview NAME [--root FULL_ID] [--run RUN_ID] [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
-                        ));
-                    }
-                }
-            }
-            if !chunks.remainder().is_empty() {
-                return Err(usage("template preview options require values"));
-            }
-            let request = PreviewRequest {
-                root,
-                parameters,
-                existing,
-            };
-            let view = ItemStore::load(project).map_err(io_error)?;
-            Ok(json!({"preview":template_preview_value(&catalog.preview(name,&request,&view)?)}))
-        }
-        _ => Err(usage(
-            "template list|validate NAME|preview NAME [--root FULL_ID] [--run RUN_ID] [--param NAME=TEXT]... [--existing NAME=FULL_ID]...",
-        )),
-    }
-}
-pub(super) fn source_value(id: &str, raw: &RawInspection) -> Value {
-    let mut hex = String::with_capacity(raw.file.raw.len() * 2);
-    for byte in &raw.file.raw {
-        write!(hex, "{byte:02x}").unwrap();
-    }
-    json!({"id":id,"path":encode_path(&raw.file.path),"raw_hex":hex,
-        "diagnostics":raw.file.diagnostics.iter().map(diagnostic).collect::<Vec<_>>(),
-        "graph_diagnostics":raw.graph_diagnostics.iter().map(diagnostic).collect::<Vec<_>>(),
-        "recovery_path":raw.recovery_path.as_deref().map(encode_path),
-        "additional_recovery_paths":raw.additional_recovery_paths.iter().map(|p|encode_path(p)).collect::<Vec<_>>()})
-}
-
-fn relation_command(
-    project: &Project,
-    ops: &ExecutionOperations,
-    verb: &str,
-    args: &[String],
-) -> Result<Value, CliError> {
-    if args.len() != 3 {
-        return Err(usage("relation add|remove KIND SOURCE TARGET"));
-    }
-    let kind = match args[0].as_str() {
-        "parent" => RelationKind::Parent,
-        "depends_on" => RelationKind::DependsOn,
-        "related" => RelationKind::Related,
-        "discovered_from" => RelationKind::DiscoveredFrom,
-        _ => return Err(CliError::new("invalid_argument", "unknown relation kind")),
-    };
-    let source = resolve(project, &args[1])?;
-    let target = resolve(project, &args[2])?;
-    let item = match verb {
-        "add" => ops.relation_add(&source, kind, &target)?,
-        "remove" => ops.relation_remove(&source, kind, &target)?,
-        _ => return Err(usage("relation add|remove KIND SOURCE TARGET")),
-    };
-    Ok(json!({"item":mutation_item_value(project,&item)?}))
-}
-
-struct MetadataInput {
-    title: Option<String>,
-    body: Option<Vec<u8>>,
-    change: MetadataChange,
-}
-fn parse_metadata(
-    project: &Project,
-    args: &[String],
-    title_allowed: bool,
-    body_allowed: bool,
-) -> Result<MetadataInput, CliError> {
-    let mut input = MetadataInput {
-        title: None,
-        body: None,
-        change: MetadataChange::default(),
-    };
-    let mut read_body_from_stdin = false;
-    let mut at = 0;
-    while at < args.len() {
-        let flag = args[at].as_str();
-        let clear = matches!(
-            flag,
-            "--clear-parent" | "--clear-labels" | "--clear-model" | "--clear-thinking"
-        );
-        let value = if clear {
-            None
-        } else {
-            Some(
-                args.get(at + 1)
-                    .ok_or_else(|| usage(format!("missing value for {flag}")))?
-                    .clone(),
-            )
-        };
-        match flag {
-            "--title" if title_allowed => input.title = value,
-            "--body" if body_allowed => {
-                let value = value.unwrap();
-                read_body_from_stdin = value == "-";
-                input.body = if read_body_from_stdin {
-                    None
-                } else {
-                    Some(value.into_bytes())
-                };
-            }
-            "--completion" => {
-                input.change.completion = Some(match value.as_deref() {
-                    Some("manual") => Completion::Manual,
-                    Some("children") => Completion::Children,
-                    _ => {
-                        return Err(CliError::new(
-                            "invalid_argument",
-                            "completion must be manual or children",
-                        ));
-                    }
-                })
-            }
-            "--priority" => {
-                let priority = value
-                    .unwrap()
-                    .parse::<u8>()
-                    .map_err(|_| CliError::new("invalid_argument", "priority must be 0..4"))?;
-                if priority > 4 {
-                    return Err(CliError::new("invalid_argument", "priority must be 0..4"));
-                }
-                input.change.priority = Some(priority);
-            }
-            "--parent" => input.change.parent = Some(Some(resolve(project, &value.unwrap())?)),
-            "--clear-parent" => input.change.parent = Some(None),
-            "--label" => input
-                .change
-                .labels
-                .get_or_insert_with(Vec::new)
-                .push(value.unwrap()),
-            "--clear-labels" => input.change.labels = Some(vec![]),
-            "--model" => input.change.model = Some(value),
-            "--clear-model" => input.change.model = Some(None),
-            "--thinking" => input.change.thinking = Some(value),
-            "--clear-thinking" => input.change.thinking = Some(None),
-            _ => return Err(usage(format!("unknown option {flag}"))),
-        }
-        at += if clear { 1 } else { 2 };
-    }
-    if body_allowed {
-        let title = input
-            .title
-            .as_deref()
-            .ok_or_else(|| usage("item create requires --title"))?;
-        validate_create_fields(title, &input.change)?;
-    }
-    if read_body_from_stdin {
-        let mut bytes = Vec::new();
-        io::stdin().read_to_end(&mut bytes).map_err(io_error)?;
-        input.body = Some(bytes);
-    }
-    Ok(input)
-}
-
-pub(super) fn validate_create_fields(title: &str, change: &MetadataChange) -> Result<(), CliError> {
-    if !valid_line(title) {
-        return Err(CliError::new(
-            "invalid_argument",
-            "title must be a nonblank single line",
-        ));
-    }
-    if change
-        .labels
-        .as_ref()
-        .is_some_and(|labels| labels.iter().any(|label| !valid_line(label)))
-    {
-        return Err(CliError::new(
-            "invalid_argument",
-            "labels must be nonblank single lines",
-        ));
-    }
-    for (name, value) in [("model", &change.model), ("thinking", &change.thinking)] {
-        if value
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .is_some_and(|v| !valid_line(v))
-        {
-            return Err(CliError::new(
-                "invalid_argument",
-                format!("{name} must be a nonblank single line"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn valid_line(value: &str) -> bool {
-    !value.trim().is_empty() && !value.contains(['\n', '\r'])
-}
-
-pub(super) fn resolve(project: &Project, input: &str) -> Result<String, CliError> {
-    resolve_view(&ExecutionOperations::new(project.clone()), input)
-}
-pub(super) fn resolve_view(ops: &ExecutionOperations, input: &str) -> Result<String, CliError> {
-    let candidate = input.strip_prefix("w-").unwrap_or(input);
-    if candidate.len() == 32 && !valid_full_id(candidate) {
-        return Err(CliError::new(
-            "invalid_argument",
-            "full item ID must be a lowercase UUIDv4",
-        ));
-    }
-    let store = ops.view()?;
-    match store.resolve(input) {
-        Ok(file) => Ok(file.header.as_ref().unwrap().id.clone()),
-        Err(LookupError::InvalidInput) => Err(CliError::new(
-            "invalid_argument",
-            "item ID must be lowercase hexadecimal, optionally prefixed with w-",
-        )),
-        Err(LookupError::NotFound) => {
-            // An unavailable bound source has no parsed header. Its resolved
-            // diagnostic still owns this full ID; a healthy checkout copy
-            // must not replace that evidence.
-            let diagnostics: Vec<_> = store
-                .files
-                .iter()
-                .filter(|file| file.path.file_stem().and_then(|s| s.to_str()) == Some(candidate))
-                .flat_map(|file| file.diagnostics.clone())
-                .collect();
-            if diagnostics.is_empty() {
-                Err(CliError::new(
-                    "not_found",
-                    format!("item {input} was not found"),
-                ))
-            } else {
-                Err(invalid_source(diagnostics))
-            }
-        }
-        Err(LookupError::Ambiguous(ids)) => Err(CliError::new(
-            "ambiguous_id",
-            format!("item {input} matches {}", ids.join(", ")),
-        )),
-        Err(LookupError::Invalid(d)) => Err(invalid_source(d)),
-    }
-}
-
-fn valid_full_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 32
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        && bytes[12] == b'4'
-        && matches!(bytes[16], b'8' | b'9' | b'a' | b'b')
-}
-
-/// Render a completed operation's returned snapshot without another filesystem
-/// read. Full display IDs stay unambiguous without reloading the catalog.
-pub(super) fn snapshot_item_value(item: &Inspection) -> Result<Value, CliError> {
-    let header = item
-        .file
-        .header
-        .as_ref()
-        .ok_or_else(|| CliError::new("invalid_source", "item header is invalid"))?;
-    item_value(&BTreeMap::from([(header.id.clone(), 32)]), item)
-}
-
-pub(super) fn one_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
-    one_item_view(&ExecutionOperations::new(project.clone()), item)
-}
-pub(super) fn one_item_view(
-    ops: &ExecutionOperations,
-    item: &Inspection,
-) -> Result<Value, CliError> {
-    let store = ops.view()?;
-    item_value(&display_prefixes(&store), item)
-}
-
-pub(super) fn mutation_item_value(project: &Project, item: &Inspection) -> Result<Value, CliError> {
-    let header = item
-        .file
-        .header
-        .as_ref()
-        .expect("successful mutation has a header");
-    one_item_value(project, item)
-        .map_err(|error| with_published_item(error, &header.id, &item.file.path))
-}
-
-pub(super) fn items_view(
-    ops: &ExecutionOperations,
-    items: &[Inspection],
-) -> Result<Vec<Value>, CliError> {
-    let store = ops.view()?;
-    let prefixes = display_prefixes(&store);
-    items
-        .iter()
-        .map(|item| item_value(&prefixes, item))
-        .collect()
-}
-
-fn display_prefixes(store: &ItemStore) -> BTreeMap<String, usize> {
-    let mut ids: Vec<_> = store
-        .files
-        .iter()
-        .filter_map(|file| file.header.as_ref().map(|header| header.id.clone()))
-        .collect();
-    ids.sort_unstable();
-    ids.dedup();
-    let mut prefixes = BTreeMap::new();
-    for (index, id) in ids.iter().enumerate() {
-        let neighbors = [
-            index.checked_sub(1).and_then(|i| ids.get(i)),
-            ids.get(index + 1),
-        ];
-        let shared = neighbors
-            .into_iter()
-            .flatten()
-            .map(|other| {
-                id.bytes()
-                    .zip(other.bytes())
-                    .take_while(|(a, b)| a == b)
-                    .count()
-            })
-            .max()
-            .unwrap_or(0);
-        prefixes.insert(id.clone(), (shared + 1).clamp(8, 32));
-    }
-    prefixes
-}
-
-fn item_value(prefixes: &BTreeMap<String, usize>, item: &Inspection) -> Result<Value, CliError> {
-    let h = item
-        .file
-        .header
-        .as_ref()
-        .ok_or_else(|| CliError::new("invalid_source", "item header is invalid"))?;
-    let prefix = prefixes.get(&h.id).copied().unwrap_or(8);
-    let r = &item.relations;
-    let e = &item.evaluation;
-    let blockers: Vec<Value> = e
-        .iter()
-        .flat_map(|x| &x.blockers)
-        .map(|b| match b {
-            Blocker::Completed => json!({"kind":"completed"}),
-            Blocker::Aggregate => json!({"kind":"aggregate"}),
-            Blocker::Prerequisite { id, inherited_from } => {
-                json!({"kind":"prerequisite","id":id,"inherited_from":inherited_from})
-            }
-            Blocker::Child(id) => json!({"kind":"child","id":id}),
-        })
-        .collect();
-    let mut value = json!({
-        "id":h.id,"display_id":format!("w-{}",&h.id[..prefix]),"title":h.title,
-        "completion":match h.completion {Completion::Manual=>"manual",Completion::Children=>"children"},
-        "state":h.state.map(|s|match s {ManualState::Open=>"open",ManualState::Done=>"done"}),
-        "effective_done":e.as_ref().map(|x|x.effective_done),"executable":e.as_ref().map(|x|x.executable),"blockers":blockers,
-        "priority":h.priority,"parent":h.parent,"depends_on":h.depends_on,"related":h.related,
-        "discovered_from":h.discovered_from,"labels":h.labels,"model":h.model,"thinking":h.thinking,
-        "close_reason":h.close_reason,"body":item.file.body.as_ref().and_then(|b|std::str::from_utf8(b).ok()),
-        "path":encode_path(&item.file.path),"relations":{"parent":r.parent,"children":r.children,"depends_on":r.depends_on,
-            "blocks":r.blocks,"related":r.related,"discovered_from":r.discovered_from,"discovered_by":r.discovered_by},
-        "graph_diagnostics":item.graph_diagnostics.iter().map(diagnostic).collect::<Vec<_>>(),
-        "recovery_path":item.recovery_path.as_deref().map(encode_path)
-    });
-    if let Some(context) = item.context.as_object() {
-        value.as_object_mut().unwrap().extend(context.clone());
-    }
-    if !value["claim"].is_null() {
-        let claim = value["claim"].clone();
-        value["blockers"].as_array_mut().unwrap().push(json!({"kind":"claim","id":claim["id"],"actor":claim["actor"],"session":claim["session"]}));
-    }
-    Ok(value)
-}
-pub(super) fn invalid_source(diagnostics: Vec<Diagnostic>) -> CliError {
-    CliError {
-        code: "invalid_source",
-        message: "selected source or graph is invalid".into(),
-        diagnostics,
-        published_item: None,
-        previous_source_path: None,
-        storage_details: None,
-    }
-}
-pub(super) fn diagnostic(d: &Diagnostic) -> Value {
-    json!({"path":encode_path(&d.path),"line":d.line,"message":d.message})
-}
-fn io_error(error: io::Error) -> CliError {
-    CliError::new("io", error.to_string())
-}
-fn with_published_item(mut error: CliError, id: &str, path: &Path) -> CliError {
-    error.published_item = Some(Box::new(json!({"id":id,"path":encode_path(path)})));
-    error
-}
-fn usage(message: impl Into<String>) -> CliError {
-    CliError::new("usage", message)
-}
-fn print_human(value: &Value) {
-    super::storage::print_warning(value);
-    if let Some(help) = value.get("help").and_then(Value::as_str) {
-        println!("{help}");
-    } else if let Some(version) = value.get("version").and_then(Value::as_str) {
-        println!("work {version}");
-    } else if let Some(root) = value.get("worktree_root").and_then(Value::as_str) {
-        println!("worktree_root={root}");
-        println!(
-            "git_common_dir={}",
-            value["git_common_dir"].as_str().unwrap_or("")
-        );
-    } else if value.get("run_id").is_some() && value.get("updated").is_some_and(Value::is_array) {
-        // Expansion records have keys and publication paths, not inspected-item
-        // titles. Show their complete mapping and affected existing files.
-        println!("{}", serde_json::to_string_pretty(value).unwrap());
-    } else if let Some(items) = value.get("items").and_then(Value::as_array) {
-        for item in items {
-            println!(
-                "{} {}",
-                item["display_id"].as_str().unwrap_or("?"),
-                item["title"].as_str().unwrap_or("")
-            );
-            if let Some(path) = item["path"].as_str() {
-                println!("  source: {path}");
-            }
-            if let Some(w) = item.get("ownership_warning") {
-                eprintln!("work: ownership warning: {}", w["message"]);
-            }
-            if let Some(actor) = item["claim"]["actor"].as_str() {
-                println!(
-                    "  claimed by {actor} ({})",
-                    item["claim"]["id"].as_str().unwrap_or("")
-                );
-            }
-        }
-    } else if let Some(item) = value.get("item") {
-        println!(
-            "{} {}",
-            item["display_id"].as_str().unwrap_or("?"),
-            item["title"].as_str().unwrap_or("")
-        );
-        println!("{}", serde_json::to_string_pretty(item).unwrap());
-    } else {
-        println!("{}", serde_json::to_string_pretty(value).unwrap());
-    }
-}
-const HELP: &str = "Usage: work [--json] [--worktree PATH] COMMAND | work mcp\n\
-Commands: discover [PATH], item create|list|inspect|diagnose|ready|update|close|reopen|repair, relation add|remove, template list|validate|preview|expand, claim acquire|next|inspect|list|release|recover|reassign, handoff create|inspect|list|receivers|prune, run start|inspect|list|attach|detach|squash|discard, workspace register|inspect|list|bind|unbind|cleanup, session set|list|remove, storage inspect|init|recreate|recover; mcp starts a stdio server\n\
-Use --json for one structured result or error object. Run work item --help, work relation --help, work template --help, work claim --help, work handoff --help, work run --help, work workspace --help, work session --help, or work storage --help for details. Work tracks item state and graph readiness; it does not execute work or impose a workflow.";
-const DISCOVER_HELP: &str = "Usage: work discover [PATH]\nResolve a Git working checkout and its shared Git common directory. Omit PATH to use the current directory.";
-// Preserve unusual Unix path bytes while keeping JSON paths single-line.
-pub(super) fn encode_path(path: &Path) -> String {
-    let mut encoded = String::new();
-    for byte in path.as_os_str().as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'.' | b'_' | b'-' | b'~') {
-            encoded.push(*byte as char);
-        } else {
-            write!(encoded, "%{byte:02X}").unwrap();
-        }
-    }
-    encoded
 }

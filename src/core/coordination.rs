@@ -54,6 +54,10 @@ impl From<StorageError> for ExecutionError {
 }
 impl From<OperationError> for ExecutionError {
     fn from(e: OperationError) -> Self {
+        let e = match e {
+            OperationError::Storage(e) => return (*e).into(),
+            other => other,
+        };
         let mut result = Self::new(e.code(), e.to_string());
         result.details["publication"] = json!(if e.published_item().is_some() {
             "published"

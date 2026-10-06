@@ -170,6 +170,7 @@ fn release(root: &Path, result: &Value) {
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: dispatch/acquisition consumer is outside hosting profile; not hosting acceptance"]
 fn filters_share_full_graph_exact_labels_and_cli_mcp_ordering() {
     let f = Fixture::new();
     f.item(ROOT, 2, "labels: [inherited-only]\n");
@@ -258,6 +259,7 @@ fn filters_share_full_graph_exact_labels_and_cli_mcp_ordering() {
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: dispatch/acquisition consumer is outside hosting profile; not hosting acceptance"]
 fn all_priority_levels_then_canonical_ids_and_empty_do_not_create_setup() {
     let f = Fixture::new();
     for (id, p) in [(ROOT, 4), (A, 2), (B, 1), (C, 3), (D, 0)] {
@@ -287,6 +289,7 @@ fn all_priority_levels_then_canonical_ids_and_empty_do_not_create_setup() {
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: dispatch/acquisition consumer is outside hosting profile; not hosting acceptance"]
 fn reference_errors_and_checkout_run_rejection_match_transports() {
     let f = Fixture::new();
     f.item(ROOT, 2, "");
@@ -441,6 +444,7 @@ fn reference_errors_and_checkout_run_rejection_match_transports() {
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: dispatch/acquisition consumer is outside hosting profile; not hosting acceptance"]
 fn unavailable_or_corrupt_ownership_is_never_empty_dispatch() {
     let f = Fixture::new();
     f.item(ROOT, 2, "");
@@ -484,6 +488,7 @@ fn unavailable_or_corrupt_ownership_is_never_empty_dispatch() {
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: dispatch/acquisition consumer is outside hosting profile; not hosting acceptance"]
 fn current_run_members_material_wisps_and_root_scope_intersect() {
     let f = Fixture::new();
     f.item(ROOT, 2, "");
@@ -542,6 +547,7 @@ fn current_run_members_material_wisps_and_root_scope_intersect() {
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: dispatch/acquisition consumer is outside hosting profile; not hosting acceptance"]
 fn selected_checkout_and_bound_whole_file_control_all_filters_and_selection() {
     let f = Fixture::new();
     f.item(ROOT, 2, "labels: [main]\n");
@@ -588,6 +594,7 @@ fn selected_checkout_and_bound_whole_file_control_all_filters_and_selection() {
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: dispatch/acquisition consumer is outside hosting profile; not hosting acceptance"]
 fn independent_cli_mcp_linked_worktree_races_never_repeat_coordination_identity() {
     for count in [1, 5] {
         let f = Fixture::new();
@@ -653,6 +660,7 @@ fn independent_cli_mcp_linked_worktree_races_never_repeat_coordination_identity(
 }
 
 #[test]
+#[ignore = "PENDING 54de7594: actual claim-next source fence requires downstream acquisition; not hosting acceptance"]
 #[cfg(target_os = "linux")]
 fn source_change_while_waiting_on_checkout_lock_refuses_without_retry_or_claim() {
     use rustix::fs::{FlockOperation, flock};

@@ -111,6 +111,21 @@ fn node(
                     if let Ok(number) = value.parse::<i64>() {
                         return Ok(json!(number));
                     }
+                    if let Ok(number) = serde_json::from_str::<Value>(value)
+                        && number.is_number()
+                    {
+                        return Ok(number);
+                    }
+                    if matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        ".nan" | ".inf" | "+.inf" | "-.inf"
+                    ) || value.strip_prefix("0x").is_some_and(|digits| {
+                        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit())
+                    }) || value.strip_prefix("0o").is_some_and(|digits| {
+                        !digits.is_empty() && digits.bytes().all(|b| matches!(b, b'0'..=b'7'))
+                    }) {
+                        return Err(bad(path, "non-JSON numeric scalar is forbidden"));
+                    }
                     Ok(Value::String(value.clone()))
                 }
             }
