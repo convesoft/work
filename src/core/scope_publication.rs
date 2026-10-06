@@ -171,8 +171,27 @@ pub(crate) fn save(
     );
     if let Err(e) = result {
         let mut e: Error = e.into();
-        if std::fs::symlink_metadata(&stage_path).is_ok() {
-            e.details["recovery_paths"] = json!([path(&stage_path)]);
+        let stage = json!(path(&stage_path));
+        match std::fs::symlink_metadata(&stage_path) {
+            Ok(_) => {
+                let paths = e
+                    .details
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("recovery_paths")
+                    .or_insert_with(|| json!([]));
+                if let Some(paths) = paths.as_array_mut()
+                    && !paths.contains(&stage)
+                {
+                    paths.push(stage);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(paths) = e.details["recovery_paths"].as_array_mut() {
+                    paths.retain(|p| p != &stage);
+                }
+            }
+            Err(_) => {} // Inaccessible is not proof that recovery bytes were consumed.
         }
         if e.details["publication"] == "possible" {
             e.path = Some(p.to_owned());

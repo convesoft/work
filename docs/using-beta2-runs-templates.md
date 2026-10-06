@@ -23,7 +23,7 @@ work status
 work run start ITEM --continue OPERATION_ID
 ```
 
-Continuation checks the frozen source snapshots, original run identity and complete reference target set. Complete operation-owned staging bytes are reconciled only when they exactly match the frozen next publication. Edited, incomplete or unknown stages remain conflicts with recovery evidence. Completed progress has no permanent retry receipt. Do not repeat a failed multi-file operation blindly.
+Continuation checks the frozen source snapshots, original run identity and complete reference target set. Complete operation-owned staging bytes are reconciled only when they exactly match the frozen next publication. Edited, incomplete or unknown stages remain conflicts with recovery evidence. A saved manifest justified by the authoritative pending start is available to run inspect/list before the selecting anchor exists; it is not current or executable. Arbitrary unreferenced run copies are not inferred as authoritative. Completed progress has no permanent retry receipt. Do not repeat a failed multi-file operation blindly.
 
 ## Selected definitions, authoritative destinations
 

@@ -50,9 +50,66 @@ pub(crate) fn current_claims(v: &View) -> Vec<Value> {
     records.iter().filter(|(p,c,_,_)| c.get("item_id").is_some() && !records.iter().any(|(e,end,_,_)| e.parent()==p.parent() && end["claim_id"]==c["id"]))
         .map(|(p,c,s,r)| json!({"claim":c,"ending":null,"run_id":r,"scope_id":s,"path":path(p),"current":true,"diagnostics":[]})).collect()
 }
-pub(crate) fn manifest(v: &View, rid: &str) -> Result<(PathBuf, Value, String)> {
-    let records: Vec<_> = v
+/// Read-only manifest inventory; an authoritative frozen start justifies its
+/// saved manifest before the selecting boundary exists, but never activates it.
+fn manifests(v: &View) -> Result<Vec<(PathBuf, Value, String, String)>> {
+    let mut records: Vec<_> = v
         .records()
+        .into_iter()
+        .filter(|(p, _, _, _)| p.file_name().is_some_and(|n| n == "run.yaml"))
+        .collect();
+    for pending in &v.pending {
+        if pending["supported"] != true || pending["kind"] != "start" {
+            continue;
+        }
+        let progress = super::coordination::decode_path(pending["path"].as_str().unwrap())?;
+        let Some(source) = v.capture.files.get(&progress) else {
+            continue;
+        };
+        let plan = wire::envelope("StartProgress", &source.raw, &progress)?;
+        let Some(rid) = plan["new_run_id"].as_str() else {
+            continue;
+        };
+        let scope = progress
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let sid = scope.file_name().unwrap().to_str().unwrap();
+        let home = scope.parent().unwrap().parent().unwrap().parent().unwrap();
+        if plan["scope_id"] != sid || plan["id"] != progress.file_stem().unwrap().to_str().unwrap()
+        {
+            return Err(Error::new(
+                "invalid_source",
+                "pending start ownership differs from its path",
+            )
+            .at(&progress));
+        }
+        if v.source_host(sid).as_deref() != Some(home) {
+            continue;
+        }
+        let p = scope.join(format!("runs/{rid}/run.yaml"));
+        if records.iter().any(|(file, _, _, _)| file == &p) {
+            continue;
+        }
+        if let Some(source) = v.capture.files.get(&p) {
+            let m = wire::envelope("RunManifest", &source.raw, &p)?;
+            if m["id"] != rid {
+                return Err(Error::new(
+                    "invalid_source",
+                    "pending manifest identity differs from its home",
+                )
+                .at(&p));
+            }
+            records.push((p, m, sid.into(), rid.into()));
+        }
+    }
+    Ok(records)
+}
+pub(crate) fn manifest(v: &View, rid: &str) -> Result<(PathBuf, Value, String)> {
+    let records: Vec<_> = manifests(v)?
         .into_iter()
         .filter(|(p, m, _, r)| {
             r == rid && m["id"] == rid && p.file_name().is_some_and(|n| n == "run.yaml")
@@ -113,8 +170,7 @@ pub(crate) fn run_view(v: &View, rid: &str) -> Result<Value> {
             }
         }
     }
-    let descendants: BTreeSet<_> = v
-        .records()
+    let descendants: BTreeSet<_> = manifests(v)?
         .into_iter()
         .filter(|(p, m, s, r)| {
             p.file_name().is_some_and(|n| n == "run.yaml")
@@ -192,8 +248,7 @@ pub fn read(project: &Project, name: &str, a: &Value) -> Result<Value> {
         json!({"run":run_view(&v,a["run_id"].as_str().unwrap())?})
     } else {
         let scope = a["scope"].as_str().map(|s| v.scope_id(s)).transpose()?;
-        let ids: BTreeSet<_> = v
-            .records()
+        let ids: BTreeSet<_> = manifests(&v)?
             .into_iter()
             .filter(|(p, m, s, _)| {
                 p.file_name().is_some_and(|n| n == "run.yaml")
@@ -805,7 +860,7 @@ pub fn inherit(project: &Project, a: &Value) -> Result<Value> {
         fence()?;
         Ok(fresh.wrap(json!({"scope":fresh.scope(&sid),"changed":changed,"partial":effects})))
     })();
-    result.map_err(|e| publication::merge(e, &effects))
+    result.map_err(|e| publication::attempted(e, &effects, Some(&p)))
 }
 pub(crate) fn edit_wisp(
     project: &Project,
@@ -870,7 +925,7 @@ pub(crate) fn edit_wisp(
         }
         Ok(final_view.wrap(out))
     })();
-    result.map_err(|e| publication::merge(e, &effects))
+    result.map_err(|e| publication::attempted(e, &effects, Some(&old.path)))
 }
 /// Internal lifecycle foundation, not a public rotation/ending operation.
 pub fn prepare_rotation(project: &Project, abandon_unfinished: bool) -> Result<Value> {
