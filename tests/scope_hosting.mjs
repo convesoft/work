@@ -515,7 +515,7 @@ test('fresh ordinary primary routing follows Git facts across branches, detached
           assert.deepEqual(await m.good('discover'),d);
           assert.deepEqual(await m.good('scope_inspect',{scope:'root'}),root);
           const tools=(await m.request('tools/list')).result.tools;
-          for(const unsupported of ['scope_select_authority','scope_relocate','run_start','workspace_register']) assert.equal(tools.some(t=>t.name===unsupported),false);
+          for(const unsupported of ['scope_select_authority','scope_relocate','run_rotate','workspace_register']) assert.equal(tools.some(t=>t.name===unsupported),false);
           await m.close(); m=null;
         }
       }

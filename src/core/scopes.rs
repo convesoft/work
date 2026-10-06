@@ -84,7 +84,7 @@ pub(crate) struct Capture {
     inventory: Option<(Project, Vec<Checkout>)>,
 }
 impl Capture {
-    fn directory(&mut self, d: &Directory) -> Result<()> {
+    pub(crate) fn directory(&mut self, d: &Directory) -> Result<()> {
         let snapshot = (d.identity.clone(), visible(d.names()?));
         if let Some(before) = self.dirs.get(&d.path) {
             if before != &snapshot {
@@ -917,7 +917,7 @@ impl View {
                     v.pending.push(json!({"id":record["id"],
                         "kind":file.parent().unwrap().file_name().unwrap().to_str(),
                         "path":path(file),"step":record["step"],
-                        "supported":record.get("tree_change").is_some()}));
+                        "supported":record.get("tree_change").is_some() || record.get("new_run_id").is_some()}));
                 }
             }
             for sid in v.anchors.keys() {
@@ -952,6 +952,26 @@ impl View {
         v.check_tree();
         v.validate_records();
         Ok(v)
+    }
+    /// Re-evaluate a caller's exact in-memory prospective physical tree.
+    pub(crate) fn rebuild(&mut self) {
+        self.hosts.clear();
+        self.parents.clear();
+        self.anchors.clear();
+        self.diagnostics.retain(|d| {
+            matches!(
+                d["code"].as_str(),
+                Some("obsolete_execution" | "coordination_unavailable")
+            )
+        });
+        self.pending.retain(|p| p["kind"] == "host_transfer");
+        let primary = self.physical[0].checkout.root.clone();
+        self.visit("root", &primary, &mut BTreeSet::new());
+        self.unreachable_declarations();
+        self.resolve_material();
+        self.physical_diagnostics();
+        self.check_tree();
+        self.validate_records();
     }
     pub(crate) fn declarations_unresolved(&self) -> bool {
         self.physical.iter().any(|p| {
@@ -1738,6 +1758,21 @@ impl View {
     fn validate_records(&mut self) {
         // Envelope and ownership validation is shared safety for hosting, not
         // evidence that execution/claim/session mutation workflows are delivered.
+        // A frozen start is inspectable before its selecting anchor exists.
+        // Never activate the incomplete boundary merely to expose continuation.
+        for physical in &self.physical {
+            for (file, record) in &physical.records {
+                if record.get("step").is_some()
+                    && let Ok(relative) =
+                        file.strip_prefix(physical.checkout.root.join(".work/scopes"))
+                    && let Some(sid) = relative.iter().next().and_then(|s| s.to_str())
+                    && relative.iter().nth(1).is_some_and(|s| s == "progress")
+                    && self.source_host(sid).as_ref() == Some(&physical.checkout.root)
+                {
+                    self.pending.push(json!({"id":record["id"],"kind":file.parent().unwrap().file_name().unwrap().to_str(),"path":path(file),"step":record["step"],"supported":record.get("tree_change").is_some() || (record.get("new_run_id").is_some() && file.parent().is_some_and(|p|p.file_name().is_some_and(|n|n=="start")))}));
+                }
+            }
+        }
         let mut ids = BTreeSet::new();
         let mut claims = BTreeMap::<String, Vec<String>>::new();
         let mut anchors = self.anchors.clone();
@@ -1781,12 +1816,6 @@ impl View {
                             Some(sid),
                         ));
                     }
-                }
-                if path
-                    .strip_prefix(&prefix)
-                    .is_ok_and(|r| r.iter().next().is_some_and(|c| c == "progress"))
-                {
-                    self.pending.push(json!({"id":v["id"],"kind":path.parent().unwrap().file_name().unwrap().to_str(),"path":self::path(path),"step":v["step"],"supported":v.get("tree_change").is_some() || (sid == "root" && v.get("new_run_id").is_some() && path.parent().is_some_and(|p| p.file_name().is_some_and(|n| n == "start")))}));
                 }
                 if let Some(item) = v["item_id"].as_str() {
                     let ending =

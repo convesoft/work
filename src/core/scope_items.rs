@@ -288,7 +288,7 @@ fn catalog_read_error(v: &View) -> Option<Error> {
     Some(error)
 }
 
-fn resolve(v: &View, s: &str) -> Result<String> {
+pub(crate) fn resolve(v: &View, s: &str) -> Result<String> {
     super::scope_wire::validate("ItemRef", &json!(s))?;
     let query = s.strip_prefix("w-").unwrap_or(s);
     let mut ids = v
@@ -367,7 +367,7 @@ fn metadata(v: &View, a: &Value) -> Result<MetadataChange> {
         ..Default::default()
     })
 }
-fn authorize(v: &View, id: &str, a: &Value) -> Result<()> {
+pub(crate) fn authorize(v: &View, id: &str, a: &Value) -> Result<()> {
     let current = acquisition(v, id);
     let mut forms = a["authorization"].as_array().cloned().unwrap_or_default();
     if a.get("session").is_some() || a.get("identity").is_some() {
@@ -467,7 +467,19 @@ fn ordinary_completion_inputs(v: &View, a: &Value) -> Result<()> {
 // Material repair and ordinary tree edits must protect the same surviving
 // authoritative sources and execution contexts. Inspection's eligibility
 // masking must not hide a captured acquisition during repair preflight.
-fn validate_context_change(v: &View, prospective: &View) -> Result<()> {
+pub(crate) fn validate_context_change(v: &View, prospective: &View) -> Result<()> {
+    for f in &v.store.files {
+        if let Some(rid) = super::scope_runs::owner(f)
+            && super::scope_runs::manifest(v, rid).is_ok_and(|(_, m, _)| m["phase"] == "active")
+            && let Some(id) = f.header.as_ref().map(|h| &h.id)
+            && prospective.effective_run(id).0.as_deref() != Some(rid)
+        {
+            return Err(Error::new(
+                "wisp_run_mismatch",
+                "ancestry would move a current wisp out of its one home",
+            ));
+        }
+    }
     for f in &prospective.store.files {
         if f.path.parent().is_some_and(|p| p.ends_with(".work/items"))
             && let Some(ch) = &f.header
@@ -1001,11 +1013,8 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
                 .clone(),
         )
     };
-    if old.as_ref().is_some_and(|f| v.is_wisp(f)) {
-        return Err(Error::new(
-            "run_not_current",
-            "this hosting slice does not mutate run-owned work",
-        ));
+    if let Some(f) = old.as_ref().filter(|f| v.is_wisp(f)) {
+        super::scope_runs::require_current_wisp(&v, f)?;
     }
     let mut h = if let Some(f) = &old {
         f.header.clone().unwrap()
@@ -1085,7 +1094,10 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
     } else {
         v.source_host(&id).unwrap()
     };
-    let file_path = host.join(format!(".work/items/{id}.md"));
+    let file_path = old.as_ref().filter(|f| v.is_wisp(f)).map_or_else(
+        || host.join(format!(".work/items/{id}.md")),
+        |f| f.path.clone(),
+    );
     let raw = operations::serialize(&h, &body);
     let candidate = operations::candidate_store(&v.store, &file_path, raw.clone())?;
     let graph = ItemGraph::from_store(&candidate);
@@ -1108,6 +1120,9 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
     let mut locked = View::load(project, false)?;
     v.capture.compare_prelock(&locked.capture)?;
     guard.verify()?;
+    if old.as_ref().is_some_and(|f| v.is_wisp(f)) {
+        return super::scope_runs::edit_wisp(project, &locked, old.as_ref().unwrap(), &raw, name);
+    }
     if !tree_references.is_empty() || continuation.is_some() {
         return super::scope_tree::publish(
             &locked,

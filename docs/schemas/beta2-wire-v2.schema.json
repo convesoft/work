@@ -973,10 +973,14 @@
             "child_before": {
               "$ref": "#/$defs/Snapshot"
             },
+            "tree_references": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/ScopeTreeReferenceChange"},
+              "uniqueItems": true
+            },
             "step": {
               "type": "integer",
-              "minimum": 0,
-              "maximum": 3
+              "minimum": 0
             },
             "ignore_change": {
               "$ref": "#/$defs/IgnoreChange"
@@ -1014,9 +1018,13 @@
                       "required": [
                         "child_before"
                       ]
+                    },
+                    {
+                      "required": ["tree_references"]
                     }
                   ]
                 },
+                "properties": {"step": {"maximum": 3}},
                 "required": [
                   "ignore_change"
                 ]
@@ -1024,7 +1032,8 @@
               "else": {
                 "required": [
                   "parent_scope_id",
-                  "child_before"
+                  "child_before",
+                  "tree_references"
                 ],
                 "not": {
                   "required": [

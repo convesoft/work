@@ -448,6 +448,17 @@ impl Directory {
         expected: Option<&Source>,
         stage_name: &str,
     ) -> Result<Option<PathBuf>, StorageError> {
+        self.publish_guarded(name, raw, expected, stage_name, || Ok(()))
+    }
+    /// A caller's whole-source/lock fence runs after staging and before rename.
+    pub(crate) fn publish_guarded(
+        &self,
+        name: &str,
+        raw: &[u8],
+        expected: Option<&Source>,
+        stage_name: &str,
+        fence: impl Fn() -> Result<(), StorageError>,
+    ) -> Result<Option<PathBuf>, StorageError> {
         self.verify()?;
         let path = self.path.join(name);
         let stage_path = self.path.join(stage_name);
@@ -478,6 +489,7 @@ impl Directory {
         }
         #[cfg(test)]
         inject("before_publication", &path)?;
+        fence()?;
         let flags = if expected.is_some() {
             RenameFlags::EXCHANGE
         } else {

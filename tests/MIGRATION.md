@@ -1,4 +1,4 @@
-# Test migration for bounded hosting and initialization
+# Test migration for bounded hosting, initialization, runs and templates
 
 Owners: hosting `7bbc0619ab46461fa0d5c3b42edbeef1`; initialization `6bf6198a34494a94a30a9ba53ed976a6`. This is delivery/test allocation,
 not a change to the accepted beta.2 catalog or a claim that deferred consumers work.
@@ -25,12 +25,12 @@ Mixed `bootstrap_adoption.rs`, `cli_json.rs`, `mcp_protocol.rs`,
 active material/public-read, invalid-input, concurrency and safe-file cases.
 Eight ordinary material consumer tests in `tests/pending/` are reactivated: CLI/MCP full lifecycle, malformed/immutable repair, authored-backlog closure, healthy-repair refusal, lookup errors and authority isolation. They now call actual ordinary material completion/repair, not external state substitution. The public `onboarding.rs` launcher additionally runs `onboarding.mjs` and `material_completion.mjs`: actual CLI/MCP initialization/status and authoritative material operations, including linked/detached primary layouts, unsupported separate-Git no-write refusal, ignore-byte variants, source modes, concurrent init, exact-ID continuation and refusal. Its Linux/x86_64 ptrace fixture kills/injects I/O errors at every observed preparation/write/sync/rename/removal boundary; it is not power-loss or all-host evidence. Prepared claim records prove refusal only. Test definitions in `tests/pending/` are not all ignored; inspect each attribute and actual run result.
 
-All template APIs, including pre-init material-only planning/expansion and empty reads, are assigned to runs/templates under the approved allocation. The base prepares directories and authoritative material publication but does not execute templates. Final connected/installed-package, all-writer cleanup and downstream lifecycle gates remain pending.
+All template APIs, including pre-init material-only planning/expansion and empty reads, are executed by the runs/templates issue branch under the approved allocation. The base supplies initialization/authority, not simulated templates. The active counterparts below preserve bounded obligations; final connected/installed-package, all-writer cleanup and downstream lifecycle gates remain pending.
 
 ## Explicitly superseded assertions
 
 - The beta.1 51-tool inventory and claim/template/storage advertising are
-  replaced first by the 13-tool hosting inventory and now by the bounded 18-tool initialization/material inventory. The complete frozen beta.2
+  replaced first by the 13-tool hosting inventory, then the integrated 18-tool initialization/material inventory and now the issue branch's bounded 26-tool run/template inventory. The complete frozen beta.2
   catalog remains required at combined delivery.
 - Selecting a linked checkout no longer makes its physical material copies
   authoritative. Active tests check inherited primary routing and explicit,
@@ -64,6 +64,29 @@ receiver-retention/pruning and squash/discard command schemas are superseded:
 migrate applicable source/ownership/publication safeguards, not those removed
 product workflows. The final adoption owner verifies the connected beta.2
 workflow. No downstream task is started or closed by this allocation.
+
+### Runs/templates bounded counterparts and remaining compound consumers
+
+The eight run/template operations execute through the real CLI and persistent MCP. `scoped_runs_templates.rs` launches the three new public suites; `scoped_rotation.rs` tests internal read-only guard preparation. `scoped_publication.mjs` injects errors/kills at every observed start/expansion syscall boundary, exercises exact frozen continuation conflicts and pauses real writes to detect outside source changes. This is Linux/x86_64 local evidence, not power-loss/all-host verification. Prepared session/claim/ending records prove guards only.
+
+The retained beta.1 tests below remain compiled and **unexecuted as whole tests**, not passing or silently dropped. Their applicable bounded safeguards are migrated to the named active counterparts. Compound acquisition/completion/end/disposal work remains explicitly pending with its downstream owner; global registration/bindings, attach/detach and perpetual backup-success assertions are superseded, not deferred APIs. None of this closes the current delivery item or proves integration/package acceptance.
+
+| Retained legacy test | Active bounded counterpart / explicitly remaining allocation |
+| --- | --- |
+| `human_expansion_reports_key_ids_destinations_and_existing_updates` | `scoped_runs_templates.mjs`: human expansion exposes permanent IDs/paths and exact existing updates; pretty JSON replaces the old table formatter |
+| `template_preview_matches_cli_and_publishes_nothing` | `scoped_runs_templates.mjs`: v1/v2 symbolic preview, literal parameters, item/default provenance, CLI/MCP equality and complete filesystem no-write fingerprints |
+| `template_preview_reports_physical_fallback_warnings_through_cli_and_mcp` | `scoped_run_safety.mjs`: catalog/missing coordination/physical fallback; honest execution/context fields replace beta.1 storage warnings |
+| `rootless_planning_and_readonly_mixed_preview_through_cli_mcp` | `scoped_runs_templates.mjs`: pre-init material-only preview/expansion and empty reads; `scoped_run_safety.mjs`: symbolic uninitialized wisps |
+| `mixed_expansion_claimed_wisp_completion_and_derived_finish_survive_restart` | `scoped_runs_templates.mjs`: mixed explicit ancestry, close/reopen and derived finish across persistent MCP/CLI; `scoped_run_safety.mjs`: prepared exact-source claim authorization/refusal. Acquisition/claimed completion remains PENDING sessions/claims w-54de7594; attach/detach are superseded |
+| `terminal_fixture_keeps_material_binding_and_uncommitted_worktree_state` | `scoped_run_safety.mjs`: selected definitions and whole authoritative source bytes; historical child barrier/material update; `scope_hosting.mjs`: uncommitted host bytes. Workspace binding files are superseded; actual finalization/disposal remains PENDING w-0e159a0e |
+| `frozen_existing_wisp_expansion_refuses_before_any_setup_through_cli_and_mcp` | `scoped_run_safety.mjs`: historical existing-wisp rewrite refuses without setup, independent of an explicit run selector. Old squashing/discarding generations are superseded; actual ending transitions remain PENDING w-0e159a0e |
+| `frozen_run_root_material_and_wisps_match_ready_vs_acquire_in_cli_and_mcp` | `scoped_runs_templates.mjs`/`scoped_run_safety.mjs`: ended barriers, historical/current wisp gates and independent material CRUD; `scope_hosting.mjs`: prepared ownership diagnostics/readiness. Actual acquisition and ending race remains PENDING w-54de7594/w-0e159a0e |
+| `run_start_lookup_errors_and_reference_forms_match_cli_and_mcp_without_invalid_writes` | `scoped_run_safety.mjs`: invalid/missing/ambiguous scope references, all full/prefix forms, unchanged repeat and wisp boundary refusal |
+| `membership_validates_all_references_before_setup_with_cli_mcp_lookup_parity` | Attach/detach success is superseded by derived membership. `scoped_runs_templates.mjs`/`scoped_run_safety.mjs`: explicit ancestry, complete graph, selectors and no-write lookup refusal |
+| `frozen_target_expansion_is_lifecycle_conflict_while_preview_stays_read_only` | `scoped_run_safety.mjs`: ended target expansion refuses; retained target preview stays symbolic/write-free. Legacy squashing/discarding phases are superseded; pending ending execution remains w-0e159a0e |
+| `fresh_template_only_clone_previews_without_writes_and_expands_materials_in_cli_and_mcp` | `scoped_run_safety.mjs`: actual fresh template-only clone, no-write preview and pre-init material expansion with no anchor/run/ignore. `scoped_runs_templates.mjs`: CLI/MCP parity and human CLI expansion. Global registration/bindings are superseded |
+| `wisp_update_returns_actual_previous_inode_and_noop_has_no_recovery_in_cli_and_mcp` | `scoped_run_safety.mjs`: actual run-owned source, updated/no-op results and verified obsolete-stage cleanup. Permanent old-version backup success is superseded by DES-FILE-PUBLICATION-LIFECYCLE; stale open handles are a documented limit |
+| `expansion_refuses_missing_bound_source_without_recreating_its_catalog` | `scoped_run_safety.mjs`: missing explicit authoritative host catalog refuses without fallback/recreation; whole-file host selection replaces binding files |
 
 ### Initialization safety counterparts for retained legacy storage spellings
 
@@ -99,7 +122,6 @@ combined acceptance.
 | `tests/cli_json.rs` | `storage_contention_is_distinct_and_does_not_hide_file_readiness` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
 | `tests/cli_json.rs` | `duplicate_worktree_selectors_refuse_storage_mutations_before_discovery` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
 | `tests/cli_json.rs` | `non_utf8_storage_mutation_arguments_report_not_published_before_discovery` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
-| `tests/cli_json.rs` | `human_expansion_reports_key_ids_destinations_and_existing_updates` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
 | `tests/context_execution.rs` | `named_rebind_remove_keeps_captured_ownership_and_workspace_across_restart` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |
 | `tests/context_execution.rs` | `workspace_reuse_rebind_unbind_and_cleanup_user_evidence` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |
 | `tests/context_execution.rs` | `session_scope_strict_inputs_and_corruption_never_become_empty_context` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |
@@ -146,21 +168,8 @@ combined acceptance.
 | `tests/handoffs.rs` | `derived_aggregate_receivers_resolve_without_changing_graph_edges` | [w-2cc1d6ac](../.work/items/2cc1d6acf22e4a48bbf9839998674264.md) |
 | `tests/handoffs.rs` | `retarget_to_done_receiver_and_prune_race_never_deletes_an_unresolved_receiver_set` | [w-2cc1d6ac](../.work/items/2cc1d6acf22e4a48bbf9839998674264.md) |
 | `tests/handoffs.rs` | `stdin_exact_body_malformed_envelopes_and_storage_recreation_are_visible` | [w-2cc1d6ac](../.work/items/2cc1d6acf22e4a48bbf9839998674264.md) |
-| `tests/mcp_protocol.rs` | `template_preview_matches_cli_and_publishes_nothing` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
 | `tests/mcp_protocol.rs` | `storage_mcp_lifecycle_and_warning_payloads_match_cli` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
 | `tests/mcp_protocol.rs` | `storage_mcp_validates_requests_before_selecting_a_checkout` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
-| `tests/mcp_protocol.rs` | `template_preview_reports_physical_fallback_warnings_through_cli_and_mcp` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `rootless_planning_and_readonly_mixed_preview_through_cli_mcp` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `mixed_expansion_claimed_wisp_completion_and_derived_finish_survive_restart` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `terminal_fixture_keeps_material_binding_and_uncommitted_worktree_state` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `frozen_existing_wisp_expansion_refuses_before_any_setup_through_cli_and_mcp` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `frozen_run_root_material_and_wisps_match_ready_vs_acquire_in_cli_and_mcp` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `run_start_lookup_errors_and_reference_forms_match_cli_and_mcp_without_invalid_writes` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `membership_validates_all_references_before_setup_with_cli_mcp_lookup_parity` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `frozen_target_expansion_is_lifecycle_conflict_while_preview_stays_read_only` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `fresh_template_only_clone_previews_without_writes_and_expands_materials_in_cli_and_mcp` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `wisp_update_returns_actual_previous_inode_and_noop_has_no_recovery_in_cli_and_mcp` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
-| `tests/run_execution.rs` | `expansion_refuses_missing_bound_source_without_recreating_its_catalog` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
 | `tests/selection.rs` | `filters_share_full_graph_exact_labels_and_cli_mcp_ordering` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |
 | `tests/selection.rs` | `all_priority_levels_then_canonical_ids_and_empty_do_not_create_setup` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |
 | `tests/selection.rs` | `reference_errors_and_checkout_run_rejection_match_transports` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |

@@ -14,6 +14,14 @@ pub(super) const OPERATIONS: &[&str] = &[
     "discover",
     "init",
     "status",
+    "run_start",
+    "run_inherit",
+    "run_list",
+    "run_inspect",
+    "template_list",
+    "template_validate",
+    "template_preview",
+    "template_expand",
     "scope_list",
     "scope_inspect",
     "scope_host",
@@ -138,6 +146,9 @@ pub(super) fn call(name: &str, input: &Value) -> Result<Value> {
     let mutation = matches!(
         name,
         "init"
+            | "run_start"
+            | "run_inherit"
+            | "template_expand"
             | "scope_host"
             | "item_create"
             | "item_update"
@@ -182,6 +193,12 @@ pub(super) fn call(name: &str, input: &Value) -> Result<Value> {
         "scope_host" => ScopeOperations::new(p.clone(), false).host("host", input)?,
         "init" => work::core::onboarding::init(&p, input)?,
         "status" => work::core::onboarding::status(&p, input["view"] == "physical")?,
+        "run_start" => work::core::scope_runs::start(&p, input)?,
+        "run_inherit" => work::core::scope_runs::inherit(&p, input)?,
+        "run_inspect" | "run_list" => work::core::scope_runs::read(&p, name, input)?,
+        "template_list" | "template_validate" | "template_preview" | "template_expand" => {
+            work::core::scope_templates::call(&p, name, input)?
+        }
         _ => scope_items::call(&p, name, input)?,
     };
     let result = operation["output"]["$ref"]
@@ -219,7 +236,7 @@ fn text(s: &std::ffi::OsStr) -> Result<String> {
 }
 fn help() -> String {
     format!(
-        "Usage: work [--json] [--worktree PATH] COMMAND\nDelivered: discover; init; status; scope list|inspect|host; item create|list|inspect|diagnose|ready|update|close|reopen|repair; relation add|remove; mcp.\nReads default to authoritative primary/scope routing. --view physical is read-only.\nHosting requires an externally prepared identical destination and --expected-inventory HASH from scope inspect.\nInit prepares only the primary checkout, one standing root run and exact housekeeping ignores. Status is read-only infrastructure health, not item readiness or a running agent.\nIgnored recovery bytes may be needed; git clean -X can delete them. Inspect before cleanup.\nClose/reopen/repair support ordinary unclaimed material only. Ownership-aware completion/repair and attached handoffs are not delivered. Template operations, child runs, rotation and downstream lifecycles are not delivered.\nOnly the listed operation subset is implemented here. The complete beta.2 catalog, lifecycle and package gates are not claimed.\nitem COMMAND: material operations; create assigns a generated full ID. Ready reserves nothing and excludes claimed items.\nrelation add: parent is child to parent; depends_on is dependent to prerequisite; related and discovered_from are informational.\nmcp: MCP tools over stdio.\nF (selection): --scope S, --root ITEM, --run ID, repeated --label TEXT, --priority-max 0..4, --persistence material|wisp.\nM (metadata): --completion manual|children, --priority 0..4, --parent ITEM, repeated --label TEXT, --model TEXT, --thinking TEXT.\nC (clear): --clear-parent, --clear-labels, --clear-model, --clear-thinking.\nO (owner): --session SELECTOR [--claim ID], or --session-namespace TEXT --session-id TEXT --claim ID.\nZ (authorization): repeated --authorize JSON; cannot be combined with O.\n{}",
+        "Usage: work [--json] [--worktree PATH] COMMAND\nDelivered: discover; init; status; scope list|inspect|host; item create|list|inspect|diagnose|ready|update|close|reopen|repair; relation add|remove; run start|inherit|inspect|list; template list|validate|preview|expand; mcp.\nReads default to authoritative primary/scope routing. --view physical is read-only.\nHosting requires an externally prepared identical destination and --expected-inventory HASH from scope inspect.\nInit prepares only the primary checkout, one standing root run and exact housekeeping ignores. Status is read-only infrastructure health, not item readiness or a running agent.\nIgnored recovery bytes may be needed; git clean -X can delete them. Inspect before cleanup.\nClose/reopen support ordinary unclaimed material and current wisps; repair supports ordinary unclaimed material. Ownership-aware completion/repair and attached handoffs are not delivered. Templates and child start/inherit/inspect/list are delivered. Rotation/endings and downstream lifecycles are not delivered.\nOnly the listed operation subset is implemented here. The complete beta.2 catalog, lifecycle and package gates are not claimed.\nitem COMMAND: material operations; create assigns a generated full ID. Ready reserves nothing and excludes claimed items.\nrelation add: parent is child to parent; depends_on is dependent to prerequisite; related and discovered_from are informational.\nrun start ITEM: a material child boundary, never root initialization. --continue ID resumes that exact frozen start. Run inheritance never ends an active round.\ntemplate COMMAND NAME: v1/v2 selected-checkout definitions; repeated --param NAME=TEXT, --existing NAME=FULL_ID, optional --root ITEM, --scope SCOPE, --run ID. Preview allocates nothing/writes nothing; expansion publishes partial ordinary files, not a transaction.\nmcp: MCP tools over stdio.\nF (selection): --scope S, --root ITEM, --run ID, repeated --label TEXT, --priority-max 0..4, --persistence material|wisp.\nM (metadata): --completion manual|children, --priority 0..4, --parent ITEM, repeated --label TEXT, --model TEXT, --thinking TEXT.\nC (clear): --clear-parent, --clear-labels, --clear-model, --clear-thinking.\nO (owner): --session SELECTOR [--claim ID], or --session-namespace TEXT --session-id TEXT --claim ID.\nZ (authorization): repeated --authorize JSON; cannot be combined with O.\n{}",
         OPERATIONS
             .iter()
             .filter(|n| **n != "discover")
@@ -309,7 +326,9 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
         return Err(Error::new("usage", "unknown or undelivered command"));
     }
     let positional: &[&str] = match name.as_str() {
-        "scope_inspect" | "scope_host" => &["scope"],
+        "scope_inspect" | "scope_host" | "run_start" | "run_inherit" => &["scope"],
+        "run_inspect" => &["run_id"],
+        "template_validate" | "template_preview" | "template_expand" => &["name"],
         "item_inspect" | "item_update" | "item_close" | "item_reopen" | "item_repair" => &["id"],
         "relation_add" | "relation_remove" => &["kind", "source", "target"],
         _ => &[],
@@ -350,6 +369,33 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
         if flag == "--raw-hex" {
             return Err(Error::new("usage", "repair source uses --source -"));
         }
+        if matches!(flag.as_str(), "--param" | "--existing") && name.starts_with("template_") {
+            let field = if flag == "--param" {
+                "parameters"
+            } else {
+                "existing"
+            };
+            let raw = text(
+                args.get(at)
+                    .ok_or_else(|| Error::new("usage", "missing template binding"))?,
+            )?;
+            at += 1;
+            let (key, value) = raw.split_once('=').ok_or_else(|| {
+                Error::new("invalid_argument", "template binding requires NAME=TEXT")
+            })?;
+            wire::validate("TemplateIdentifier", &json!(key))?;
+            if field == "existing" {
+                wire::validate("ID", &json!(value))?;
+            }
+            if a.get(field).is_none() {
+                a[field] = json!({});
+            }
+            if a[field].get(key).is_some() {
+                return Err(Error::new("invalid_argument", "duplicate template binding"));
+            }
+            a[field][key] = json!(value);
+            continue;
+        }
         if matches!(flag.as_str(), "--session-namespace" | "--session-id") {
             if !singular.insert(flag.clone()) {
                 return Err(Error::new("invalid_argument", "duplicate identity field"));
@@ -368,6 +414,12 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
                 "id"
             }] = json!(value);
             continue;
+        }
+        if matches!(flag.as_str(), "--parameters" | "--existing") {
+            return Err(Error::new(
+                "usage",
+                "template values use repeated --param NAME=TEXT / --existing NAME=FULL_ID",
+            ));
         }
         if flag == "--identity" {
             return Err(Error::new(

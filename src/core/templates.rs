@@ -77,6 +77,7 @@ pub struct TemplateCatalog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateDefinition {
+    pub format_version: u8,
     pub name: String,
     pub parameters: Vec<String>,
     pub existing: Vec<String>,
@@ -212,7 +213,11 @@ impl TemplateCatalog {
     pub fn load_from_root(root: &Path) -> io::Result<Self> {
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let root_fd = openat(CWD, root, flags, Mode::empty()).map_err(io::Error::from)?;
-        let work_fd = openat(&root_fd, ".work", flags, Mode::empty()).map_err(io::Error::from)?;
+        let work_fd = match openat(&root_fd, ".work", flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(Self { files: Vec::new() }),
+            Err(e) => return Err(io::Error::from(e)),
+        };
         let templates_fd = match openat(&work_fd, "templates", flags, Mode::empty()) {
             Ok(fd) => fd,
             Err(rustix::io::Errno::NOENT) => return Ok(Self { files: Vec::new() }),
@@ -268,6 +273,27 @@ impl TemplateCatalog {
     }
 }
 
+pub(crate) fn decode_captured(name: &str, path: PathBuf, raw: &[u8]) -> TemplateFile {
+    let mut file = TemplateFile {
+        name: name.into(),
+        path: path.clone(),
+        definition: None,
+        diagnostics: Vec::new(),
+    };
+    let parsed = std::str::from_utf8(raw)
+        .map_err(|e| (None, e.to_string()))
+        .and_then(|s| {
+            if s.starts_with('\u{feff}') {
+                return Err((Some(1), "UTF-8 byte-order mark is forbidden".into()));
+            }
+            parse_yaml(s).and_then(|node| decode_template(node, name).map_err(|e| (None, e)))
+        });
+    match parsed {
+        Ok(d) => file.definition = Some(d),
+        Err((line, message)) => file.diagnostics.push(diagnostic(&path, line, message)),
+    }
+    file
+}
 fn identifier(value: &str) -> bool {
     let mut bytes = value.bytes();
     matches!(bytes.next(), Some(b'a'..=b'z'))
@@ -296,7 +322,11 @@ fn load_template(directory: &OwnedFd, base: PathBuf, name: &OsStr) -> TemplateFi
     let name_str = name.to_str().unwrap_or("");
     let stem = name_str.strip_suffix(".yaml").unwrap_or("");
     let mut file = TemplateFile {
-        name: stem.to_owned(),
+        name: if identifier(stem) {
+            stem.to_owned()
+        } else {
+            name.to_string_lossy().into_owned()
+        },
         path: path.clone(),
         definition: None,
         diagnostics: Vec::new(),
@@ -834,6 +864,7 @@ fn decode_template(node: Node, file_stem: &str) -> Result<TemplateDefinition, St
     items.sort_by(|a, b| a.key.cmp(&b.key));
     edges.sort();
     Ok(TemplateDefinition {
+        format_version: version as u8,
         name,
         parameters,
         existing,
@@ -1115,7 +1146,7 @@ fn endpoint(reference: &str, request: &PreviewRequest) -> PreviewEndpoint {
     }
 }
 
-fn prospective_files(
+pub(crate) fn prospective_files(
     items: &[PreviewItem],
     template_edges: &[TemplateEdge],
     template_path: &Path,
