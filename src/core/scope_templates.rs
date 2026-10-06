@@ -122,7 +122,7 @@ fn request(v: &View, a: &Value) -> Result<PreviewRequest> {
         existing: values("existing"),
     })
 }
-fn target(v: &View, a: &Value, expanding: bool) -> Result<Option<String>> {
+fn target(v: &View, a: &Value, require_active: bool) -> Result<Option<String>> {
     let scope = a["scope"].as_str().map(|s| v.scope_id(s)).transpose()?;
     let (inherited, state) = v.effective_run(scope.as_deref().unwrap_or("root"));
     let rid = a["run_id"]
@@ -138,7 +138,7 @@ fn target(v: &View, a: &Value, expanding: bool) -> Result<Option<String>> {
             ));
         }
     }
-    if expanding && (a.get("run_id").is_some() || a.get("scope").is_some()) {
+    if require_active {
         if let Some(rid) = &rid {
             runs::active(v, rid)?;
         } else if state != "active" {
@@ -167,11 +167,13 @@ fn plan(v: &mut View, catalog: &TemplateCatalog, a: &Value, expanding: bool) -> 
     let preview = catalog
         .preview(name, &request, &v.store)
         .map_err(template_error)?;
-    let run = target(v, a, expanding)?;
     let wisps = preview
         .items
         .iter()
         .any(|i| i.persistence == Persistence::Wisp);
+    // Scope selection alone is not an execution request for material planning.
+    // Explicit runs still require current execution and selector agreement.
+    let run = target(v, a, expanding && (wisps || a["run_id"].is_string()))?;
     if expanding && wisps && run.is_none() {
         return Err(Error::new(
             "coordination_unavailable",

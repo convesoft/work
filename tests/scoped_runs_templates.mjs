@@ -16,6 +16,52 @@ for(const version of [1,2]) test(`v${version}: material-only selected definition
  const out=await m.good('template_expand',{name:'plan',parameters:{text:'x={{again}}=z'}});assert.equal(out.items.length,2);assert.equal(out.run_id,null);assert.equal(fs.existsSync(path.join(f.primary,'.work/scopes')),false);assert.equal(fs.existsSync(path.join(f.primary,'.gitignore')),false);const b=success(f.primary,'item','inspect',out.items[1].id).item;assert.deepEqual(b.depends_on,[out.items[0].id]);assert.equal(b.body,'x={{again}}=z\nlast');assert.deepEqual(artifacts(f.root),[]);
  }finally {if(m)await m.close();f.close();}
 });
+for(const transport of ['CLI','MCP']) test(`${transport}: explicit root scope permits material-only expansion before init and refuses wisp/mixed writes`,async()=>{
+ const f=new Fixture();let m;try {
+  definition(f,'material',[{key:'m',title:'Material'}]);
+  definition(f,'wisp',[{key:'w',title:'Wisp',persistence:'wisp'}]);
+  definition(f,'mixed',[{key:'m',title:'Material'},{key:'w',title:'Wisp',persistence:'wisp'}],[{from:'local:w',kind:'parent',to:'local:m'}]);
+  if(transport==='MCP'){m=new MCP(f.primary);await m.init();}
+  const before=fingerprint(f.root), args={name:'material',scope:'root'};
+  const preview=m?await m.good('template_preview',args):success(f.primary,'template','preview','material','--scope','root');
+  assert.equal(preview.placement_validated,true);assert.equal(preview.execution.state,'uninitialized');assert.deepEqual(fingerprint(f.root),before);
+  for(const name of ['wisp','mixed']){if(m)await m.bad('template_expand',{name,scope:'root'},'coordination_unavailable');else fail(f.primary,'coordination_unavailable','template','expand',name,'--scope','root');assert.deepEqual(fingerprint(f.root),before);}
+  const missing='aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa';
+  if(m){await m.bad('template_expand',{...args,scope:missing},'not_found');await m.bad('template_expand',{...args,run_id:missing},'not_found');}
+  else {fail(f.primary,'not_found','template','expand','material','--scope',missing);fail(f.primary,'not_found','template','expand','material','--scope','root','--run',missing);}
+  assert.deepEqual(fingerprint(f.root),before);
+  const out=m?await m.good('template_expand',args):success(f.primary,'template','expand','material','--scope','root');
+  assert.equal(out.run_id,null);assert.equal(out.items.length,1);assert.equal(out.items[0].path,itemPath(f.primary,out.items[0].id));
+  const item=success(f.primary,'item','inspect',out.items[0].id).item;assert.equal(item.parent,null);assert.equal(item.context.execution_state,'uninitialized');
+  const added=fingerprint(f.root).filter(([p])=>!before.some(([old])=>old===p));assert.deepEqual(added.map(([p])=>p),['primary/.git/work-beta2','primary/.git/work-beta2/coordination.lock','primary/.work/items',path.relative(f.root,out.items[0].path),'primary/.work/operations.lock']);
+  for(const lock of ['.git/work-beta2/coordination.lock','.work/operations.lock'])assert.equal(fs.readFileSync(path.join(f.primary,lock)).length,0);
+  assert.deepEqual(fingerprint(f.root).filter(([p])=>before.some(([old])=>old===p)),before);
+  assert.equal(fs.existsSync(path.join(f.primary,'.work/scopes')),false);assert.equal(fs.existsSync(path.join(f.primary,'.work/refs')),false);assert.equal(fs.existsSync(path.join(f.primary,'.gitignore')),false);assert.deepEqual(artifacts(f.root),[]);
+ }finally{if(m)await m.close();f.close();}
+});
+for(const transport of ['CLI','MCP']) test(`${transport}: ended child permits material-only expansion without reopening execution and retains selector/wisp guards`,async()=>{
+ const f=new Fixture();let m;try {
+  const root=rootRun(f),scope=f.create('Child'),run=start(f,scope);
+  definition(f,'material',[{key:'m',title:'Material'}],[{from:'local:m',kind:'parent',to:'root'}]);
+  definition(f,'wisp',[{key:'w',title:'Wisp',persistence:'wisp'}],[{from:'local:w',kind:'parent',to:'root'}]);
+  definition(f,'mixed',[{key:'m',title:'Material'},{key:'w',title:'Wisp',persistence:'wisp'}],[{from:'local:m',kind:'parent',to:'root'},{from:'local:w',kind:'parent',to:'local:m'}]);
+  terminal(f,scope,run); // Prepared abandoned record exercises a guard, not a public ending API.
+  if(transport==='MCP'){m=new MCP(f.primary);await m.init();}
+  const before=fingerprint(f.root),args={name:'material',scope,root:scope};
+  const preview=m?await m.good('template_preview',args):success(f.primary,'template','preview','material','--scope',scope,'--root',scope);
+  assert.equal(preview.placement_validated,true);assert.deepEqual(fingerprint(f.root),before);
+  for(const name of ['wisp','mixed']){if(m)await m.bad('template_expand',{...args,name},'run_not_current');else fail(f.primary,'run_not_current','template','expand',name,'--scope',scope,'--root',scope);assert.deepEqual(fingerprint(f.root),before);}
+  if(m){await m.bad('template_expand',{...args,run_id:run},'run_not_current');await m.bad('template_expand',{...args,run_id:root},'invalid_argument');}
+  else {fail(f.primary,'run_not_current','template','expand','material','--scope',scope,'--root',scope,'--run',run);fail(f.primary,'invalid_argument','template','expand','material','--scope',scope,'--root',scope,'--run',root);}
+  assert.deepEqual(fingerprint(f.root),before);
+  const out=m?await m.good('template_expand',args):success(f.primary,'template','expand','material','--scope',scope,'--root',scope);
+  assert.equal(out.run_id,null);assert.equal(out.items.length,1);assert.equal(out.items[0].path,itemPath(f.primary,out.items[0].id));
+  const item=success(f.primary,'item','inspect',out.items[0].id).item;assert.equal(item.parent,scope);assert.equal(item.context.execution_state,'ended');assert.equal(item.context.effective_run_id,run);
+  const added=fingerprint(f.root).filter(([p])=>!before.some(([old])=>old===p));assert.deepEqual(added.map(([p])=>p),[path.relative(f.root,out.items[0].path)]);
+  assert.deepEqual(fingerprint(f.root).filter(([p])=>p!==path.relative(f.root,out.items[0].path)),before);
+  assert.equal(success(f.primary,'run','inspect',run).run.current,false);assert.deepEqual(artifacts(f.root),[]);
+ }finally{if(m)await m.close();f.close();}
+});
 test('standing root parentless wisps and child ancestry are explicit; root/member completion stays independent',async()=>{
  const f=new Fixture();let m;try {const root=rootRun(f);definition(f,'wisp',[{key:'a',title:'Wisp',persistence:'wisp'}]);let out=success(f.primary,'template','expand','wisp');assert.equal(out.run_id,root);const w=out.items[0].id;assert.equal(success(f.primary,'item','inspect',w).item.parent,null);
  const scope=f.create('feature');const child=start(f,scope);const before=fingerprint(f.root);fail(f.primary,'wisp_run_mismatch','template','expand','wisp','--run',child);assert.deepEqual(fingerprint(f.root),before);
