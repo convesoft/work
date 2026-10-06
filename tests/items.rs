@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,9 +58,30 @@ fn loads_isolated_copy_of_real_bootstrap_items_without_changing_bytes() {
         fixture.write(name.to_str().unwrap(), &raw);
         originals.push((name, raw));
     }
+    // Reserved publication artifacts may coexist with the live backlog. Keep
+    // their bytes in the fixture, but never count them as item candidates.
+    for (name, raw) in [
+        (
+            ".operation-bootstrap-copy.md",
+            item(ID, "", "retained recovery bytes"),
+        ),
+        (
+            ".stage-bootstrap-copy.md",
+            item(OTHER_ID, "", "retained staging bytes"),
+        ),
+    ] {
+        fixture.write(name, &raw);
+        originals.push((name.into(), raw.into_bytes()));
+    }
+    let expected_candidates = originals
+        .iter()
+        .filter(|(name, _)| {
+            !name.as_bytes().starts_with(b".operation-") && !name.as_bytes().starts_with(b".stage-")
+        })
+        .count();
     let store = fixture.load();
     assert!(store.is_valid(), "{}", errors(&store));
-    assert_eq!(store.files.len(), originals.len());
+    assert_eq!(store.files.len(), expected_candidates);
     assert!(!store.files.is_empty());
     for file in &store.files {
         let header = file.header.as_ref().unwrap();
