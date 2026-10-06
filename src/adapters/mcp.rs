@@ -31,7 +31,7 @@ fn handle(request: Value, initialized: &mut bool) -> Option<Value> {
         "ping" => json!({}),
         _ if !*initialized => return Some(rpc_error(id, -32000, "Initialize first")),
         "tools/list" => {
-            json!({"tools":cli::OPERATIONS.iter().map(|name|json!({"name":name,"description":"Delivered beta.2 hosting/material operation; no execution initialization on reads","inputSchema":cli::schema(name),"outputSchema":cli::output_schema(name)})).collect::<Vec<_>>()})
+            json!({"tools":cli::OPERATIONS.iter().map(|name|json!({"name":name,"description":"Delivered beta.2 initialization/hosting/material operation; reads never initialize execution; item_ready does not claim; related/discovered_from are informational","inputSchema":cli::schema(name),"outputSchema":cli::output_schema(name)})).collect::<Vec<_>>()})
         }
         "tools/call" => {
             let Some(name) = params["name"].as_str() else {

@@ -50,7 +50,7 @@ The beta.1 implementation aggregate and release item are complete. [Publication 
 
 ### Second beta: scope-owned execution
 
-The accepted `0.1.0-beta.2` redesign is recorded in [scope ownership](../docs/scopes.mara.md), [scoped execution](../docs/scoped-execution.mara.md), and [acceptance definitions](../docs/beta2-verification.mara.md). The published beta.1 binary does not implement it. This local scope implements only the verified 13-operation hosting/material-routing profile; initialization and downstream/combined acceptance remain pending. No beta.1 execution migration or compatibility layer is required; old delivery/history records remain intact.
+The accepted `0.1.0-beta.2` redesign is recorded in [scope ownership](../docs/scopes.mara.md), [scoped execution](../docs/scoped-execution.mara.md), and [acceptance definitions](../docs/beta2-verification.mara.md). The published beta.1 binary does not implement it. This local scope's integrated baseline implements the verified 13-operation hosting/material-routing profile. The initialization issue branch adds an 18-operation subset including `init`/`status` and ordinary material close/reopen/repair; [the local-source guide](../docs/using-beta2-initialization.md) documents it. Initialization scope integration and downstream/combined acceptance remain pending. All template-specific operations, including pre-init material-only behavior, belong to runs/templates under the approved allocation. No beta.1 execution migration or compatibility layer is required; old delivery/history records remain intact.
 
 | Item | Purpose | Prerequisites |
 | --- | --- | --- |

@@ -564,7 +564,7 @@ fn non_utf8_storage_mutation_arguments_report_not_published_before_discovery() {
 }
 
 #[test]
-#[ignore = "PENDING 6bf6198a: beta.1 storage/template transport outside hosting profile; not hosting acceptance"]
+#[ignore = "PENDING 45f7bb7d: user-approved template allocation; pre-init planning remains required"]
 fn human_expansion_reports_key_ids_destinations_and_existing_updates() {
     let f = Fixture::new();
     let root = ok(f.call(&["item", "create", "--title", "Root"]))["item"]["id"]

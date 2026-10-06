@@ -175,6 +175,11 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .clone();
     let delivered = [
         "discover",
+        "init",
+        "status",
+        "item_close",
+        "item_reopen",
+        "item_repair",
         "scope_list",
         "scope_inspect",
         "scope_host",
@@ -509,7 +514,7 @@ fn explicit_worktree_selects_other_durable_view() {
 }
 
 #[test]
-#[ignore = "PENDING 6bf6198a: beta.1 storage/template transport outside hosting profile; not hosting acceptance"]
+#[ignore = "PENDING 45f7bb7d: user-approved template allocation; pre-init planning remains required"]
 fn template_preview_matches_cli_and_publishes_nothing() {
     let fixture = Fixture::new();
     let root = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
@@ -674,7 +679,7 @@ fn storage_mcp_validates_requests_before_selecting_a_checkout() {
 }
 
 #[test]
-#[ignore = "PENDING 6bf6198a: beta.1 storage/template transport outside hosting profile; not hosting acceptance"]
+#[ignore = "PENDING 45f7bb7d: user-approved template allocation; pre-init planning remains required"]
 fn template_preview_reports_physical_fallback_warnings_through_cli_and_mcp() {
     use work::core::{coordination::CoordinationGuard, project::discover};
     for case in ["fresh", "healthy", "missing_lock", "corrupt", "busy"] {

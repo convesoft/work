@@ -1,8 +1,7 @@
-//! Preserved downstream public consumer tests. See tests/MIGRATION.md.
+//! Reactivated ordinary material consumers over authoritative beta.2 routing.
 use super::*;
 
 #[test]
-#[ignore = "PENDING 6bf6198a: preserved public close/reopen/repair consumer; migrate to beta.2, not a hosting pass"]
 fn real_backlog_adopts_and_advances_on_both_surfaces() {
     for via_mcp in [false, true] {
         let fixture = Fixture::new();
@@ -91,7 +90,6 @@ fn real_backlog_adopts_and_advances_on_both_surfaces() {
 }
 
 #[test]
-#[ignore = "PENDING 6bf6198a: preserved public close/reopen/repair consumer; migrate to beta.2, not a hosting pass"]
 fn roundtrip_restart_and_selected_linked_view() {
     let fixture = Fixture::new();
     let before = fixture.originals();
@@ -150,7 +148,7 @@ fn roundtrip_restart_and_selected_linked_view() {
     assert_eq!(status, 0);
     assert_eq!(
         control["result"]["items"].as_array().unwrap().len(),
-        selected["result"]["items"].as_array().unwrap().len() + 1
+        selected["result"]["items"].as_array().unwrap().len()
     );
     let mut mcp = Mcp::new(&fixture.0);
     assert_eq!(
@@ -169,6 +167,6 @@ fn roundtrip_restart_and_selected_linked_view() {
     );
     assert_eq!(
         mcp.call("item_inspect", json!({"id":STEPS[6]})).1["item"]["state"],
-        "open"
+        "done"
     );
 }

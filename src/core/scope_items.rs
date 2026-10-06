@@ -437,11 +437,306 @@ fn authorize(v: &View, id: &str, a: &Value) -> Result<()> {
     }
     Ok(())
 }
+fn ordinary_completion_inputs(v: &View, a: &Value) -> Result<()> {
+    if a["handoffs"].as_array().is_some_and(|a| !a.is_empty()) {
+        return Err(Error::new(
+            "invalid_argument",
+            "attached completion handoffs are not delivered; use the downstream handoffs implementation",
+        ));
+    }
+    if a.get("session").is_some()
+        || a.get("identity").is_some()
+        || a.get("claim_id").is_some()
+        || a["authorization"].as_array().is_some_and(|a| !a.is_empty())
+    {
+        return Err(Error::new(
+            "invalid_argument",
+            "ownership-aware completion/repair is not delivered",
+        ));
+    }
+    if let Some(id) = a["id"].as_str()
+        && acquisition(v, id).is_some()
+    {
+        return Err(Error::new(
+            "claim_conflict",
+            "ordinary material completion/repair cannot end or mutate current ownership",
+        ));
+    }
+    Ok(())
+}
+// Material repair and ordinary tree edits must protect the same surviving
+// authoritative sources and execution contexts. Inspection's eligibility
+// masking must not hide a captured acquisition during repair preflight.
+fn validate_context_change(v: &View, prospective: &View) -> Result<()> {
+    for f in &prospective.store.files {
+        if f.path.parent().is_some_and(|p| p.ends_with(".work/items"))
+            && let Some(ch) = &f.header
+        {
+            let expected = prospective.source_host(&ch.id);
+            let original = v
+                .store
+                .files
+                .iter()
+                .find(|f| f.header.as_ref().is_some_and(|h| h.id == ch.id));
+            if original.is_some_and(|f| {
+                expected.as_ref().is_some_and(|root| {
+                    f.path
+                        .ancestors()
+                        .find(|p| p.file_name().is_some_and(|n| n == ".work"))
+                        .and_then(Path::parent)
+                        != Some(root.as_path())
+                })
+            }) {
+                return Err(Error::new(
+                    "conflict",
+                    "reparenting changes a surviving source host; transfer hosting first",
+                ));
+            }
+        }
+    }
+    let records = v.records();
+    for (p, record, _, rid) in &records {
+        if let Some(wisp) = record["wisp_id"].as_str()
+            && records.iter().any(|(p, m, _, r)| {
+                r == rid && p.file_name().is_some_and(|n| n == "run.yaml") && m["phase"] == "active"
+            })
+            && prospective.effective_run(wisp).0.as_deref() != Some(rid.as_str())
+        {
+            return Err(Error::new(
+                "wisp_run_mismatch",
+                "reparenting changes an active wisp owner context",
+            )
+            .at(p));
+        }
+    }
+    for f in &prospective.store.files {
+        if let Some(ch) = &f.header
+            && acquisition(v, &ch.id).is_some()
+            && v.effective_run(&ch.id) != prospective.effective_run(&ch.id)
+        {
+            return Err(Error::new(
+                "context_change_claimed",
+                "reparenting changes a current claim's context",
+            ));
+        }
+    }
+    Ok(())
+}
+fn repair(project: &super::project::Project, mut v: View, a: &Value) -> Result<Value> {
+    ordinary_completion_inputs(&v, a)?;
+    let id = a["id"].as_str().unwrap();
+    v.capture.recheck()?;
+    let material = v
+        .raw_material(id)
+        .map_err(|e| authority_error(&v, id).unwrap_or(e))?;
+    if material.files.is_empty()
+        && let Some(e) = authority_error(&v, id).or_else(|| catalog_read_error(&v))
+    {
+        return Err(e);
+    }
+    // raw_material already proves that every candidate has one authoritative
+    // checkout. Resolve that checkout before selecting canonical/old repair
+    // sources, including an interrupted filename repair's two-file pair.
+    let host = material
+        .files
+        .first()
+        .map(|f| {
+            f.path
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_owned()
+        })
+        .ok_or_else(|| Error::new("not_found", format!("item {id}")))?;
+    let ops = operations::DurableOperations::new(&host);
+    let source = ops.raw_source(&material, id)?.clone();
+    if source.header.as_ref().is_some_and(|h| h.id != id) {
+        return Err(Error::new(
+            "invalid_argument",
+            "repair cannot reinterpret a parsed immutable ID",
+        ));
+    }
+    operations::source_mode(&source)?;
+    let raw = a["raw_hex"]
+        .as_str()
+        .unwrap()
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+        .collect::<Vec<_>>();
+    let target = host.join(format!(".work/items/{id}.md"));
+    // A canonical-plus-misnamed pair continues a specific already-published
+    // repair. Reject different bytes before preparing either lock namespace;
+    // the writer repeats this same guard under the checkout lock.
+    if source.path != target
+        && let Some(canonical) = material.files.iter().find(|f| f.path == target)
+        && canonical.raw != raw
+    {
+        return Err(Error::new(
+            "conflict",
+            "retry source differs from the already published canonical item",
+        ));
+    }
+    let candidate = super::items::parse_candidate(target.clone(), raw.clone());
+    if !candidate.is_valid() || candidate.header.as_ref().is_none_or(|h| h.id != id) {
+        return Err(Error::new(
+            "invalid_argument",
+            "repair requires valid full source with the same immutable ID",
+        ));
+    }
+    let before = ItemGraph::from_store(&v.store);
+    if source.is_valid()
+        && !before.is_cycle_member(id)
+        && !before.diagnostics().iter().any(|d| d.path == source.path)
+    {
+        return Err(Error::new(
+            "invalid_argument",
+            "healthy source is not an explicit repair target",
+        ));
+    }
+    let mut files = v.store.files.clone();
+    files.retain(|f| {
+        f.path != source.path
+            && f.path != target
+            && !(f.header.as_ref().is_some_and(|h| h.id == id)
+                && f.path.starts_with(host.join(".work/items")))
+    });
+    files.push(candidate.clone());
+    let candidate_store = super::items::ItemStore::from_candidate_files(files);
+    let after = ItemGraph::from_store(&candidate_store);
+    let new = after
+        .diagnostics()
+        .iter()
+        .filter(|d| !before.diagnostics().contains(d))
+        .collect::<Vec<_>>();
+    if !new.is_empty() {
+        let mut e = Error::new("invalid_candidate", "repair introduces graph diagnostics");
+        e.details = json!({"diagnostics":new.iter().map(|d|diagnostic("invalid_candidate",&d.message,Some(&d.path),None)).collect::<Vec<_>>()});
+        return Err(e);
+    }
+    let prospective = super::scope_tree::prospective(&v, &candidate_store, &[]);
+    validate_context_change(&v, &prospective)?;
+    if prospective.source_host(id).as_ref() != Some(&host) {
+        return Err(Error::new(
+            "conflict",
+            "repair would change material authority; transfer hosting separately",
+        ));
+    }
+    if !super::scope_tree::changes(&mut v, &candidate_store)?.is_empty() {
+        return Err(Error::new(
+            "conflict",
+            "repair would change stored scope references; use the explicit tree operation",
+        ));
+    }
+    let candidate_tree_diagnostics = prospective.material_tree_diagnostics();
+    let mut infrastructure = v.clone();
+    infrastructure.diagnostics.retain(|d| {
+        // Discharge only this target's material-root diagnostic when the
+        // candidate actually satisfies the stored tree. Execution/declaration
+        // uncertainty, other boundaries and changed references still refuse.
+        let restored_material_boundary = d["scope_id"] == id
+            && d["message"] == "stored boundary lacks material root"
+            && !candidate_tree_diagnostics.contains(d);
+        let diagnosed_same_host_candidate = d["scope_id"] == id
+            && matches!(
+                d["message"].as_str(),
+                Some(
+                    "conflicting material ancestry candidates"
+                        | "cannot resolve whole authoritative material source"
+                )
+            );
+        !restored_material_boundary
+            && !diagnosed_same_host_candidate
+            && !d["path"].as_str().is_some_and(|p| {
+                v.store
+                    .files
+                    .iter()
+                    .any(|f| path(&f.path) == p && !v.is_wisp(f))
+            })
+    });
+    // Explicit repair tolerates existing material graph diagnostics only. It
+    // cannot acknowledge away execution, declaration or acquisition damage.
+    infrastructure.store = super::items::ItemStore::from_candidate_files(vec![]);
+    infrastructure.require_healthy()?;
+    if acquisition(&v, id).is_some() {
+        return Err(Error::new(
+            "claim_conflict",
+            "repair source is currently claimed",
+        ));
+    }
+    CheckoutGuard::preflight_repair(&host)?;
+    v.capture.recheck()?;
+    let guard = coordination(&v, true, true)?.unwrap();
+    let locked = View::load(project, false)?;
+    v.capture.compare_prelock(&locked.capture)?;
+    guard.verify()?;
+    drop(CheckoutGuard::open(&host)?);
+    let prepared = View::load(project, false)?;
+    locked.capture.compare_prelock(&prepared.capture)?;
+    let locked = prepared;
+    let local = locked
+        .physical
+        .iter()
+        .find(|p| p.checkout.root == host)
+        .unwrap()
+        .material
+        .clone();
+    let operation = operations::DurableOperations::new(&host);
+    let recheck = || {
+        guard
+            .verify()
+            .map_err(|e| OperationError::Conflict(e.to_string()))?;
+        locked
+            .capture
+            .recheck_except_material(&host)
+            .map_err(|e| OperationError::Conflict(e.to_string()))
+    };
+    let repaired = operation.repair_guarded(
+        id,
+        raw,
+        (Some(&locked.store), Some(&local)),
+        recheck,
+        recheck,
+    )?;
+    let result = (|| -> Result<Value> {
+        recheck()?;
+        let final_view = View::load(project, false)?;
+        guard.verify()?;
+        final_view.capture.recheck()?;
+        recheck()?;
+        let source = json!({"id":id,"path":path(&repaired.file.path),"raw_hex":repaired.file.raw.iter().map(|b|format!("{b:02x}")).collect::<String>(),"diagnostics":repaired.file.diagnostics.iter().map(|d|diagnostic("invalid_source",&d.message,Some(&d.path),None)).collect::<Vec<_>>(),"graph_diagnostics":graph_diagnostics(&final_view),"recovery_path":repaired.recovery_path.as_deref().map(path),"additional_recovery_paths":repaired.additional_recovery_paths.iter().map(|p|path(p)).collect::<Vec<_>>()});
+        let mut known = partial();
+        known["updated"] = json!([{"id":id,"path":path(&target)}]);
+        Ok(final_view.wrap(json!({"source":source,"changed":true,"partial":known})))
+    })();
+    result.map_err(|mut e| {
+        e.details["publication"] = json!("published");
+        e.details["published_item"] = json!({"id":id,"path":path(&target)});
+        let mut known = partial();
+        known["updated"] = json!([{"id":id,"path":path(&target)}]);
+        e.details["partial"] = known;
+        if let Some(p) = repaired.recovery_path {
+            e.details["previous_source_path"] = json!(path(&p));
+            e.details["recovery_paths"] = json!([path(&p)]);
+        }
+        e
+    })
+}
+
 pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<Value> {
     let physical = a["view"] == "physical";
     let mutation = matches!(
         name,
-        "item_create" | "item_update" | "relation_add" | "relation_remove"
+        "item_create"
+            | "item_update"
+            | "item_close"
+            | "item_reopen"
+            | "item_repair"
+            | "relation_add"
+            | "relation_remove"
     );
     if mutation && physical {
         return Err(Error::new(
@@ -622,6 +917,12 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
         }
         return Ok(wrapped);
     }
+    if name == "item_repair" {
+        return repair(project, v, a);
+    }
+    if matches!(name, "item_close" | "item_reopen") {
+        ordinary_completion_inputs(&v, a)?;
+    }
     // Planning is initially unlocked. Reject an inconsistent captured catalog
     // before lookup/candidate errors can misreport a cooperating source change.
     v.capture.recheck()?;
@@ -758,6 +1059,23 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
                 return Err(Error::new("not_found", "relationship absent"));
             }
         }
+    } else if matches!(name, "item_close" | "item_reopen") {
+        if h.completion != Completion::Manual {
+            return Err(Error::new(
+                "invalid_argument",
+                "aggregate completion is derived; only manual items can close or reopen",
+            ));
+        }
+        h.state = Some(if name == "item_close" {
+            ManualState::Done
+        } else {
+            ManualState::Open
+        });
+        h.close_reason = if name == "item_close" {
+            a["reason"].as_str().map(str::to_owned)
+        } else {
+            None
+        };
     } else {
         h = operations::apply_change(h, metadata(&v, a)?);
     }
@@ -782,68 +1100,8 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
         .and_then(|h| h.parent.clone());
     let tree_references = super::scope_tree::changes(&mut v, &candidate)?;
     if before_parent != h.parent {
-        let old_store = v.store.clone();
         let prospective = super::scope_tree::prospective(&v, &candidate, &tree_references);
-        v.store = candidate.clone();
-        for f in &v.store.files {
-            if f.path.parent().is_some_and(|p| p.ends_with(".work/items"))
-                && let Some(ch) = &f.header
-            {
-                let expected = prospective.source_host(&ch.id);
-                let original = old_store
-                    .files
-                    .iter()
-                    .find(|f| f.header.as_ref().is_some_and(|h| h.id == ch.id));
-                if original.is_some_and(|f| {
-                    expected.as_ref().is_some_and(|root| {
-                        f.path
-                            .ancestors()
-                            .find(|p| p.file_name().is_some_and(|n| n == ".work"))
-                            .and_then(Path::parent)
-                            != Some(root.as_path())
-                    })
-                }) {
-                    return Err(Error::new(
-                        "conflict",
-                        "reparenting changes a surviving source host; transfer hosting first",
-                    ));
-                }
-            }
-        }
-        for (p, record, _, rid) in v.records() {
-            if let Some(wisp) = record["wisp_id"].as_str()
-                && v.records().iter().any(|(p, m, _, r)| {
-                    r == &rid
-                        && p.file_name().is_some_and(|n| n == "run.yaml")
-                        && m["phase"] == "active"
-                })
-                && prospective.effective_run(wisp).0.as_deref() != Some(&rid)
-            {
-                return Err(Error::new(
-                    "wisp_run_mismatch",
-                    "reparenting changes an active wisp owner context",
-                )
-                .at(&p));
-            }
-        }
-        let affected = v.store.files.clone();
-        for f in &affected {
-            if let Some(ch) = &f.header
-                && claim(&v, &ch.id).is_some()
-            {
-                let after = prospective.effective_run(&ch.id);
-                v.store = old_store.clone();
-                let before = v.effective_run(&ch.id);
-                v.store = candidate.clone();
-                if before != after {
-                    return Err(Error::new(
-                        "context_change_claimed",
-                        "reparenting changes a current claim's context",
-                    ));
-                }
-            }
-        }
-        v.store = old_store;
+        validate_context_change(&v, &prospective)?;
     }
     v.capture.recheck()?;
     let guard = coordination(&v, true, true)?.unwrap();
@@ -881,12 +1139,37 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
     } else {
         None
     };
+    let recheck = || -> Result<()> {
+        guard.verify()?;
+        current.capture.recheck_except_material(&host)?;
+        writer.verify()?;
+        Ok(())
+    };
     let result = (|| -> Result<Value> {
+        recheck()?;
         let final_view = View::load(project, false)?;
         final_view.require_healthy()?;
         final_view.capture.recheck()?;
-        guard.verify()?;
-        Ok(final_view.wrap(json!({"item":item(&final_view,&id,recovery.as_deref())?,"changed":changed,"partial":partial()})))
+        recheck()?;
+        let mut inspected = item(&final_view, &id, recovery.as_deref())?;
+        let mut surviving = recovery.clone();
+        if matches!(name, "item_close" | "item_reopen")
+            && let Some(p) = surviving.as_ref()
+        {
+            writer.cleanup_displaced(p, old.as_ref().unwrap(), || {
+                recheck().map_err(|e| OperationError::Conflict(e.to_string()))
+            })?;
+            surviving = None;
+        }
+        recheck()?;
+        final_view.capture.recheck()?;
+        inspected["recovery_path"] = json!(surviving.as_deref().map(path));
+        let mut out = json!({"item":inspected,"changed":changed,"partial":partial()});
+        if name == "item_close" {
+            out["saved_handoffs"] = json!([]);
+            out["ending"] = Value::Null;
+        }
+        Ok(final_view.wrap(out))
     })();
     result.map_err(|mut e| {
         if changed {
@@ -896,8 +1179,11 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
             e.details["partial"] = known;
             e.details["published_item"] = entry;
             e.details["publication"] = json!("published");
-            if let Some(p) = &recovery {
+            if let Some(p) = &recovery
+                && std::fs::symlink_metadata(p).is_ok()
+            {
                 e.details["previous_source_path"] = json!(path(p));
+                e.details["recovery_paths"] = json!([path(p)]);
             }
         }
         e

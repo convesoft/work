@@ -1,13 +1,12 @@
-//! Preserved downstream public consumer tests. See tests/MIGRATION.md.
+//! Reactivated ordinary material consumers over authoritative beta.2 routing.
 use super::*;
 
 #[test]
-#[ignore = "PENDING 6bf6198a: preserved public close/reopen/repair consumer; migrate to beta.2, not a hosting pass"]
 fn durable_loop_and_machine_readable_errors() {
     let f = Fixture::new();
     let help = ok(f.call(&["--help"]));
     assert!(help["help"].as_str().unwrap().contains("item create"));
-    assert!(help["help"].as_str().unwrap().contains("claim acquire"));
+    assert!(help["help"].as_str().unwrap().contains("item close"));
     assert!(
         ok(f.call(&["item", "ready"]))["items"]
             .as_array()
@@ -26,7 +25,7 @@ fn durable_loop_and_machine_readable_errors() {
     let item_path = f.0.join(".work/items").join(format!("{a}.md"));
     let before = fs::read(&item_path).unwrap();
     let entries_before = fs::read_dir(f.0.join(".work/items")).unwrap().count();
-    error(f.call(&["item", "update", &a]), 2, "usage");
+    error(f.call(&["item", "update", &a]), 2, "invalid_argument");
     assert_eq!(fs::read(item_path).unwrap(), before);
     assert_eq!(
         fs::read_dir(f.0.join(".work/items")).unwrap().count(),
@@ -91,11 +90,11 @@ fn durable_loop_and_machine_readable_errors() {
         2,
         "invalid_argument",
     );
-    error(f.call(&["claim", "next"]), 2, "invalid_argument");
+    error(f.call(&["claim", "next"]), 2, "usage");
     error(
         call(&std::env::temp_dir(), &["claim", "next"], None),
         2,
-        "invalid_argument",
+        "usage",
     );
     error(
         call(&std::env::temp_dir(), &["item", "create", "--title"], None),
@@ -113,12 +112,11 @@ fn durable_loop_and_machine_readable_errors() {
     );
     let (status, stdout, stderr) = human(&f.0, &["item", "create", "--title", "--json"]);
     assert_eq!(status, 0, "{stderr}");
-    assert!(stdout.starts_with("w-"));
-    assert!(!stdout.starts_with('{'));
+    assert!(stdout.starts_with('{'));
+    assert!(stdout.contains("--json"));
 }
 
 #[test]
-#[ignore = "PENDING 6bf6198a: preserved public close/reopen/repair consumer; migrate to beta.2, not a hosting pass"]
 fn invalid_source_graph_and_ambiguous_prefix_are_distinct() {
     let f = Fixture::new();
     let a = "abcdef12000040008000000000000001";

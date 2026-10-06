@@ -1,8 +1,7 @@
-//! Preserved downstream public consumer tests. See tests/MIGRATION.md.
+//! Reactivated ordinary material consumers over authoritative beta.2 routing.
 use super::*;
 
 #[test]
-#[ignore = "PENDING 6bf6198a: preserved public close/reopen/repair consumer; migrate to beta.2, not a hosting pass"]
 fn protocol_client_runs_durable_loop_and_matches_cli_results() {
     let f = Fixture::new();
     let mut client = Client::new(&f.0);
@@ -10,54 +9,33 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 51);
-    let selection = [
-        "root",
-        "run_id",
-        "labels_all",
-        "priority_max",
-        "persistence",
-    ];
-    let next = tools.iter().find(|t| t["name"] == "claim_next").unwrap();
-    for name in ["item_list", "item_ready"] {
-        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
-        for field in selection {
-            assert_eq!(
-                tool["inputSchema"]["properties"][field],
-                next["inputSchema"]["properties"][field]
-            );
-        }
-    }
-    for name in [
+    let expected = [
+        "discover",
+        "init",
+        "status",
+        "scope_list",
+        "scope_inspect",
+        "scope_host",
         "item_create",
+        "item_list",
+        "item_inspect",
+        "item_inspect_raw",
+        "item_diagnose",
         "item_ready",
-        "relation_add",
+        "item_update",
         "item_close",
+        "item_reopen",
         "item_repair",
-        "template_list",
-        "template_validate",
-        "template_preview",
-    ] {
-        assert!(tools.iter().any(|tool| tool["name"] == name));
+        "relation_add",
+        "relation_remove",
+    ];
+    assert_eq!(tools.len(), expected.len());
+    for name in expected {
+        assert!(tools.iter().any(|t| t["name"] == name));
     }
-    assert!(
-        tools
-            .iter()
-            .find(|tool| tool["name"] == "item_ready")
-            .unwrap()["description"]
-            .as_str()
-            .unwrap()
-            .contains("does not claim")
-    );
-    assert!(
-        tools
-            .iter()
-            .find(|tool| tool["name"] == "relation_add")
-            .unwrap()["description"]
-            .as_str()
-            .unwrap()
-            .contains("informational")
-    );
+    for name in ["template_list", "claim_acquire", "run_start"] {
+        assert!(!tools.iter().any(|t| t["name"] == name));
+    }
     assert_eq!(
         client.ok("item_ready", json!({"worktree":f.0}))["items"],
         json!([])
@@ -126,7 +104,6 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
 }
 
 #[test]
-#[ignore = "PENDING 6bf6198a: preserved public close/reopen/repair consumer; migrate to beta.2, not a hosting pass"]
 fn protocol_schema_rejects_null_wrong_types_and_source_errors() {
     let f = Fixture::new();
     let mut client = Client::new(&f.0);
@@ -200,7 +177,6 @@ fn protocol_schema_rejects_null_wrong_types_and_source_errors() {
 }
 
 #[test]
-#[ignore = "PENDING 6bf6198a: preserved public close/reopen/repair consumer; migrate to beta.2, not a hosting pass"]
 fn equivalent_cli_and_mcp_mutations_publish_identical_sources() {
     let cli_fixture = Fixture::new();
     let mcp_fixture = Fixture::new();

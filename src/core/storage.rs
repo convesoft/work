@@ -134,7 +134,11 @@ pub struct StorageError {
     pub errno: Option<i32>,
 }
 impl StorageError {
-    fn new(code: StorageErrorCode, message: impl Into<String>, path: Option<PathBuf>) -> Self {
+    pub(crate) fn new(
+        code: StorageErrorCode,
+        message: impl Into<String>,
+        path: Option<PathBuf>,
+    ) -> Self {
         Self {
             code,
             message: message.into(),

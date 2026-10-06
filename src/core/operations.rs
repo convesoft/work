@@ -217,14 +217,37 @@ impl DurableOperations {
         raw: Vec<u8>,
         after_canonical_publish: impl FnOnce() -> Result<(), OperationError>,
     ) -> Result<RawInspection, OperationError> {
+        self.repair_guarded(id, raw, (None, None), || Ok(()), after_canonical_publish)
+    }
+
+    pub(crate) fn repair_guarded(
+        &self,
+        id: &str,
+        raw: Vec<u8>,
+        context: (Option<&ItemStore>, Option<&ItemStore>),
+        before_publish: impl Fn() -> Result<(), OperationError>,
+        after_canonical_publish: impl FnOnce() -> Result<(), OperationError>,
+    ) -> Result<RawInspection, OperationError> {
         if !valid_id(id) {
             return Err(OperationError::InvalidArgument(
                 "item must be a full UUIDv4 ID".into(),
             ));
         }
+        before_publish()?;
+        let (graph_store, expected_local) = context;
         let lock = self.lock()?;
         let items = self.items_dir(&lock)?;
         let mut store = self.load_from_dir(&items)?;
+        if let Some(expected) = expected_local
+            && (expected.files.len() != store.files.len()
+                || expected.files.iter().zip(&store.files).any(|(a, b)| {
+                    a.path != b.path || a.raw != b.raw || a.fingerprint != b.fingerprint
+                }))
+        {
+            return Err(OperationError::Conflict(
+                "captured repair catalog changed acquiring the checkout lock".into(),
+            ));
+        }
         let mut shadow_recovery = None;
         let target = self.item_path(id);
         if let Some(canonical) = store
@@ -253,11 +276,11 @@ impl DurableOperations {
                             .join("; "),
                     ));
                 }
-                let mut files = store.files.clone();
+                let mut files = graph_store.unwrap_or(&store).files.clone();
                 files.retain(|file| file.path != target && file.path != misnamed.path);
                 files.push(candidate);
                 let after = ItemGraph::from_store(&ItemStore::from_candidate_files(files));
-                let before = ItemGraph::from_store(&store);
+                let before = ItemGraph::from_store(graph_store.unwrap_or(&store));
                 let new_diagnostics: Vec<_> = after
                     .diagnostics()
                     .iter()
@@ -268,6 +291,7 @@ impl DurableOperations {
                     return Err(OperationError::InvalidCandidate(new_diagnostics));
                 }
                 self.check_snapshot(&lock, &items, &store)?;
+                before_publish()?;
                 let recovery = self.archive_shadow(&lock, &items, misnamed)?;
                 store = self
                     .load_from_dir(&items)
@@ -275,7 +299,14 @@ impl DurableOperations {
                 shadow_recovery = Some(recovery);
             }
         }
-        let result = self.repair_loaded(&lock, &items, id, &raw, &store, after_canonical_publish);
+        let result = self.repair_loaded(
+            &lock,
+            &items,
+            (id, &raw),
+            &store,
+            (graph_store, &before_publish),
+            after_canonical_publish,
+        );
         match shadow_recovery {
             Some(recovery) => result
                 .map(|mut inspection| {
@@ -291,11 +322,13 @@ impl DurableOperations {
         &self,
         lock: &OperationLock,
         items: &OwnedFd,
-        id: &str,
-        raw: &[u8],
+        replacement: (&str, &[u8]),
         store: &ItemStore,
+        context: (Option<&ItemStore>, &dyn Fn() -> Result<(), OperationError>),
         after_canonical_publish: impl FnOnce() -> Result<(), OperationError>,
     ) -> Result<RawInspection, OperationError> {
+        let (id, raw) = replacement;
+        let (graph_store, before_publish) = context;
         let original = self.raw_source(store, id)?;
         if let Some(header) = &original.header
             && header.id != id
@@ -307,16 +340,21 @@ impl DurableOperations {
         }
         let target_path = self.item_path(id);
         if original.path != target_path && store.files.iter().any(|file| file.path == target_path) {
+            before_publish()?;
             return self.resume_filename_repair(
                 lock,
                 items,
                 id,
                 raw,
-                (store, original),
-                after_canonical_publish,
+                (store, original, graph_store),
+                || {
+                    before_publish()?;
+                    after_canonical_publish()
+                },
             );
         }
-        let graph_before = ItemGraph::from_store(store);
+        let graph_store = graph_store.unwrap_or(store);
+        let graph_before = ItemGraph::from_store(graph_store);
         if original.is_valid()
             && !graph_before.is_cycle_member(id)
             && !graph_before
@@ -340,9 +378,9 @@ impl DurableOperations {
             ));
         }
         let candidate_store = if original.path == target_path {
-            candidate_store(store, &target_path, raw.to_vec())?
+            candidate_store(graph_store, &target_path, raw.to_vec())?
         } else {
-            let mut view = store.clone();
+            let mut view = graph_store.clone();
             view.files.retain(|file| file.path != original.path);
             view.files.push(candidate.clone());
             ItemStore::from_candidate_files(view.files)
@@ -358,7 +396,10 @@ impl DurableOperations {
             return Err(OperationError::InvalidCandidate(new_diagnostics));
         }
         let staged = self.stage_with_mode(items, raw, Some(source_mode(original)?))?;
-        if let Err(error) = self.check_snapshot(lock, items, store) {
+        if let Err(error) = self
+            .check_snapshot(lock, items, store)
+            .and_then(|_| before_publish())
+        {
             remove_stage(items, &staged);
             return Err(error);
         }
@@ -966,10 +1007,10 @@ impl DurableOperations {
         items: &OwnedFd,
         id: &str,
         raw: &[u8],
-        source: (&ItemStore, &ItemFile),
+        source: (&ItemStore, &ItemFile, Option<&ItemStore>),
         before_archive: impl FnOnce() -> Result<(), OperationError>,
     ) -> Result<RawInspection, OperationError> {
-        let (store, old) = source;
+        let (store, old, graph_store) = source;
         let canonical = store
             .files
             .iter()
@@ -981,15 +1022,15 @@ impl DurableOperations {
             ));
         }
         (|| {
-            let before = ItemGraph::from_store(store);
-            let candidate = ItemStore::from_candidate_files(
-                store
-                    .files
-                    .iter()
-                    .filter(|file| file.path != old.path)
-                    .cloned()
-                    .collect(),
-            );
+            let graph_store = graph_store.unwrap_or(store);
+            let before = ItemGraph::from_store(graph_store);
+            let mut files = graph_store.files.iter()
+                .filter(|file| file.path != old.path && file.path != canonical.path)
+                .cloned().collect::<Vec<_>>();
+            // The authoritative resolver may withhold this ambiguous pair.
+            // Add the exact already-published canonical source explicitly.
+            files.push(canonical.clone());
+            let candidate = ItemStore::from_candidate_files(files);
             let new_diagnostics: Vec<_> = ItemGraph::from_store(&candidate)
                 .diagnostics()
                 .iter()
@@ -1489,7 +1530,7 @@ fn valid_id(value: &str) -> bool {
         && b[12] == b'4'
         && matches!(b[16], b'8' | b'9' | b'a' | b'b')
 }
-fn source_mode(file: &ItemFile) -> Result<u32, OperationError> {
+pub(crate) fn source_mode(file: &ItemFile) -> Result<u32, OperationError> {
     let fingerprint = file.fingerprint.as_ref().ok_or_else(|| {
         OperationError::Conflict(format!("could not snapshot item {}", file.path.display()))
     })?;
@@ -1599,6 +1640,39 @@ pub(crate) struct CheckoutGuard {
     lock: OperationLock,
 }
 impl CheckoutGuard {
+    /// A repair already has an existing source catalog. Check configuration
+    /// without creating locks/stages before bootstrapping repository coordination.
+    pub(crate) fn preflight_repair(root: &Path) -> Result<(), OperationError> {
+        use super::storage::files::Directory;
+        use super::storage::{StorageError, StorageErrorCode};
+        let storage = |e| OperationError::Storage(Box::new(e));
+        let work = Directory::open(root)
+            .map_err(storage)?
+            .child(".work")
+            .map_err(storage)?;
+        let lock = work.optional("operations.lock").map_err(storage)?;
+        let writable = |mode: u32, path: PathBuf| -> Result<(), OperationError> {
+            if mode & 0o200 == 0 {
+                return Err(OperationError::Storage(Box::new(StorageError::new(
+                    StorageErrorCode::PermissionDenied,
+                    "repair configuration lacks owner-write permission",
+                    Some(path),
+                ))));
+            }
+            Ok(())
+        };
+        if let Some(source) = lock {
+            // The durable repair writer opens this lock read/write.
+            writable(source.mode, work.path.join("operations.lock"))?;
+        } else {
+            writable(work.file.metadata()?.mode(), work.path.clone())?;
+        }
+        let items = work.child("items").map_err(storage)?;
+        writable(items.file.metadata()?.mode(), items.path.clone())?;
+        work.verify().map_err(storage)?;
+        items.verify().map_err(storage)?;
+        Ok(())
+    }
     pub(crate) fn open(root: &Path) -> Result<Self, OperationError> {
         let ops = DurableOperations::new(root);
         let common = super::storage::files::Directory::open(root)
@@ -1675,6 +1749,31 @@ impl CheckoutWriter {
             .map_err(|error| OperationError::Io(io::Error::other(error.to_string())))?;
         self.ops
             .check_snapshot(&self.lock, &self.items, &self.snapshot)
+    }
+    pub(crate) fn cleanup_displaced(
+        &self,
+        path: &Path,
+        expected: &ItemFile,
+        before_cleanup: impl FnOnce() -> Result<(), OperationError>,
+    ) -> Result<(), OperationError> {
+        self.verify()?;
+        if path.parent() != Some(self.ops.root.join(".work/items").as_path())
+            || !archive_matches(&self.items, expected, path)
+        {
+            return Err(OperationError::Conflict(
+                "displaced item source changed before cleanup".into(),
+            ));
+        }
+        before_cleanup()?;
+        self.verify()?;
+        rustix::fs::unlinkat(
+            &self.items,
+            path.file_name().unwrap(),
+            rustix::fs::AtFlags::empty(),
+        )
+        .map_err(io::Error::from)?;
+        self.ops.sync_items(&self.items)?;
+        self.verify()
     }
     pub(crate) fn publish(
         &mut self,

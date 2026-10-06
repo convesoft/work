@@ -1,6 +1,6 @@
 # Beta.2: scope ownership and routing
 
-This is accepted product direction for the planned `0.1.0-beta.2`, not implemented behavior or release evidence. [Scoped execution](scoped-execution.mara.md) defines the companion run/session/message contracts; [acceptance definitions](beta2-verification.mara.md) describe future checks. Historical beta.1 contracts retain their identities but are not requirements for beta.2 where explicitly superseded. The current executable and [usage guide](using-work.md) still describe beta.1.
+This is accepted product direction for the planned `0.1.0-beta.2`, not implemented behavior or release evidence. [Scoped execution](scoped-execution.mara.md) defines the companion run/session/message contracts; [acceptance definitions](beta2-verification.mara.md) describe future checks. Historical beta.1 contracts retain their identities but are not requirements for beta.2 where explicitly superseded. The published executable and [beta.1 usage guide](using-work.md) describe beta.1. The [local-source guide](using-beta2-initialization.md) documents the bounded hosting/initialization subset, not complete runtime delivery.
 
 ## Vocabulary and obligations
 

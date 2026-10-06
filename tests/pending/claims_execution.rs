@@ -1,8 +1,7 @@
-//! Preserved downstream public consumer tests. See tests/MIGRATION.md.
+//! Reactivated ordinary material consumers over authoritative beta.2 routing.
 use super::*;
 
 #[test]
-#[ignore = "PENDING 6bf6198a: preserved public close/reopen/repair consumer; migrate to beta.2, not a hosting pass"]
 fn actual_uninitialized_cli_completion_changes_use_original_durable_operation() {
     let f = Fixture::new();
     let id = f.item();

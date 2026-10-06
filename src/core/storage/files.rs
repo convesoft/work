@@ -457,7 +457,18 @@ impl Directory {
         if self.exists(stage_name)? {
             return Err(conflict(&stage_path, "publication stage already exists"));
         }
-        let (_held_stage, staged) = self.stage_open(stage_name, raw)?;
+        let (held_stage, mut staged) = self.stage_open(stage_name, raw)?;
+        if let Some(source) = expected {
+            fs::fchmod(&held_stage, Mode::from_bits_truncate(source.mode & 0o7777))
+                .map_err(|e| map(e, &stage_path))?;
+            held_stage
+                .sync_all()
+                .map_err(|e| StorageError::io(e, stage_path.clone()))?;
+            let metadata = held_stage
+                .metadata()
+                .map_err(|e| StorageError::io(e, stage_path.clone()))?;
+            staged = Source::metadata(raw.to_vec(), &metadata);
+        }
         if self.optional(name)?.as_ref() != expected {
             return Err(conflict(&path, "source changed while staging"));
         }

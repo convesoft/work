@@ -8,6 +8,7 @@ pub mod execution_handoffs;
 pub mod graph;
 pub mod handoffs;
 pub mod items;
+pub mod onboarding;
 pub mod operations;
 pub mod project;
 pub mod runs;

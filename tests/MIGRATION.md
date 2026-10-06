@@ -1,6 +1,6 @@
-# Test migration for the bounded hosting profile
+# Test migration for bounded hosting and initialization
 
-Owner: `7bbc0619ab46461fa0d5c3b42edbeef1`. This is delivery/test allocation,
+Owners: hosting `7bbc0619ab46461fa0d5c3b42edbeef1`; initialization `6bf6198a34494a94a30a9ba53ed976a6`. This is delivery/test allocation,
 not a change to the accepted beta.2 catalog or a claim that deferred consumers work.
 
 ## Active evidence
@@ -23,16 +23,14 @@ beta.2 initialization/acquisition/lifecycle acceptance.
 Mixed `bootstrap_adoption.rs`, `cli_json.rs`, `mcp_protocol.rs`,
 `claims_execution.rs`, `coordination.rs` and `storage.rs` suites retain
 active material/public-read, invalid-input, concurrency and safe-file cases.
-The original mixed public completion/repair loops are compiled in
-`tests/pending/`; their hosting portions also have active tests.
-Prepared external material state/healthy-source edits in active read tests
-prove graph derivation and persistent-server reloads, **not** close, reopen
-or repair implementations.
+Eight ordinary material consumer tests in `tests/pending/` are reactivated: CLI/MCP full lifecycle, malformed/immutable repair, authored-backlog closure, healthy-repair refusal, lookup errors and authority isolation. They now call actual ordinary material completion/repair, not external state substitution. The public `onboarding.rs` launcher additionally runs `onboarding.mjs` and `material_completion.mjs`: actual CLI/MCP initialization/status and authoritative material operations, including linked/detached primary layouts, unsupported separate-Git no-write refusal, ignore-byte variants, source modes, concurrent init, exact-ID continuation and refusal. Its Linux/x86_64 ptrace fixture kills/injects I/O errors at every observed preparation/write/sync/rename/removal boundary; it is not power-loss or all-host evidence. Prepared claim records prove refusal only. Test definitions in `tests/pending/` are not all ignored; inspect each attribute and actual run result.
+
+All template APIs, including pre-init material-only planning/expansion and empty reads, are assigned to runs/templates under the approved allocation. The base prepares directories and authoritative material publication but does not execute templates. Final connected/installed-package, all-writer cleanup and downstream lifecycle gates remain pending.
 
 ## Explicitly superseded assertions
 
 - The beta.1 51-tool inventory and claim/template/storage advertising are
-  replaced by an exact 13-tool hosting inventory. The complete frozen beta.2
+  replaced first by the 13-tool hosting inventory and now by the bounded 18-tool initialization/material inventory. The complete frozen beta.2
   catalog remains required at combined delivery.
 - Selecting a linked checkout no longer makes its physical material copies
   authoritative. Active tests check inherited primary routing and explicit,
@@ -67,6 +65,19 @@ migrate applicable source/ownership/publication safeguards, not those removed
 product workflows. The final adoption owner verifies the connected beta.2
 workflow. No downstream task is started or closed by this allocation.
 
+### Initialization safety counterparts for retained legacy storage spellings
+
+The still-compiled, ignored beta.1 storage/receipt tests below do not prescribe restoration of receipts, generations or `storage ...` commands. Their applicable safeguards now have real public beta.2 counterparts:
+
+| Retained legacy obligations | Active counterpart |
+| --- | --- |
+| Fresh reads/idempotence/shared caller initialization; persistent CLI/MCP reloading; private modes | `onboarding.mjs`: read-only status/negotiation; repeated/concurrent primary/linked init; real traced boundaries and restrictive umask |
+| Lost-lock expectations, complete/malformed receipt checks, at-most-one reset, completed receipt cannot replace lock | `onboarding.mjs`: lost coordination is unavailable/refuses; malformed progress stays visible; one root from concurrent callers; exact-ID continuation has no permanent receipt |
+| Invalid storage CLI/MCP inputs, duplicate selectors, non-UTF8 arguments, unknown operation kinds/prefixed entries | `onboarding.mjs`: argument validation before discovery/preparation, source-linked malformed pending records and no-write fingerprints; active CLI path/option grammar cases |
+| Receipt retained archives and prior loss | `onboarding.mjs`: syscall interruption/failure evidence, exact frozen-source conflicts and cleanup; `material_completion.mjs`: malformed/misnamed/shadowed/symlink repair recovery bytes and modes |
+
+Old APIs/generation/receipt success assertions are explicitly superseded, not pending product APIs. Original tests remain compiled and visible for provenance; these counterpart mappings are not claims that ignored tests ran. Lock-contention/ownership-aware behavior and connected all-writer cleanup remain their downstream gates. Do not convert refusal-only checks to simulated downstream successes.
+
 The harness's existing process-helper ignores are separate from this table.
 Local hosting verification cannot satisfy release/package/all-host or final
 combined acceptance.
@@ -88,7 +99,7 @@ combined acceptance.
 | `tests/cli_json.rs` | `storage_contention_is_distinct_and_does_not_hide_file_readiness` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
 | `tests/cli_json.rs` | `duplicate_worktree_selectors_refuse_storage_mutations_before_discovery` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
 | `tests/cli_json.rs` | `non_utf8_storage_mutation_arguments_report_not_published_before_discovery` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
-| `tests/cli_json.rs` | `human_expansion_reports_key_ids_destinations_and_existing_updates` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
+| `tests/cli_json.rs` | `human_expansion_reports_key_ids_destinations_and_existing_updates` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
 | `tests/context_execution.rs` | `named_rebind_remove_keeps_captured_ownership_and_workspace_across_restart` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |
 | `tests/context_execution.rs` | `workspace_reuse_rebind_unbind_and_cleanup_user_evidence` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |
 | `tests/context_execution.rs` | `session_scope_strict_inputs_and_corruption_never_become_empty_context` | [w-54de7594](../.work/items/54de759473154b008161327e9c961a81.md) |
@@ -135,10 +146,10 @@ combined acceptance.
 | `tests/handoffs.rs` | `derived_aggregate_receivers_resolve_without_changing_graph_edges` | [w-2cc1d6ac](../.work/items/2cc1d6acf22e4a48bbf9839998674264.md) |
 | `tests/handoffs.rs` | `retarget_to_done_receiver_and_prune_race_never_deletes_an_unresolved_receiver_set` | [w-2cc1d6ac](../.work/items/2cc1d6acf22e4a48bbf9839998674264.md) |
 | `tests/handoffs.rs` | `stdin_exact_body_malformed_envelopes_and_storage_recreation_are_visible` | [w-2cc1d6ac](../.work/items/2cc1d6acf22e4a48bbf9839998674264.md) |
-| `tests/mcp_protocol.rs` | `template_preview_matches_cli_and_publishes_nothing` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
+| `tests/mcp_protocol.rs` | `template_preview_matches_cli_and_publishes_nothing` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
 | `tests/mcp_protocol.rs` | `storage_mcp_lifecycle_and_warning_payloads_match_cli` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
 | `tests/mcp_protocol.rs` | `storage_mcp_validates_requests_before_selecting_a_checkout` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
-| `tests/mcp_protocol.rs` | `template_preview_reports_physical_fallback_warnings_through_cli_and_mcp` | [w-6bf6198a](../.work/items/6bf6198a34494a94a30a9ba53ed976a6.md) |
+| `tests/mcp_protocol.rs` | `template_preview_reports_physical_fallback_warnings_through_cli_and_mcp` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
 | `tests/run_execution.rs` | `rootless_planning_and_readonly_mixed_preview_through_cli_mcp` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
 | `tests/run_execution.rs` | `mixed_expansion_claimed_wisp_completion_and_derived_finish_survive_restart` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |
 | `tests/run_execution.rs` | `terminal_fixture_keeps_material_binding_and_uncommitted_worktree_state` | [w-45f7bb7d](../.work/items/45f7bb7d2c9a43ea993cb7dc8ac8e89d.md) |

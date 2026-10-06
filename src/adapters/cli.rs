@@ -12,6 +12,8 @@ use work::core::{
 
 pub(super) const OPERATIONS: &[&str] = &[
     "discover",
+    "init",
+    "status",
     "scope_list",
     "scope_inspect",
     "scope_host",
@@ -22,6 +24,9 @@ pub(super) const OPERATIONS: &[&str] = &[
     "item_diagnose",
     "item_ready",
     "item_update",
+    "item_close",
+    "item_reopen",
+    "item_repair",
     "relation_add",
     "relation_remove",
 ];
@@ -132,7 +137,15 @@ pub(super) fn call(name: &str, input: &Value) -> Result<Value> {
     wire::validate(definition, input)?;
     let mutation = matches!(
         name,
-        "scope_host" | "item_create" | "item_update" | "relation_add" | "relation_remove"
+        "init"
+            | "scope_host"
+            | "item_create"
+            | "item_update"
+            | "item_close"
+            | "item_reopen"
+            | "item_repair"
+            | "relation_add"
+            | "relation_remove"
     );
     if mutation && input["view"] == "physical" {
         return Err(Error::new(
@@ -167,6 +180,8 @@ pub(super) fn call(name: &str, input: &Value) -> Result<Value> {
         "scope_inspect" => ScopeOperations::new(p.clone(), input["view"] == "physical")
             .read(input["scope"].as_str())?,
         "scope_host" => ScopeOperations::new(p.clone(), false).host("host", input)?,
+        "init" => work::core::onboarding::init(&p, input)?,
+        "status" => work::core::onboarding::status(&p, input["view"] == "physical")?,
         _ => scope_items::call(&p, name, input)?,
     };
     let result = operation["output"]["$ref"]
@@ -204,7 +219,7 @@ fn text(s: &std::ffi::OsStr) -> Result<String> {
 }
 fn help() -> String {
     format!(
-        "Usage: work [--json] [--worktree PATH] COMMAND\nDelivered: discover; scope list|inspect|host; item create|list|inspect|diagnose|ready|update; relation add|remove; mcp.\nReads default to authoritative primary/scope routing. --view physical is read-only.\nHosting requires an externally prepared identical destination and --expected-inventory HASH from scope inspect.\nOnly the listed operation subset is implemented here. The complete beta.2 catalog, lifecycle and package gates are not claimed.\nitem COMMAND: material operations; create assigns a generated full ID. Ready reserves nothing and excludes claimed items.\nrelation add: parent is child to parent; depends_on is dependent to prerequisite; related and discovered_from are informational.\nmcp: MCP tools over stdio.\nF (selection): --scope S, --root ITEM, --run ID, repeated --label TEXT, --priority-max 0..4, --persistence material|wisp.\nM (metadata): --completion manual|children, --priority 0..4, --parent ITEM, repeated --label TEXT, --model TEXT, --thinking TEXT.\nC (clear): --clear-parent, --clear-labels, --clear-model, --clear-thinking.\nO (owner): --session SELECTOR [--claim ID], or --session-namespace TEXT --session-id TEXT --claim ID.\nZ (authorization): repeated --authorize JSON; cannot be combined with O.\n{}",
+        "Usage: work [--json] [--worktree PATH] COMMAND\nDelivered: discover; init; status; scope list|inspect|host; item create|list|inspect|diagnose|ready|update|close|reopen|repair; relation add|remove; mcp.\nReads default to authoritative primary/scope routing. --view physical is read-only.\nHosting requires an externally prepared identical destination and --expected-inventory HASH from scope inspect.\nInit prepares only the primary checkout, one standing root run and exact housekeeping ignores. Status is read-only infrastructure health, not item readiness or a running agent.\nIgnored recovery bytes may be needed; git clean -X can delete them. Inspect before cleanup.\nClose/reopen/repair support ordinary unclaimed material only. Ownership-aware completion/repair and attached handoffs are not delivered. Template operations, child runs, rotation and downstream lifecycles are not delivered.\nOnly the listed operation subset is implemented here. The complete beta.2 catalog, lifecycle and package gates are not claimed.\nitem COMMAND: material operations; create assigns a generated full ID. Ready reserves nothing and excludes claimed items.\nrelation add: parent is child to parent; depends_on is dependent to prerequisite; related and discovered_from are informational.\nmcp: MCP tools over stdio.\nF (selection): --scope S, --root ITEM, --run ID, repeated --label TEXT, --priority-max 0..4, --persistence material|wisp.\nM (metadata): --completion manual|children, --priority 0..4, --parent ITEM, repeated --label TEXT, --model TEXT, --thinking TEXT.\nC (clear): --clear-parent, --clear-labels, --clear-model, --clear-thinking.\nO (owner): --session SELECTOR [--claim ID], or --session-namespace TEXT --session-id TEXT --claim ID.\nZ (authorization): repeated --authorize JSON; cannot be combined with O.\n{}",
         OPERATIONS
             .iter()
             .filter(|n| **n != "discover")
@@ -272,21 +287,30 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
         return Ok(("discover".into(), a));
     }
     let noun = text(command)?;
-    let verb = text(
-        args.get(at + 1)
-            .ok_or_else(|| Error::new("usage", "missing subcommand"))?,
-    )?;
-    at += 2;
+    let top = matches!(noun.as_str(), "init" | "status");
+    let verb = if top {
+        String::new()
+    } else {
+        text(
+            args.get(at + 1)
+                .ok_or_else(|| Error::new("usage", "missing subcommand"))?,
+        )?
+    };
+    at += if top { 1 } else { 2 };
     if verb == "--help" || args.get(at).is_some_and(|s| s == "--help") {
         return Ok(("meta".into(), json!({"help":help()})));
     }
-    let mut name = format!("{noun}_{}", verb.replace('-', "_"));
+    let mut name = if top {
+        noun
+    } else {
+        format!("{noun}_{}", verb.replace('-', "_"))
+    };
     if !OPERATIONS.contains(&name.as_str()) {
         return Err(Error::new("usage", "unknown or undelivered command"));
     }
     let positional: &[&str] = match name.as_str() {
         "scope_inspect" | "scope_host" => &["scope"],
-        "item_inspect" | "item_update" => &["id"],
+        "item_inspect" | "item_update" | "item_close" | "item_reopen" | "item_repair" => &["id"],
         "relation_add" | "relation_remove" => &["kind", "source", "target"],
         _ => &[],
     };
@@ -303,6 +327,7 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
         .keys()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
+    let mut source_stdin = false;
     while at < args.len() {
         let flag = text(&args[at])?;
         at += 1;
@@ -312,6 +337,18 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
                 return Err(Error::new("usage", "duplicate raw"));
             }
             continue;
+        }
+        if flag == "--source" && name == "item_repair" {
+            if source_stdin || args.get(at).is_none_or(|v| v != "-") {
+                return Err(Error::new("usage", "repair requires one --source -"));
+            }
+            source_stdin = true;
+            at += 1;
+            a["raw_hex"] = json!("");
+            continue;
+        }
+        if flag == "--raw-hex" {
+            return Err(Error::new("usage", "repair source uses --source -"));
         }
         if matches!(flag.as_str(), "--session-namespace" | "--session-id") {
             if !singular.insert(flag.clone()) {
@@ -348,6 +385,7 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
                 true,
             ),
             "--authorize" => ("authorization", true),
+            "--handoff" => ("handoffs", true),
             "--all" => ("include_terminal", false),
             "--claim" => ("claim_id", false),
             "--continue" => ("continue_id", false),
@@ -393,7 +431,7 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
             at += 1;
             if field == "destination" {
                 json!(scopes::path(&absolute(raw)?))
-            } else if list && field == "authorization" {
+            } else if list && matches!(field, "authorization" | "handoffs") {
                 serde_json::from_str(&text(raw)?)
                     .map_err(|_| Error::new("invalid_argument", "invalid authorization JSON"))?
             } else if spec["type"] == "integer" {
@@ -427,6 +465,13 @@ fn request(args: &[OsString]) -> Result<(String, Value)> {
         .strip_prefix("#/$defs/")
         .unwrap();
     wire::validate(definition, &a)?;
+    if source_stdin {
+        let mut raw = Vec::new();
+        io::stdin()
+            .read_to_end(&mut raw)
+            .map_err(|e| Error::new("invalid_argument", e.to_string()))?;
+        a["raw_hex"] = json!(raw.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
     if let Some(destination) = a["destination"].as_str() {
         let canonical = std::fs::canonicalize(decode_path(destination)?).map_err(|e| {
             Error::new(

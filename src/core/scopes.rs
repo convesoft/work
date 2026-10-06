@@ -95,7 +95,7 @@ impl Capture {
         }
         Ok(())
     }
-    fn file(&mut self, p: &Path) -> Result<Option<Source>> {
+    pub(crate) fn file(&mut self, p: &Path) -> Result<Option<Source>> {
         let Some(parent) = p.parent() else {
             return Err(Error::new("unsafe_path", "missing parent").at(p));
         };
@@ -131,6 +131,15 @@ impl Capture {
         }
         Ok(())
     }
+    pub(crate) fn recheck_except_material(&self, root: &Path) -> Result<()> {
+        // The durable repair writer holds/checks this catalog itself while
+        // archiving exact sources. Keep the rest of the routing/graph fenced.
+        let catalog = root.join(".work/items");
+        let mut outside = self.clone();
+        outside.files.retain(|p, _| !p.starts_with(&catalog));
+        outside.dirs.remove(&catalog);
+        outside.recheck()
+    }
     pub(crate) fn compare_prelock(&self, fresh: &Capture) -> Result<()> {
         for (p, s) in &self.files {
             if fresh.files.get(p) != Some(s) {
@@ -154,6 +163,9 @@ impl Capture {
                         .filter(|n| {
                             !(p.file_name().is_some_and(|s| s == ".work")
                                 && n.as_os_str() == "operations.lock"
+                                || self.inventory.as_ref().is_some_and(|(project, _)| {
+                                    p == &project.git_common_dir.join("work-beta2")
+                                }) && n.as_os_str() == "coordination.lock"
                                 || self
                                     .inventory
                                     .as_ref()
@@ -243,6 +255,14 @@ impl Capture {
         Ok(child)
     }
     pub(crate) fn publish(&mut self, p: &Path, raw: &[u8]) -> Result<Option<PathBuf>> {
+        self.publish_named(p, raw, &format!(".stage-{}", new_id()?))
+    }
+    pub(crate) fn publish_named(
+        &mut self,
+        p: &Path,
+        raw: &[u8],
+        stage: &str,
+    ) -> Result<Option<PathBuf>> {
         self.recheck()?;
         let d = self.ensure(p.parent().unwrap())?;
         let old = self.files.get(p).cloned();
@@ -252,7 +272,7 @@ impl Capture {
                 p.file_name().unwrap().to_str().unwrap(),
                 raw,
                 old.as_ref(),
-                &format!(".stage-{}", new_id()?),
+                stage,
             )
             .map_err(|e| {
                 let e: Error = e.into();
@@ -818,28 +838,51 @@ impl View {
                 ));
             }
             if common.exists("work-beta2")? {
-                let dir = common.child("work-beta2")?;
-                v.capture.directory(&dir)?;
-                if dir.exists("coordination.lock")? {
-                    v.capture.file(&dir.path.join("coordination.lock"))?;
-                }
-                if dir.exists("relocations")? {
-                    let relocations = dir.child("relocations")?;
-                    v.capture.directory(&relocations)?;
-                    for name in visible(relocations.names()?) {
-                        let p = relocations.path.join(&name);
-                        let result = (|| -> Result<Value> {
-                            let s = v.capture.file(&p)?.unwrap();
-                            let x = wire::envelope("HostTransferProgress", &s.raw, &p)?;
-                            if name.to_str() != Some(&format!("{}.yaml", x["id"].as_str().unwrap()))
-                            {
-                                return Err(
-                                    Error::new("invalid_format", "progress ID mismatch").at(&p)
-                                );
-                            }
-                            Ok(x)
-                        })();
-                        match result {Ok(plan)=>v.pending.push(json!({"id":plan["id"],"kind":"host_transfer","path":path(&p),"step":plan["step"],"supported":plan["mode"]=="host"})),Err(e)=>{v.diagnostics.push(diagnostic(e.code,e.message,Some(&p),None));v.pending.push(json!({"id":null,"kind":"host_transfer","path":path(&p),"step":null,"supported":false}));}}
+                let dir = match common.child("work-beta2") {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        v.diagnostics.push(diagnostic(
+                            "coordination_unavailable",
+                            e.message,
+                            e.path.as_deref(),
+                            None,
+                        ));
+                        None
+                    }
+                };
+                if let Some(dir) = dir {
+                    v.capture.directory(&dir)?;
+                    if dir.exists("coordination.lock")?
+                        && let Err(e) = v.capture.file(&dir.path.join("coordination.lock"))
+                    {
+                        v.diagnostics.push(diagnostic(
+                            "coordination_unavailable",
+                            e.message,
+                            e.path.as_deref(),
+                            None,
+                        ));
+                    }
+                    if dir.exists("relocations")? {
+                        let relocations = dir.child("relocations")?;
+                        v.capture.directory(&relocations)?;
+                        for name in visible(relocations.names()?) {
+                            let p = relocations.path.join(&name);
+                            let result = (|| -> Result<Value> {
+                                let s = v.capture.file(&p)?.unwrap();
+                                let x = wire::envelope("HostTransferProgress", &s.raw, &p)?;
+                                if name.to_str()
+                                    != Some(&format!("{}.yaml", x["id"].as_str().unwrap()))
+                                {
+                                    return Err(Error::new(
+                                        "invalid_format",
+                                        "progress ID mismatch",
+                                    )
+                                    .at(&p));
+                                }
+                                Ok(x)
+                            })();
+                            match result {Ok(plan)=>v.pending.push(json!({"id":plan["id"],"kind":"host_transfer","path":path(&p),"step":plan["step"],"supported":plan["mode"]=="host"})),Err(e)=>{v.diagnostics.push(diagnostic(e.code,e.message,Some(&p),None));v.pending.push(json!({"id":null,"kind":"host_transfer","path":path(&p),"step":null,"supported":false}));}}
+                        }
                     }
                 }
             }
@@ -1591,6 +1634,12 @@ impl View {
             _ => Err(Error::new("ambiguous_id", "ambiguous scope/item prefix")),
         }
     }
+    pub(crate) fn material_tree_diagnostics(&self) -> Vec<Value> {
+        let mut projected = self.clone();
+        projected.diagnostics.clear();
+        projected.check_tree();
+        projected.diagnostics
+    }
     fn check_tree(&mut self) {
         // Unreachable local content at its ancestry-derived authority is not
         // evidence of absence: retained ownership must block material writes.
@@ -1691,7 +1740,11 @@ impl View {
         // evidence that execution/claim/session mutation workflows are delivered.
         let mut ids = BTreeSet::new();
         let mut claims = BTreeMap::<String, Vec<String>>::new();
-        for (sid, anchor) in &self.anchors {
+        let mut anchors = self.anchors.clone();
+        anchors
+            .entry("root".into())
+            .or_insert_with(|| json!({"execution":{"mode":"uninitialized"}}));
+        for (sid, anchor) in &anchors {
             let Some(host) = self.hosts[sid].as_ref() else {
                 continue;
             };
@@ -1733,7 +1786,7 @@ impl View {
                     .strip_prefix(&prefix)
                     .is_ok_and(|r| r.iter().next().is_some_and(|c| c == "progress"))
                 {
-                    self.pending.push(json!({"id":v["id"],"kind":path.parent().unwrap().file_name().unwrap().to_str(),"path":self::path(path),"step":v["step"],"supported":v.get("tree_change").is_some()}));
+                    self.pending.push(json!({"id":v["id"],"kind":path.parent().unwrap().file_name().unwrap().to_str(),"path":self::path(path),"step":v["step"],"supported":v.get("tree_change").is_some() || (sid == "root" && v.get("new_run_id").is_some() && path.parent().is_some_and(|p| p.file_name().is_some_and(|n| n == "start")))}));
                 }
                 if let Some(item) = v["item_id"].as_str() {
                     let ending =
@@ -1962,7 +2015,7 @@ impl View {
             }
             return out;
         }
-        for sid in self.anchors.keys() {
+        for sid in self.hosts.keys() {
             let Some(host) = self.hosts.get(sid).and_then(|h| h.as_ref()) else {
                 continue;
             };
@@ -1987,7 +2040,11 @@ impl View {
         let available = Directory::open(lock.parent().unwrap())
             .ok()
             .and_then(|d| d.read("coordination.lock").ok())
-            .is_some_and(|s| s.raw.is_empty());
+            .is_some_and(|s| s.raw.is_empty())
+            && !self
+                .diagnostics
+                .iter()
+                .any(|d| d["code"] == "coordination_unavailable");
         let root_run = self
             .anchors
             .get("root")
@@ -2350,7 +2407,14 @@ pub(crate) fn read_view(project: &Project, physical: bool) -> Result<(View, Opti
     let initial = View::load(project, false)?;
     let mut guard = match coordination(&initial, false, false) {
         Ok(g) => g,
-        Err(e) if e.code == "coordination_unavailable" => None,
+        Err(e)
+            if matches!(
+                e.code,
+                "coordination_unavailable" | "unsafe_path" | "permission_denied" | "io"
+            ) =>
+        {
+            None
+        }
         Err(e) => return Err(e),
     };
     #[cfg(test)]
@@ -2363,12 +2427,23 @@ pub(crate) fn read_view(project: &Project, physical: bool) -> Result<(View, Opti
                 v = View::load(project, false)?;
             }
             Ok(None) => {}
-            Err(e) if e.code == "coordination_unavailable" => v.diagnostics.push(diagnostic(
-                e.code,
-                e.message,
-                Some(&project.git_common_dir.join("work-beta2/coordination.lock")),
-                None,
-            )),
+            Err(e)
+                if matches!(
+                    e.code,
+                    "coordination_unavailable" | "unsafe_path" | "permission_denied" | "io"
+                ) =>
+            {
+                let fallback = project.git_common_dir.join("work-beta2/coordination.lock");
+                let d = diagnostic(
+                    "coordination_unavailable",
+                    e.message,
+                    Some(e.path.as_deref().unwrap_or(&fallback)),
+                    None,
+                );
+                if !v.diagnostics.contains(&d) {
+                    v.diagnostics.push(d);
+                }
+            }
             Err(e) => return Err(e),
         }
     }
