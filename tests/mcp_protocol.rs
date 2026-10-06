@@ -192,6 +192,14 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         "item_update",
         "relation_add",
         "relation_remove",
+        "run_start",
+        "run_inherit",
+        "run_inspect",
+        "run_list",
+        "template_list",
+        "template_validate",
+        "template_preview",
+        "template_expand",
     ];
     let mut advertised: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     advertised.sort_unstable();

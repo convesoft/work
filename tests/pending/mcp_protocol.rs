@@ -28,12 +28,20 @@ fn protocol_client_runs_durable_loop_and_matches_cli_results() {
         "item_repair",
         "relation_add",
         "relation_remove",
+        "run_start",
+        "run_inherit",
+        "run_inspect",
+        "run_list",
+        "template_list",
+        "template_validate",
+        "template_preview",
+        "template_expand",
     ];
     assert_eq!(tools.len(), expected.len());
     for name in expected {
         assert!(tools.iter().any(|t| t["name"] == name));
     }
-    for name in ["template_list", "claim_acquire", "run_start"] {
+    for name in ["run_rotate", "claim_acquire", "run_finalize", "run_attach"] {
         assert!(!tools.iter().any(|t| t["name"] == name));
     }
     assert_eq!(
