@@ -1,6 +1,6 @@
 # Repository onboarding and execution status
 
-This is accepted beta.2 product knowledge, not evidence that a runtime check passed. The bounded [local-source initialization guide](using-beta2-initialization.md) documents the issue-branch implementation; verified scope integration remains a separate gate. The [wire specification](beta2-wire.mara.md) and [scope model](scopes.mara.md) define the shared envelopes and authority model. Existing beta.1 usage remains documented separately until the replacement runtime is delivered.
+This is accepted beta.2 product knowledge, not evidence that a runtime check passed. The bounded [local-source initialization guide](using-beta2-initialization.md) documents the bounded implementation, now independently reviewed and verified in the local scope; downstream/combined/package acceptance remains separate. The [wire specification](beta2-wire.mara.md) and [scope model](scopes.mara.md) define the shared envelopes and authority model. Existing beta.1 usage remains documented separately until the replacement runtime is delivered.
 
 :::mara requirement REQ-REPOSITORY-ONBOARDING
 :mid: 01M46GE66T40FZ30RRCSX9S21R
