@@ -1,4 +1,4 @@
-//! Frozen parent-local reference maintenance for material reparenting.
+//! Frozen parent-local reference maintenance for authored item reparenting.
 use super::coordination::{
     ExecutionError as Error, ExecutionResult as Result, new_id, now_timestamp, yaml_bytes,
 };
@@ -188,9 +188,8 @@ pub(crate) fn publish(
     let sid = v.nearest(Some(&id));
     let host = old
         .path
-        .parent()
-        .unwrap()
-        .parent()
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == ".work"))
         .unwrap()
         .parent()
         .unwrap()
@@ -475,9 +474,29 @@ pub(crate) fn publish(
     known["tree_changes"] = json!([{"item_id":id,"old_parent_scope_id":plan["tree_change"]["old_parent_scope_id"],"new_parent_scope_id":plan["tree_change"]["new_parent_scope_id"],"step":phase(step)}]);
     let op = plan["id"].as_str().unwrap().to_owned();
     let mut recovery = None;
+    let wisp_stage = format!(".stage-{op}-wisp");
+    let wisp = v.is_wisp(old);
     let result = (|| -> Result<Value> {
         if !capture.files.contains_key(&progress) {
-            capture.publish(&progress, &yaml_bytes(&plan))?;
+            if wisp {
+                super::scope_publication::save(
+                    &mut capture,
+                    &progress,
+                    &yaml_bytes(&plan),
+                    &format!(".stage-{op}-tree-intent"),
+                    &mut known,
+                    None,
+                    &|| {
+                        writer.verify()?;
+                        for g in &others {
+                            g.verify()?;
+                        }
+                        Ok(())
+                    },
+                )?;
+            } else {
+                capture.publish(&progress, &yaml_bytes(&plan))?;
+            }
         }
         for (i, (p, _, after)) in steps.iter().enumerate().skip(step) {
             for g in &others {
@@ -487,7 +506,23 @@ pub(crate) fn publish(
             capture.recheck()?;
             if capture.files.get(p).map(|s| s.raw.as_slice()) != after.as_deref() {
                 let exists = capture.files.contains_key(p);
-                if p == &old.path {
+                if p == &old.path && wisp {
+                    super::scope_publication::save_resuming(
+                        &mut capture,
+                        p,
+                        raw,
+                        &wisp_stage,
+                        &mut known,
+                        Some(&id),
+                        &|| {
+                            writer.verify()?;
+                            for g in &others {
+                                g.verify()?;
+                            }
+                            Ok(())
+                        },
+                    )?;
+                } else if p == &old.path {
                     recovery = writer.publish_raw_guarded(&id, raw, Some(old), || {
                         capture
                             .recheck()
@@ -499,11 +534,29 @@ pub(crate) fn publish(
                         .push(json!({"id":id,"path":path(p)}));
                     capture.advance(p, Some(raw))?;
                 } else if let Some(raw) = after {
-                    capture.publish(p, raw)?;
+                    if wisp {
+                        super::scope_publication::save_resuming(
+                            &mut capture,
+                            p,
+                            raw,
+                            &format!(".stage-{op}-tree-file-{i}"),
+                            &mut known,
+                            None,
+                            &|| {
+                                writer.verify()?;
+                                for g in &others {
+                                    g.verify()?;
+                                }
+                                Ok(())
+                            },
+                        )?;
+                    } else {
+                        capture.publish(p, raw)?;
+                    }
                 } else {
                     capture.delete(p)?;
                 }
-                if p != &old.path {
+                if p != &old.path && (!wisp || after.is_none()) {
                     known[if after.is_none() {
                         "deleted"
                     } else if exists {
@@ -524,15 +577,103 @@ pub(crate) fn publish(
                 super::storage::files::inject("tree_after_material", p)
                     .map_err(|e| Error::new("io", e.to_string()))?;
             }
-            capture.publish(&progress, &yaml_bytes(&plan))?;
+            if wisp {
+                super::scope_publication::save_resuming(
+                    &mut capture,
+                    &progress,
+                    &yaml_bytes(&plan),
+                    &format!(".stage-{op}-tree-step-{i}"),
+                    &mut known,
+                    None,
+                    &|| {
+                        writer.verify()?;
+                        for g in &others {
+                            g.verify()?;
+                        }
+                        Ok(())
+                    },
+                )?;
+            } else {
+                capture.publish(&progress, &yaml_bytes(&plan))?;
+            }
         }
         capture.delete(&progress)?;
+        if wisp {
+            super::scope_publication::known(&mut known, "deleted", &progress, None);
+        }
         let final_view = View::load(&v.project, false)?;
         final_view.require_healthy()?;
+        if wisp {
+            super::scope_runs::require_current_wisp(
+                &final_view,
+                final_view.store.resolve(&id).unwrap(),
+            )?;
+            super::scope_publication::sync(&capture, &old.path)?;
+            for (i, (p, before, raw)) in steps.iter().enumerate() {
+                if p != &old.path && raw.is_some() {
+                    super::scope_publication::sync(&capture, p)?;
+                    super::scope_publication::cleanup(
+                        &capture,
+                        &p.parent()
+                            .unwrap()
+                            .join(format!(".stage-{op}-tree-file-{i}")),
+                        before,
+                        &|| {
+                            writer.verify()?;
+                            for g in &others {
+                                g.verify()?;
+                            }
+                            Ok(())
+                        },
+                    )?;
+                }
+            }
+            for i in 0..steps.len() {
+                let mut prior = plan.clone();
+                prior["step"] = json!(i);
+                prior["tree_change"]["step"] = json!(i);
+                super::scope_publication::cleanup(
+                    &capture,
+                    &progress
+                        .parent()
+                        .unwrap()
+                        .join(format!(".stage-{op}-tree-step-{i}")),
+                    &json!({"exists":true,"sha256":hash(&yaml_bytes(&prior))}),
+                    &|| {
+                        writer.verify()?;
+                        for g in &others {
+                            g.verify()?;
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
+            super::scope_publication::cleanup(
+                &capture,
+                &old.path.parent().unwrap().join(&wisp_stage),
+                &json!({"exists":true,"sha256":plan["tree_change"]["item_before"]}),
+                &|| {
+                    writer.verify()?;
+                    for g in &others {
+                        g.verify()?;
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        capture.recheck()?;
+        final_view.capture.recheck()?;
+        writer.verify()?;
+        for g in &others {
+            g.verify()?;
+        }
         known["tree_changes"] = json!([{"item_id":id,"old_parent_scope_id":plan["tree_change"]["old_parent_scope_id"],"new_parent_scope_id":plan["tree_change"]["new_parent_scope_id"],"step":3}]);
         Ok(final_view.wrap(json!({"item":super::scope_items::item(&final_view,&id,recovery.as_deref())?,"changed":true,"partial":known})))
     })();
     result.map_err(|mut e| {
+        if wisp {
+            e = super::scope_publication::attempted(e, &known, Some(&old.path));
+        }
         if let Some(p) = &recovery {
             e.details["previous_source_path"] = json!(path(p));
         }

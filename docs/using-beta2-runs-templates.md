@@ -23,7 +23,7 @@ work status
 work run start ITEM --continue OPERATION_ID
 ```
 
-Continuation checks the frozen source snapshots, original run identity and complete reference target set. Completed progress has no permanent retry receipt. Do not repeat a failed multi-file operation blindly.
+Continuation checks the frozen source snapshots, original run identity and complete reference target set. Complete operation-owned staging bytes are reconciled only when they exactly match the frozen next publication. Edited, incomplete or unknown stages remain conflicts with recovery evidence. Completed progress has no permanent retry receipt. Do not repeat a failed multi-file operation blindly.
 
 ## Selected definitions, authoritative destinations
 
@@ -42,7 +42,7 @@ Repeated `--param NAME=TEXT` and `--existing NAME=FULL_ID` split only at the fir
 
 Material-only preview/expansion works before execution initialization, including a fresh template-only clone. Empty list reads do not bootstrap anything. Preview writes nothing and allocates no permanent IDs. With no active execution target it can show symbolic wisps with `destination:null` and `placement_validated:false`. Physical preview is read-only, nonauthoritative and does not promise executable placement.
 
-Material files follow prospective ancestry and the nearest authoritative host. Wisps go to the one owning run home, even when a hosting-only child uses another checkout. A material/wisp mixture is validated against the complete graph, all destinations and current ownership before publication. Claims authorize exact existing source rewrites; context changes cannot move current ownership or current wisps between runs.
+Material files follow prospective ancestry and the nearest authoritative host. Wisps go to the one owning run home, even when a hosting-only child uses another checkout. A material/wisp mixture is validated against the complete graph, all destinations and current ownership before publication. Claims authorize exact existing source rewrites; context changes cannot move current ownership or current wisps between runs. Same-run wisp reparenting preserves its actual run-home path and maintains any descendant stored-scope references through the existing frozen tree operation. It does not transfer surviving material sources to another host.
 
 ## Per-file publication and recovery
 

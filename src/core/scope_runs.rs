@@ -162,6 +162,22 @@ pub(crate) fn run_view(v: &View, rid: &str) -> Result<Value> {
 pub(crate) fn require_current_wisp(v: &View, f: &ItemFile) -> Result<()> {
     let rid = owner(f).ok_or_else(|| Error::new("invalid_argument", "not a wisp"))?;
     active(v, rid)?;
+    require_wisp_home(v, f)
+}
+/// Same-home checks during a validated frozen tree continuation, which is pending by definition.
+pub(crate) fn require_wisp_home(v: &View, f: &ItemFile) -> Result<()> {
+    let rid = owner(f).ok_or_else(|| Error::new("invalid_argument", "not a wisp"))?;
+    let (_, m, sid) = manifest(v, rid)?;
+    if m["phase"] != "active"
+        || v.anchors
+            .get(&sid)
+            .is_none_or(|a| a["execution"]["run_id"] != rid)
+    {
+        return Err(Error::new(
+            "run_not_current",
+            "wisp owner is not the current active round",
+        ));
+    }
     if v.effective_run(&f.header.as_ref().unwrap().id).0.as_deref() != Some(rid) {
         return Err(Error::new(
             "wisp_run_mismatch",
@@ -609,7 +625,7 @@ pub fn start(project: &Project, a: &Value) -> Result<Value> {
             verify(&fresh, &plan, &home, &progress)?;
             last = Some(p.clone());
             if let Some(raw) = raw {
-                publication::save(
+                publication::save_resuming(
                     &mut v.capture,
                     p,
                     raw,
@@ -639,7 +655,7 @@ pub fn start(project: &Project, a: &Value) -> Result<Value> {
                 publication::known(&mut effects, "deleted", p, None);
             }
             plan["step"] = json!(i + 1);
-            publication::save(
+            publication::save_resuming(
                 &mut v.capture,
                 &progress,
                 &yaml_bytes(&plan),

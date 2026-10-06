@@ -105,6 +105,34 @@ pub(crate) fn merge(mut e: Error, effects: &Value) -> Error {
     e.details["partial"] = all;
     e
 }
+/// Only frozen operation callers may reconcile their exact planned staging bytes.
+/// Ordinary/template publication never gains stage-based replay or deduplication.
+pub(crate) fn save_resuming(
+    c: &mut Capture,
+    p: &Path,
+    raw: &[u8],
+    stage: &str,
+    effects: &mut Value,
+    id: Option<&str>,
+    fence: &impl Fn() -> Result<()>,
+) -> Result<()> {
+    if c.files.get(p).is_some_and(|s| s.raw == raw) {
+        return Ok(());
+    }
+    ensure(c, p.parent().unwrap(), effects)?;
+    c.recheck()?;
+    fence()?;
+    let directory = Directory::open(p.parent().unwrap())?;
+    if directory.optional(stage)?.is_some() {
+        cleanup(
+            c,
+            &directory.path.join(stage),
+            &json!({"exists":true,"sha256":hash(raw)}),
+            fence,
+        )?;
+    }
+    save(c, p, raw, stage, effects, id, fence)
+}
 /// Stages are retained until the caller has verified its relevant graph/context.
 #[allow(clippy::result_large_err)] // Shared descriptor publication preserves structured storage evidence.
 pub(crate) fn save(
@@ -178,7 +206,7 @@ pub(crate) fn cleanup(
         if expected["exists"] != true || expected["sha256"] != hash(&s.raw) {
             return Err(Error::new(
                 "conflict",
-                "artifact differs from the frozen displaced source",
+                "artifact differs from the frozen expected bytes",
             )
             .at(p));
         }

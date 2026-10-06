@@ -1014,7 +1014,11 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
         )
     };
     if let Some(f) = old.as_ref().filter(|f| v.is_wisp(f)) {
-        super::scope_runs::require_current_wisp(&v, f)?;
+        if continuation.is_some() {
+            super::scope_runs::require_wisp_home(&v, f)?;
+        } else {
+            super::scope_runs::require_current_wisp(&v, f)?;
+        }
     }
     let mut h = if let Some(f) = &old {
         f.header.clone().unwrap()
@@ -1120,9 +1124,6 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
     let mut locked = View::load(project, false)?;
     v.capture.compare_prelock(&locked.capture)?;
     guard.verify()?;
-    if old.as_ref().is_some_and(|f| v.is_wisp(f)) {
-        return super::scope_runs::edit_wisp(project, &locked, old.as_ref().unwrap(), &raw, name);
-    }
     if !tree_references.is_empty() || continuation.is_some() {
         return super::scope_tree::publish(
             &locked,
@@ -1132,6 +1133,9 @@ pub fn call(project: &super::project::Project, name: &str, a: &Value) -> Result<
             name,
             continuation,
         );
+    }
+    if old.as_ref().is_some_and(|f| v.is_wisp(f)) {
+        return super::scope_runs::edit_wisp(project, &locked, old.as_ref().unwrap(), &raw, name);
     }
     locked.require_healthy()?;
     if creating {
